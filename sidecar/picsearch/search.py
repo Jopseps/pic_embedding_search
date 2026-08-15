@@ -1,20 +1,25 @@
-"""Search: SQL prefilter → vector scan → (step 8) FTS5 → RRF fusion.
+"""Search: SQL prefilter → vector scan + FTS5 → RRF fusion.
 
 Design notes that are decisions, not accidents:
 
 * All vectors for the active model live in one contiguous `(N, dim)` float32
   matrix. `matrix @ query_vec` is the entire vector search — at a few thousand
   images that is well under 10 ms, and FAISS/Qdrant would be unjustified.
-* Metadata filters run in SQL **first** and produce a candidate id set; the
-  vector scan is then restricted to it.
+* Metadata filters run in SQL **first** and produce a candidate id set. Both
+  legs are restricted to it — the text leg too, or folder/type/date filters
+  silently stop applying to OCR matches.
 * Hybrid fusion is Reciprocal Rank Fusion, never a weighted sum of scores.
   Cosine lands around 0.20-0.35 and BM25 around 0-20; any blend of the two is
   noise. `score = Σ 1/(60 + rank_i)`.
+* A user's query is never FTS5 syntax. Every token is quoted, and a MATCH that
+  SQLite still rejects degrades to vector-only rather than to a 500.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import sqlite3
 import threading
 import time
 from collections.abc import Iterable, Sequence
@@ -29,6 +34,15 @@ log = logging.getLogger(__name__)
 
 RRF_K = 60
 DEFAULT_LIMIT = 200
+
+# How deep the text leg goes. BM25 past a few hundred rows is noise, and RRF
+# weights rank 500 at 1/560 — it cannot move anything.
+FTS_DEPTH = 500
+# Words of context around the match in the returned snippet.
+SNIPPET_TOKENS = 12
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 32766, but a candidate set that
+# large is better filtered in Python than bound one id at a time.
+MAX_SQL_PARAMS = 900
 
 DATE_PRESET_DAYS = {"today": 1, "week": 7, "month": 30, "year": 365}
 LARGE_EDGE = 2500
@@ -252,6 +266,78 @@ def candidate_ids(store: Store, params: SearchParams) -> set[int] | None:
 
 
 # ---------------------------------------------------------------------------
+# Text leg (FTS5 over OCR)
+# ---------------------------------------------------------------------------
+
+def fts_match_query(query: str) -> str | None:
+    """Turn a user query into an FTS5 MATCH expression, or None if there is none.
+
+    Splitting on non-word characters and quoting each token means FTS5's
+    operator syntax — `*`, `-`, `^`, `:`, `NEAR`, `OR`, a stray `"` — can never
+    reach the parser as syntax. `\\w` is Unicode-aware, so Turkish words survive
+    intact. Whitespace between quoted terms is implicit AND, which is what
+    "build failed" should mean.
+    """
+    tokens = [t for t in re.split(r"[^\w'’]+", query, flags=re.UNICODE) if t]
+    if(not tokens):
+        return None
+    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+
+
+def fts_search(
+    store: Store,
+    query: str,
+    candidates: set[int] | None = None,
+    limit: int = FTS_DEPTH,
+) -> tuple[list[int], dict[int, str]]:
+    """BM25-ranked OCR matches: (ranked ids, id -> snippet)."""
+    match = fts_match_query(query)
+    if(match is None):
+        return [], {}
+
+    sql = (
+        "SELECT ocr_fts.rowid AS id,"
+        f" snippet(ocr_fts, 0, '', '', '…', {SNIPPET_TOKENS}) AS snip"
+        " FROM ocr_fts WHERE ocr_fts MATCH ?"
+    )
+    args: list = [match]
+    post_filter: set[int] | None = None
+
+    if(candidates is not None):
+        if(not candidates):
+            return [], {}
+        if(len(candidates) <= MAX_SQL_PARAMS):
+            marks = ",".join("?" * len(candidates))
+            sql += f" AND ocr_fts.rowid IN ({marks})"
+            args.extend(int(i) for i in candidates)
+        else:
+            post_filter = candidates
+
+    # bm25() is negative and *more* negative is better, so ascending is
+    # best-first. A DESC here would rank the worst matches at the top.
+    sql += " ORDER BY bm25(ocr_fts) LIMIT ?"
+    args.append(limit)
+
+    try:
+        rows = list(store.conn().execute(sql, args))
+    except sqlite3.OperationalError as exc:
+        # An unparseable MATCH is a bad query, not a broken server: the vector
+        # leg still answers it.
+        log.warning("FTS query %r rejected: %s", match, exc)
+        return [], {}
+
+    ids: list[int] = []
+    snippets: dict[int, str] = {}
+    for row in rows:
+        image_id = int(row["id"])
+        if(post_filter is not None and image_id not in post_filter):
+            continue
+        ids.append(image_id)
+        snippets[image_id] = row["snip"]
+    return ids, snippets
+
+
+# ---------------------------------------------------------------------------
 # Fusion
 # ---------------------------------------------------------------------------
 
@@ -286,6 +372,7 @@ def hydrate(
     store: Store,
     ids: Sequence[int],
     scores: dict[int, float] | None = None,
+    snippets: dict[int, str] | None = None,
 ) -> list[dict]:
     """Turn ids into wire-shape dicts, preserving the order of `ids`."""
     if(not ids):
@@ -295,12 +382,10 @@ def hydrate(
         int(r["id"]): r
         for r in store.conn().execute(f"SELECT * FROM images WHERE id IN ({marks})", tuple(ids))
     }
-    ocr_ids = {
-        int(r["image_id"])
-        for r in store.conn().execute(
-            f"SELECT image_id FROM ocr_text WHERE image_id IN ({marks})", tuple(ids)
-        )
-    }
+    # Non-empty rows only: an empty one means "OCR ran, found nothing" and must
+    # not light up the TEXT badge. The lightbox wants the text while browsing
+    # too, so this runs for every response, not just for text queries.
+    ocr = store.ocr_map(ids)
     dupes = dupe_sha_set(store)
     collections = store.collections_for(ids)
 
@@ -320,11 +405,11 @@ def hydrate(
             "mime": row["mime"],
             "takenAt": row["taken_at"],
             "isScreenshot": bool(row["is_screenshot"]),
-            "hasOcr": int(row["id"]) in ocr_ids,
-            # Filled in at step 8. Present-and-null, never absent: the frontend
-            # distinguishes "no OCR" from "field missing".
-            "ocrText": None,
-            "snippet": None,
+            "hasOcr": int(row["id"]) in ocr,
+            # Present-and-null, never absent: the frontend distinguishes "no
+            # OCR" from "field missing", and a blanket exclude_none breaks it.
+            "ocrText": ocr.get(int(row["id"])),
+            "snippet": (snippets or {}).get(int(row["id"])),
             "isDupe": row["sha256"] in dupes,
             "collections": collections.get(int(row["id"]), []),
         }
@@ -354,11 +439,16 @@ class Searcher:
             ids, total = self._browse(params, candidates)
             items = hydrate(self.store, ids)
         else:
-            ranked = self._vector_search(query, candidates)
+            # Two ranked lists, fused by rank. The text leg is usually short or
+            # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
+            # visual match no matter what their raw scores look like.
+            vector_ranked = self._vector_search(query, candidates)
+            text_ranked, snippets = fts_search(self.store, query, candidates)
+            ranked = rrf_merge([[i for i, _ in vector_ranked], text_ranked])
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
-            items = hydrate(self.store, [i for i, _ in window], scores)
+            items = hydrate(self.store, [i for i, _ in window], scores, snippets)
 
         consumed = params.offset + len(items)
         cursor = str(consumed) if consumed < total else None

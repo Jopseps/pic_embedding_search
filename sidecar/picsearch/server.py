@@ -19,8 +19,9 @@ the child on exit; this thread is what survives `pkill -9` on Rust.
 
 The response shape is frozen and mirrors `src/lib/types.ts`, which is real
 typechecked code and therefore the authority. `search.hydrate` emits it
-directly — `ocrText`/`snippet` are present-and-null until step 8, and `score`
-is *absent* (not null) when browsing, because types.ts declares it optional.
+directly — `ocrText`/`snippet` are present-and-**null** when an image has no
+OCR text, and `score` is *absent* (not null) when browsing, because types.ts
+declares it optional.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from . import config, paths
+from . import config, ocr, paths
 from .embed import Embedder, spec_for
 from .index import Indexer
 from .search import DEFAULT_LIMIT, Searcher, SearchParams, VectorIndex, hydrate
@@ -156,9 +157,13 @@ class AppState:
         self.embedder = embedder if embedder is not None else Embedder(self.model_id)
         self.vectors = VectorIndex.load(self.store, self.model_id, self.spec.dim)
         self.events = EventBus()
+        # resolve() never raises: an OCR engine that is not installed degrades
+        # to no OCR with a warning, rather than a sidecar that will not boot.
+        self.ocr = ocr.resolve(self.settings.get("ocrEngineId"), self.settings.get("ocrLangs"))
         self.indexer = Indexer(
             self.store,
             self.embedder,
+            ocr=self.ocr,
             on_event=self.events.publish,
             on_vector=self._on_vector,
         )
@@ -178,6 +183,19 @@ class AppState:
         self.spec = spec
         self.vectors = VectorIndex.load(self.store, model_id, spec.dim)
         self.searcher.vectors = self.vectors
+
+    def switch_ocr(self, engine_id: str | None, langs: Any | None) -> bool:
+        """Rebuild the OCR engine. True when the effective engine changed.
+
+        Only the *effective* identity matters: asking for tesseract `tur+eng` on
+        a machine without `tur.traineddata` resolves to `eng` both times, and
+        re-reading the library would achieve nothing.
+        """
+        before = (self.ocr.id, self.ocr.langs_key) if self.ocr is not None else None
+        self.ocr = ocr.resolve(engine_id, langs)
+        after = (self.ocr.id, self.ocr.langs_key) if self.ocr is not None else None
+        self.indexer.set_ocr(self.ocr)
+        return before != after
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +261,8 @@ def create_app(state: AppState) -> FastAPI:
             "dim": state.spec.dim,
             "images": state.store.image_count(),
             "vectors": state.vectors.size,
+            "ocrEngine": None if state.ocr is None else state.ocr.id,
+            "ocrLangs": None if state.ocr is None else state.ocr.langs_key,
             "indexing": state.indexer.status.as_wire(),
             "uptimeSec": round(time.time() - state.started, 1),
         }
@@ -277,9 +297,7 @@ def create_app(state: AppState) -> FastAPI:
         items = hydrate(state.store, [image_id])
         if(not items):
             raise HTTPException(status_code=404, detail="no such image")
-        item = items[0]
-        item["ocrText"] = state.store.get_ocr(image_id)
-        return item
+        return items[0]
 
     @app.delete("/images", dependencies=[guard])
     def delete_images(body: IdsRequest) -> dict:
@@ -376,9 +394,19 @@ def create_app(state: AppState) -> FastAPI:
                 spec_for(wanted)
             except KeyError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        touches_ocr = "ocrEngineId" in incoming or "ocrLangs" in incoming
         state.settings = config.save(incoming)
         if(wanted is not None and wanted != state.model_id):
             state.switch_model(wanted)
+        if(touches_ocr):
+            changed = state.switch_ocr(
+                state.settings.get("ocrEngineId"), state.settings.get("ocrLangs")
+            )
+            # Changing the engine in Settings has to *do* something. Screenshots
+            # whose stored (engine, langs) no longer match are re-read in the
+            # background; unchanged ones cost one query.
+            if(changed):
+                state.indexer.start_ocr_backfill()
         return {**state.settings, "modelId": state.model_id}
 
     # -- storage -----------------------------------------------------------

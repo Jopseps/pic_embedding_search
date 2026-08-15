@@ -16,7 +16,9 @@ log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, Any] = {
     "modelId": "siglip2-so400m-patch14-384",
-    "ocrEngineId": "rapidocr",
+    # tesseract, not rapidocr: it is the only engine that speaks `tur+eng`, and
+    # its binary is a system package rather than a 450 MB wheel. See ocr.py.
+    "ocrEngineId": "tesseract",
     "ocrLangs": ["en", "tr"],
     "theme": "dark",
     "density": 1,
