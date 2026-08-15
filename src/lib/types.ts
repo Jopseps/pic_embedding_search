@@ -23,7 +23,10 @@ export interface Photo{
     snippet: string | null;
     /** RRF fusion score — ~0.016 for a rank-1 hit, not a cosine. Absent when browsing. */
     score?: number;
+    /** In a pHash near-duplicate group of two or more. Never a cosine result —
+     *  see `dupes.py` for why those are different questions. */
     isDupe: boolean;
+    /** Collection **ids**, not names, so a rename cannot drop membership. */
     collections: string[];
 }
 
@@ -112,9 +115,16 @@ export interface Collection{
     name: string;
 }
 
+/**
+ * The whole search, not just the words. `filters` and `view` ride along so
+ * running a saved search restores what was on screen when it was saved.
+ */
 export interface SavedSearch{
     id: string;
     query: string;
+    view: LibraryView | null;
+    collection: string | null;
+    filters: Filters;
 }
 
 export type ThemePref = "dark" | "light" | "system";

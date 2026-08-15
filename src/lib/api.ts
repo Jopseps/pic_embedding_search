@@ -1,5 +1,8 @@
 import type {
+    Collection,
+    Filters,
     Photo,
+    SavedSearch,
     SearchQuery,
     SearchResponse,
     SidecarEvent,
@@ -26,6 +29,14 @@ export interface PhotoSearchApi{
     addFolder(): Promise<WatchedFolder | null>;
     removeFolder(path: string): Promise<void>;
     setFolderRecursive(path: string, recursive: boolean): Promise<void>;
+    listCollections(): Promise<Collection[]>;
+    createCollection(name: string): Promise<Collection>;
+    deleteCollection(id: string): Promise<void>;
+    addToCollection(id: string, imageIds: number[]): Promise<void>;
+    removeFromCollection(id: string, imageIds: number[]): Promise<void>;
+    listSavedSearches(): Promise<SavedSearch[]>;
+    saveSearch(query: SearchQuery): Promise<SavedSearch>;
+    deleteSavedSearch(id: string): Promise<void>;
     storage(): Promise<StorageUsage>;
     clearThumbnailCache(): Promise<void>;
     revealInFiles(ids: number[]): Promise<void>;
@@ -51,6 +62,8 @@ function matches(item: MockPhoto, query: string): boolean{
     ].join(" ").toLowerCase();
     return words.every((w) => hay.includes(w));
 }
+
+const NO_FILTERS: Filters = { datePreset: null, folders: [], types: [], dims: null };
 
 const DAY_MS = 86_400_000;
 const DATE_PRESET_DAYS: Record<string, number> = {
@@ -108,6 +121,19 @@ export class MockApi implements PhotoSearchApi{
         { path: "~/Downloads/Screenshots", count: 432, recursive: false },
     ];
     private cacheGb = 1.4;
+    // Ids match the ones `mockData.ts` stamps onto `Photo.collections`, so the
+    // fixture library starts with two collections that actually have members.
+    private collections: Collection[] = [
+        { id: "refs", name: "Refs" },
+        { id: "memes", name: "Memes" },
+    ];
+    private saved: SavedSearch[] = [
+        { id: "s1", query: "dark code editor", view: null, collection: null, filters: NO_FILTERS },
+        { id: "s2", query: "receipts", view: null, collection: null, filters: NO_FILTERS },
+        { id: "s3", query: "masa", view: null, collection: null, filters: NO_FILTERS },
+    ];
+    private nextCollectionId = 1;
+    private nextSavedId = 4;
 
     async search(query: SearchQuery): Promise<SearchResponse>{
         const started = performance.now();
@@ -187,6 +213,67 @@ export class MockApi implements PhotoSearchApi{
 
     async setFolderRecursive(path: string, recursive: boolean): Promise<void>{
         this.folders = this.folders.map((f) => f.path === path ? { ...f, recursive } : f);
+    }
+
+    async listCollections(): Promise<Collection[]>{
+        return this.collections;
+    }
+
+    async createCollection(name: string): Promise<Collection>{
+        const existing = this.collections.find((c) => c.name === name);
+        if(existing !== undefined){
+            return existing;   // the sidecar's name column is UNIQUE too
+        }
+        const made = { id: `c${this.nextCollectionId++}`, name };
+        this.collections = [...this.collections, made];
+        return made;
+    }
+
+    async deleteCollection(id: string): Promise<void>{
+        this.collections = this.collections.filter((c) => c.id !== id);
+        this.items = this.items.map((it) => (
+            it.collections.includes(id)
+                ? { ...it, collections: it.collections.filter((c) => c !== id) }
+                : it
+        ));
+    }
+
+    async addToCollection(id: string, imageIds: number[]): Promise<void>{
+        const add = new Set(imageIds);
+        this.items = this.items.map((it) => (
+            add.has(it.id) && !it.collections.includes(id)
+                ? { ...it, collections: [...it.collections, id] }
+                : it
+        ));
+    }
+
+    async removeFromCollection(id: string, imageIds: number[]): Promise<void>{
+        const drop = new Set(imageIds);
+        this.items = this.items.map((it) => (
+            drop.has(it.id)
+                ? { ...it, collections: it.collections.filter((c) => c !== id) }
+                : it
+        ));
+    }
+
+    async listSavedSearches(): Promise<SavedSearch[]>{
+        return this.saved;
+    }
+
+    async saveSearch(query: SearchQuery): Promise<SavedSearch>{
+        const made: SavedSearch = {
+            id: `s${this.nextSavedId++}`,
+            query: query.q,
+            view: query.view,
+            collection: query.collection,
+            filters: query.filters,
+        };
+        this.saved = [...this.saved, made];
+        return made;
+    }
+
+    async deleteSavedSearch(id: string): Promise<void>{
+        this.saved = this.saved.filter((s) => s.id !== id);
     }
 
     async storage(): Promise<StorageUsage>{
@@ -317,6 +404,57 @@ export class HttpApi implements PhotoSearchApi{
             method: "PATCH",
             body: JSON.stringify({ path, recursive }),
         });
+    }
+
+    listCollections(): Promise<Collection[]>{
+        return this.req<Collection[]>("/collections");
+    }
+
+    createCollection(name: string): Promise<Collection>{
+        return this.req<Collection>("/collections", {
+            method: "POST",
+            body: JSON.stringify({ name }),
+        });
+    }
+
+    async deleteCollection(id: string): Promise<void>{
+        await this.req(`/collections/${encodeURIComponent(id)}`, { method: "DELETE" });
+    }
+
+    async addToCollection(id: string, imageIds: number[]): Promise<void>{
+        await this.req(`/collections/${encodeURIComponent(id)}/items`, {
+            method: "POST",
+            body: JSON.stringify({ ids: imageIds }),
+        });
+    }
+
+    async removeFromCollection(id: string, imageIds: number[]): Promise<void>{
+        await this.req(`/collections/${encodeURIComponent(id)}/items`, {
+            method: "DELETE",
+            body: JSON.stringify({ ids: imageIds }),
+        });
+    }
+
+    listSavedSearches(): Promise<SavedSearch[]>{
+        return this.req<SavedSearch[]>("/searches");
+    }
+
+    /** The whole query is posted, not just the text — the sidecar stores it as
+     *  one JSON blob so running it later restores the filters too. */
+    saveSearch(query: SearchQuery): Promise<SavedSearch>{
+        return this.req<SavedSearch>("/searches", {
+            method: "POST",
+            body: JSON.stringify({
+                query: query.q,
+                view: query.view,
+                collection: query.collection,
+                filters: query.filters,
+            }),
+        });
+    }
+
+    async deleteSavedSearch(id: string): Promise<void>{
+        await this.req(`/searches/${encodeURIComponent(id)}`, { method: "DELETE" });
     }
 
     storage(): Promise<StorageUsage>{

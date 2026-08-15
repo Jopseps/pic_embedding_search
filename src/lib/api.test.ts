@@ -169,6 +169,65 @@ describe("HttpApi event stream", () => {
     });
 });
 
+describe("HttpApi collections and saved searches", () => {
+    it("posts image ids to the collection's items route", async () => {
+        const fetchSpy = vi.fn(async () => jsonResponse({ added: 2, count: 2 }));
+        vi.stubGlobal("fetch", fetchSpy);
+
+        await new HttpApi(HANDSHAKE).addToCollection("7", [11, 12]);
+
+        const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        expect(url).toBe("http://127.0.0.1:41337/collections/7/items");
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body as string)).toEqual({ ids: [11, 12] });
+    });
+
+    it("removes membership with a DELETE that carries a body", async () => {
+        const fetchSpy = vi.fn(async () => jsonResponse({ removed: 1, count: 0 }));
+        vi.stubGlobal("fetch", fetchSpy);
+
+        await new HttpApi(HANDSHAKE).removeFromCollection("7", [11]);
+
+        const [, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        expect(init.method).toBe("DELETE");
+        expect(JSON.parse(init.body as string)).toEqual({ ids: [11] });
+    });
+
+    it("saves the whole query, not just the text", async () => {
+        const fetchSpy = vi.fn(async () => jsonResponse({
+            id: "1", query: "masa", view: null, collection: null,
+            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+        }));
+        vi.stubGlobal("fetch", fetchSpy);
+
+        await new HttpApi(HANDSHAKE).saveSearch(makeQuery({
+            q: "masa",
+            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+        }));
+
+        const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        expect(url).toBe("http://127.0.0.1:41337/searches");
+        // Filters ride along or a saved search runs against whatever happens to
+        // be set when it is clicked.
+        expect(JSON.parse(init.body as string)).toEqual({
+            query: "masa",
+            view: null,
+            collection: null,
+            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+        });
+    });
+
+    it("sends the collection id, not its name, as the search filter", async () => {
+        const fetchSpy = vi.fn(async () => jsonResponse({ items: [], total: 0, tookMs: 1, cursor: null }));
+        vi.stubGlobal("fetch", fetchSpy);
+
+        await new HttpApi(HANDSHAKE).search(makeQuery({ q: "", collection: "12" }));
+
+        const url = new URL((fetchSpy.mock.calls[0] as unknown as [string])[0]);
+        expect(url.searchParams.get("collection")).toBe("12");
+    });
+});
+
 describe("HttpApi folder picker", () => {
     it("returns null without posting when the picker is unavailable", async () => {
         // Outside the desktop shell there is no dialog, and the sidecar must not
