@@ -128,7 +128,7 @@ describe("HttpApi event stream", () => {
             'al":10,"rate":5,"etaSec":2,"paused":false,"currentFile":"a.jpg","running":true}\n\n',
             ": keepalive\n\n",
             'data: {"type":"scan-complete","scanned":10,"ingested":10,"skipped":0,'
-                + '"embedded":10,"removed":0,"errors":0}\n\n',
+                + '"embedded":10,"ocred":4,"removed":0,"errors":0}\n\n',
         ])));
 
         const stop = new HttpApi(HANDSHAKE).subscribeEvents((e) => seen.push(e));

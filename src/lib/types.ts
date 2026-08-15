@@ -144,6 +144,8 @@ export type SidecarEvent =
         ingested: number;
         skipped: number;
         embedded: number;
+        /** Screenshots read by OCR. A backfill emits this with nothing else. */
+        ocred: number;
         removed: number;
         errors: number;
     }

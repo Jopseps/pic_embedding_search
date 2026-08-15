@@ -500,8 +500,11 @@ export const useStore = create<State & Actions>((set, get) => ({
                     },
                 });
             }else if(event.type === "scan-complete"){
-                // New rows exist now, so the visible results are stale.
-                if(event.ingested > 0 || event.removed > 0){
+                // New rows exist now, so the visible results are stale. `ocred`
+                // counts too: an OCR backfill changes hasOcr and the snippets
+                // without ingesting anything, and it is the only thing a
+                // settings-driven engine swap emits.
+                if(event.ingested > 0 || event.removed > 0 || event.ocred > 0){
                     void get().loadFolders();
                     void get().loadStorage();
                     void get().runSearch();
