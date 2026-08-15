@@ -12,26 +12,32 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 
 ## Status: early, and not yet packaged
 
-> **There are no binary releases.** This is a v0.1 you run from source.
+> **There are no binary releases.** This is a v0.1 you run from source, and it needs `uv`, Node and Rust on your machine.
 >
-> The desktop app and the Python sidecar both work, but **they are not wired together yet** — the Tauri shell does not spawn the sidecar, so the app still shows a fixture library. Run the sidecar yourself and it will index and search your real folders over HTTP today. OCR, the folder watcher, collections and duplicate detection are not written yet.
+> Semantic search over your own folders works today. **OCR, the folder watcher, collections, saved searches and duplicate detection do not** — the UI for them is built and running on placeholder data.
 >
 > `PLAN.md` has the ordered next steps; `ARCHITECTURE.md` has the design.
 
-## What works today
+## Run it
 
 ```bash
 npm install
-npm run tauri dev      # desktop app, fixture library
-npm run dev            # or just the UI in a browser at :1420
+cd sidecar && uv sync && cd ..    # torch + CUDA wheels, ~3 GB
+npm run tauri dev                 # desktop app, your own photos
 ```
 
-The whole interface is live against the fixture library — search, filters, grid density, selection, lightbox, settings, and the model-switch re-index flow.
-
-The sidecar runs on its own and does the real work. It prints its port and a per-run token on stdout, then serves:
+The desktop shell starts the Python sidecar, picks up its port and token, and talks to it over loopback. Add a folder in Settings and indexing begins — roughly 10 images/second on an RTX 4070 laptop GPU, thumbnails included. Searches answer in a few milliseconds.
 
 ```bash
-cd sidecar && uv sync
+npm run dev            # just the UI in a browser at :1420
+```
+
+In a browser there is no sidecar handshake, so the app runs against a fixture library of 420 generated photos. Every screen works — search, filters, grid density, selection, lightbox, settings, the model-switch flow — which is what makes UI work fast.
+
+The sidecar also runs on its own, which is the quickest way to debug indexing or ranking. It prints its port and a per-run token on stdout, then serves:
+
+```bash
+cd sidecar
 uv run python -m picsearch.server --port 8756
 # {"port": 8756, "token": "…"}
 
@@ -39,7 +45,7 @@ curl -H "X-PicSearch-Token: $TOKEN" -X POST -d '{"path":"~/Pictures"}' localhost
 curl -H "X-PicSearch-Token: $TOKEN" 'localhost:8756/search?q=table&limit=20'
 ```
 
-Indexing runs at roughly 10 images/second on an RTX 4070 laptop GPU including thumbnails; queries answer in a few milliseconds. Every request needs the token — there is no way to turn that off.
+Every request carries the token, the desktop app's included. There is no flag that turns that off.
 
 ## Requirements
 
