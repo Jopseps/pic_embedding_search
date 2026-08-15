@@ -614,12 +614,24 @@ class Indexer:
                 "ocred": done, "removed": 0, "errors": 0,
             })
 
-    def _flush(self, ids: list[int], images: list[Image.Image]) -> int:
+    def _flush(
+        self, ids: list[int], images: list[Image.Image], embedder=None, notify: bool = True
+    ) -> int:
+        """`embedder` overrides the resident one; `notify` gates `on_vector`.
+
+        Both exist for the model swap. That backfill embeds with the *incoming*
+        model while the live `VectorIndex` still belongs to the outgoing one —
+        feeding it vectors from a different model would either raise on the dim
+        check or, if the dims happened to match, quietly poison every search
+        until promotion. The new vectors are picked up wholesale by
+        `VectorIndex.load` when the swap completes.
+        """
         if(not ids):
             return 0
-        vectors = self.embedder.embed_pil(images)
-        self.store.put_embeddings(self.embedder.model_id, zip(ids, vectors, strict=True))
-        if(self.on_vector is not None):
+        engine = embedder if embedder is not None else self.embedder
+        vectors = engine.embed_pil(images)
+        self.store.put_embeddings(engine.model_id, zip(ids, vectors, strict=True))
+        if(notify and self.on_vector is not None):
             for image_id, vec in zip(ids, vectors, strict=True):
                 self.on_vector(image_id, vec)
         for img in images:
@@ -646,12 +658,28 @@ class Indexer:
 
     # -- backfill for model swaps ------------------------------------------
 
-    def embed_missing(self, model_id: str | None = None, limit: int | None = None) -> int:
-        """Embed every image lacking a row for `model_id`. Drives the model swap."""
-        model = model_id or self.embedder.model_id
+    def embed_missing(
+        self,
+        model_id: str | None = None,
+        limit: int | None = None,
+        embedder=None,
+        emit: bool = True,
+    ) -> int:
+        """Embed every image lacking a row for `model_id`. Drives the model swap.
+
+        `embedder` is the model doing the work, which during a swap is *not*
+        the resident one — see `_flush`. One pass only; `run_model_backfill`
+        is what loops until coverage is actually complete.
+        """
+        engine = embedder if embedder is not None else self.embedder
+        model = model_id or engine.model_id
         ids = self.store.images_missing_embedding(model, limit=limit)
+        total = len(ids)
         done = 0
-        for start in range(0, len(ids), BATCH_SIZE):
+        started = time.monotonic()
+        for start in range(0, total, BATCH_SIZE):
+            if(self._stop.is_set()):
+                break
             chunk = ids[start:start + BATCH_SIZE]
             batch_ids: list[int] = []
             batch_imgs: list[Image.Image] = []
@@ -668,11 +696,81 @@ class Indexer:
                     continue
                 batch_ids.append(image_id)
                 batch_imgs.append(small)
-            done += self._flush(batch_ids, batch_imgs)
-            self._emit("reindex", {
-                "active": True,
-                "progress": round(100.0 * done / max(1, len(ids)), 1),
-                "modelName": model,
-            })
-        self._emit("reindex", {"active": False, "progress": 100.0, "modelName": model})
+            # The live vector index belongs to the outgoing model during a swap.
+            done += self._flush(batch_ids, batch_imgs, embedder=engine, notify=embedder is None)
+            if(emit):
+                self._emit("reindex", self._reindex_payload(model, done, total, started))
         return done
+
+    def _reindex_payload(self, model: str, done: int, total: int, started: float) -> dict:
+        """Real numbers, not an estimate from a constant: the rate is measured
+        from the batches that have actually landed."""
+        elapsed = max(1e-6, time.monotonic() - started)
+        rate = done / elapsed
+        remaining = max(0, total - done)
+        return {
+            "active": True,
+            "progress": round(100.0 * done / max(1, total), 1),
+            "modelName": model,
+            "current": done,
+            "total": total,
+            "rate": round(rate, 2),
+            "etaSec": int(remaining / rate) if rate > 0 else 0,
+        }
+
+    def run_model_backfill(self, model_id: str, embedder, on_done=None) -> int:
+        """Embed the whole library with `model_id`, then hand back.
+
+        **It loops.** The watcher keeps ingesting while this runs, and a file
+        that lands mid-swap is embedded with the *outgoing* model only — so a
+        single pass finishes with coverage at 99.9% and the promotion never
+        fires. Each pass re-asks the store what is still missing; the loop ends
+        when the answer is nothing.
+        """
+        total_done = 0
+        try:
+            while(not self._stop.is_set()):
+                done = self.embed_missing(model_id, embedder=embedder)
+                total_done += done
+                if(not self.store.images_missing_embedding(model_id, limit=1)):
+                    break
+                if(done == 0):
+                    # Nothing embeddable but rows still missing — every one of
+                    # them failed to decode. Looping would spin forever.
+                    log.warning(
+                        "model backfill stalled: %d images cannot be embedded with %s",
+                        len(self.store.images_missing_embedding(model_id)), model_id,
+                    )
+                    break
+        finally:
+            self._emit("reindex", {
+                "active": False, "progress": 100.0, "modelName": model_id,
+                "current": total_done, "total": total_done, "rate": 0.0, "etaSec": 0,
+            })
+            if(on_done is not None):
+                on_done()
+        return total_done
+
+    def start_model_backfill(self, model_id: str, embedder, on_done=None) -> bool:
+        """Background `run_model_backfill`. False if the ingest slot is busy."""
+        with self._lock:
+            if(self.running or self.status.running):
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run_model_backfill,
+                args=(model_id, embedder, on_done),
+                name="picsearch-model-backfill",
+                daemon=True,
+            )
+            self._thread.start()
+            return True
+
+    def _run_model_backfill(self, model_id: str, embedder, on_done) -> None:
+        self.status.running = True
+        try:
+            self.run_model_backfill(model_id, embedder, on_done)
+        except Exception:
+            log.exception("model backfill failed")
+        finally:
+            self.status.running = False

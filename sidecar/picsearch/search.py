@@ -29,6 +29,7 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -437,15 +438,49 @@ def hydrate(
 # Entry point
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Backend:
+    """The vector index and the model that can query it, as one value.
+
+    They must move together. A model swap that assigned them one at a time left
+    a window — small, but hit on the very first real swap — where an in-flight
+    request embedded its query with one model and scanned the other's index:
+    `ValueError: query dim 768 != index dim 1152`. Replacing a single immutable
+    attribute closes it without a lock on the hot path.
+    """
+
+    vectors: VectorIndex
+    embedder: Any
+
+
 class Searcher:
     def __init__(self, store: Store, vectors: VectorIndex, embedder):
         self.store = store
-        self.vectors = vectors
-        self.embedder = embedder
+        self._backend = Backend(vectors, embedder)
         self.dupes = DupeIndex(store)
+
+    @property
+    def vectors(self) -> VectorIndex:
+        return self._backend.vectors
+
+    @vectors.setter
+    def vectors(self, value: VectorIndex) -> None:
+        self._backend = Backend(value, self._backend.embedder)
+
+    @property
+    def embedder(self):
+        return self._backend.embedder
+
+    def swap(self, vectors: VectorIndex, embedder) -> None:
+        """Point at a different model. One assignment, so no request can see
+        half of it."""
+        self._backend = Backend(vectors, embedder)
 
     def search(self, params: SearchParams) -> dict:
         started = time.perf_counter()
+        # Snapshot once: a promotion mid-request must not change the answer
+        # underneath it.
+        backend = self._backend
         # One read of the cached clustering per request: the property refreshes
         # on a stale epoch, and both the `dupes` view and every item's `isDupe`
         # must agree within one response.
@@ -460,7 +495,7 @@ class Searcher:
             # Two ranked lists, fused by rank. The text leg is usually short or
             # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
             # visual match no matter what their raw scores look like.
-            vector_ranked = self._vector_search(query, candidates)
+            vector_ranked = self._vector_search(query, candidates, backend)
             text_ranked, snippets = fts_search(self.store, query, candidates)
             ranked = rrf_merge([[i for i, _ in vector_ranked], text_ranked])
             total = len(ranked)
@@ -501,27 +536,32 @@ class Searcher:
         )
         return [int(r["id"]) for r in rows], total
 
-    def _vector_search(self, query: str, candidates: set[int] | None) -> list[tuple[int, float]]:
-        if(self.vectors.size == 0):
+    def _vector_search(
+        self, query: str, candidates: set[int] | None, backend: Backend
+    ) -> list[tuple[int, float]]:
+        # `backend` is the caller's snapshot — the query text and the index it
+        # is scanned against have to come from the same model.
+        if(backend.vectors.size == 0):
             return []
-        q_vec = self.embedder.embed_text(query)
+        q_vec = backend.embedder.embed_text(query)
         # Take a generous slice so pagination has somewhere to go; the matmul
         # already touched every row, so this costs only the sort.
-        depth = min(self.vectors.size, DEFAULT_LIMIT * 10)
-        return self.vectors.search(q_vec, depth, candidates)
+        depth = min(backend.vectors.size, DEFAULT_LIMIT * 10)
+        return backend.vectors.search(q_vec, depth, candidates)
 
     def similar(self, image_id: int, limit: int = 60) -> dict:
         """Cosine neighbours. This is the correct use of cosine — dupes use pHash."""
         started = time.perf_counter()
-        vec = self.vectors.vector_for(image_id)
+        backend = self._backend
+        vec = backend.vectors.vector_for(image_id)
         if(vec is None):
-            vec_db = self.store.get_embedding(image_id, self.vectors.model_id)
+            vec_db = self.store.get_embedding(image_id, backend.vectors.model_id)
             if(vec_db is None):
                 return {"items": [], "total": 0, "tookMs": 0.0, "cursor": None}
             vec = vec_db
 
         ranked = [
-            (i, s) for i, s in self.vectors.search(vec, limit + 1) if i != int(image_id)
+            (i, s) for i, s in backend.vectors.search(vec, limit + 1) if i != int(image_id)
         ][:limit]
         scores = {i: s for i, s in ranked}
         return {

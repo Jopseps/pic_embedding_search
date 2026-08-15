@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, Any] = {
     "modelId": "siglip2-so400m-patch14-384",
+    # The model being embedded in the background, if a swap is in flight.
+    # `modelId` stays on the model that still answers searches until coverage
+    # reaches 100%, so a sidecar killed mid-swap comes back searching rather
+    # than blank, and resumes the backfill where it stopped.
+    "pendingModelId": None,
     # tesseract, not rapidocr: it is the only engine that speaks `tur+eng`, and
     # its binary is a system package rather than a 450 MB wheel. See ocr.py.
     "ocrEngineId": "tesseract",
@@ -55,6 +60,11 @@ def _dump(settings: dict[str, Any]) -> str:
     a dependency for it."""
     lines = ["# pic-search settings. Managed by the app; hand edits are read back.", "[settings]"]
     for key in sorted(settings):
+        # TOML has no null. A key whose value is None is simply absent, and
+        # `load()` puts the default back — which for `pendingModelId` is
+        # exactly "no swap in flight".
+        if(settings[key] is None):
+            continue
         lines.append(f"{key} = {_value(settings[key])}")
     return "\n".join(lines) + "\n"
 

@@ -183,6 +183,7 @@ class AppState:
         db: Path | None = None,
         model_id: str | None = None,
         embedder: Any | None = None,
+        embedder_factory: Any | None = None,
     ):
         self.token = secrets.token_urlsafe(32)
         self.store = Store(db)
@@ -190,7 +191,10 @@ class AppState:
         self.model_id = model_id or self.settings.get("modelId")
         self.spec = spec_for(self.model_id)
         # Injectable so tests can drive the whole API without loading weights.
+        # The factory builds the *second*, incoming embedder during a swap, and
+        # is injectable for the same reason.
         self.embedder = embedder if embedder is not None else Embedder(self.model_id)
+        self.embedder_factory = embedder_factory if embedder_factory is not None else Embedder
         self.vectors = VectorIndex.load(self.store, self.model_id, self.spec.dim)
         self.events = EventBus()
         # resolve() never raises: an OCR engine that is not installed degrades
@@ -208,6 +212,11 @@ class AppState:
         # observer threads on the host filesystem.
         self.watcher = FolderWatcher(self.store, self.indexer)
         self.searcher = Searcher(self.store, self.vectors, self.embedder)
+        # A swap in flight. `model_id` stays on the model that still answers
+        # searches; this one is being embedded in the background by its own
+        # Embedder, because both models have to be resident at once.
+        self.pending_model_id: str | None = self.settings.get("pendingModelId")
+        self.pending_embedder: Any | None = None
         self.started = time.time()
 
     def _on_vector(self, image_id: int, vector) -> None:
@@ -216,13 +225,120 @@ class AppState:
         except ValueError:
             log.warning("vector for image %s does not fit the active index", image_id)
 
+    # -- model swapping -----------------------------------------------------
+
+    def coverage(self, model_id: str) -> tuple[int, int]:
+        """(vectors, images) for `model_id`."""
+        return self.store.embedding_count(model_id), self.store.image_count()
+
+    def begin_model_swap(self, model_id: str) -> bool:
+        """Start embedding the library with `model_id` in the background.
+
+        The active model does not change here. Search keeps answering from the
+        vectors it already has for the whole run — that is the entire reason
+        the old model's rows are never deleted. `promote_model` flips it once
+        coverage is complete.
+        """
+        spec_for(model_id)
+        if(model_id == self.model_id):
+            self.clear_pending()
+            return False
+        done, total = self.coverage(model_id)
+        self.pending_model_id = model_id
+        # `modelId` is written explicitly rather than left to the merge: it must
+        # name the model that is *actually serving*, so a sidecar that dies mid
+        # swap comes back searching. A `--model` override on the command line
+        # would otherwise leave config naming something else entirely.
+        self.settings = config.save({"modelId": self.model_id, "pendingModelId": model_id})
+        if(total > 0 and done >= total):
+            # Switching back to a model that is already fully embedded, which
+            # is what keeping the old rows buys. No GPU work at all.
+            self.promote_model()
+            return False
+        # Its own Embedder: `Embedder` holds one resident model, and the live
+        # one is still answering queries.
+        self.pending_embedder = self.embedder_factory(model_id)
+        started = self.indexer.start_model_backfill(
+            model_id, self.pending_embedder, on_done=self.promote_model
+        )
+        if(not started):
+            log.info("model backfill for %s deferred: ingest slot busy", model_id)
+        return started
+
+    def promote_model(self) -> None:
+        """Make the pending model the active one. Called when coverage is full."""
+        model_id = self.pending_model_id
+        if(model_id is None):
+            return
+        done, total = self.coverage(model_id)
+        if(total > 0 and done < total):
+            log.warning(
+                "not promoting %s: %d of %d images embedded", model_id, done, total
+            )
+            return
+        # Hand over the embedder that just did the work — it already has the
+        # incoming model resident, so promotion costs no load and there is no
+        # moment where the shared embedder is half-switched.
+        incoming = self.pending_embedder
+        outgoing = self.embedder
+        if(incoming is not None):
+            spec = spec_for(model_id)
+            vectors = VectorIndex.load(self.store, model_id, spec.dim)
+            self.model_id = model_id
+            self.spec = spec
+            self.vectors = vectors
+            self.embedder = incoming
+            self.indexer.embedder = incoming
+            # One assignment, so no in-flight request can embed a query with one
+            # model and scan the other's index.
+            self.searcher.swap(vectors, incoming)
+            self.pending_embedder = None
+            if(outgoing is not incoming):
+                unload = getattr(outgoing, "unload", None)
+                if(unload is not None):
+                    unload()   # give the outgoing model's VRAM back
+        else:
+            self.switch_model(model_id)
+        self.settings = config.save({"modelId": model_id, "pendingModelId": None})
+        self.clear_pending()
+        self.events.publish("model-changed", {"modelId": model_id})
+        log.info("active model is now %s (%d vectors)", model_id, self.vectors.size)
+
+    def clear_pending(self) -> None:
+        self.pending_model_id = None
+        if(self.pending_embedder is not None):
+            unload = getattr(self.pending_embedder, "unload", None)
+            if(unload is not None):
+                unload()
+            self.pending_embedder = None
+        if(self.settings.get("pendingModelId") is not None):
+            self.settings = config.save({"pendingModelId": None})
+
+    def resume_model_swap(self) -> None:
+        """Pick an interrupted swap back up at boot.
+
+        `embed_missing` is keyed on what is missing, so nothing is embedded
+        twice — a sidecar killed at 41% resumes at 41%.
+        """
+        model_id = self.settings.get("pendingModelId")
+        if(model_id is None):
+            return
+        try:
+            self.begin_model_swap(model_id)
+        except KeyError:
+            # The config names a model that no longer exists in the registry.
+            log.warning("pending model %s is unknown; abandoning the swap", model_id)
+            self.clear_pending()
+
     def switch_model(self, model_id: str) -> None:
+        """Switch the resident model in place. Only for the case where no
+        pending embedder exists — `promote_model` hands its own over instead."""
         spec = spec_for(model_id)
         self.embedder.switch(model_id)
         self.model_id = model_id
         self.spec = spec
         self.vectors = VectorIndex.load(self.store, model_id, spec.dim)
-        self.searcher.vectors = self.vectors
+        self.searcher.swap(self.vectors, self.embedder)
 
     def switch_ocr(self, engine_id: str | None, langs: Any | None) -> bool:
         """Rebuild the OCR engine. True when the effective engine changed.
@@ -270,6 +386,9 @@ def create_app(state: AppState) -> FastAPI:
         # serving loop to hand work back to.
         state.events.bind(asyncio.get_running_loop())
         state.watcher.start()
+        # A swap interrupted by a crash or a quit picks up where it stopped —
+        # `embed_missing` is keyed on what is missing, so nothing is redone.
+        state.resume_model_swap()
         try:
             yield
         finally:
@@ -309,7 +428,31 @@ def create_app(state: AppState) -> FastAPI:
             "ocrLangs": None if state.ocr is None else state.ocr.langs_key,
             "watching": len(state.watcher.roots()),
             "indexing": state.indexer.status.as_wire(),
+            "pendingModelId": state.pending_model_id,
             "uptimeSec": round(time.time() - state.started, 1),
+        }
+
+    @app.get("/counts", dependencies=[guard])
+    def counts() -> dict:
+        """Sidebar counts, over the whole library rather than the current page.
+
+        The sidebar used to read these off the last search response, so "All"
+        showed however many results the current query returned and "Duplicates"
+        counted only the loaded window. Both were wrong the moment anyone typed.
+        """
+        recent = int(state.store.conn().execute(
+            "SELECT count(*) AS n FROM images"
+            " WHERE COALESCE(taken_at, indexed_at) >= datetime('now', '-7 days')"
+        ).fetchone()["n"])
+        per_collection = {
+            str(int(r["id"])): state.store.collection_count(int(r["id"]))
+            for r in state.store.list_collections()
+        }
+        return {
+            "library": state.store.image_count(),
+            "recent": recent,
+            "dupes": len(state.searcher.dupes.ids),
+            "collections": per_collection,
         }
 
     # -- search ------------------------------------------------------------
@@ -513,15 +656,30 @@ def create_app(state: AppState) -> FastAPI:
 
     # -- settings ----------------------------------------------------------
 
+    def settings_payload() -> dict:
+        """`modelId` is the model answering searches right now, which during a
+        swap is still the outgoing one. `pendingModelId` is what is being
+        embedded; the UI shows progress against that."""
+        done, total = (0, 0)
+        if(state.pending_model_id is not None):
+            done, total = state.coverage(state.pending_model_id)
+        return {
+            **state.settings,
+            "modelId": state.model_id,
+            "pendingModelId": state.pending_model_id,
+            "pendingCoverage": {"done": done, "total": total},
+        }
+
     @app.get("/settings", dependencies=[guard])
     def get_settings() -> dict:
-        return {**state.settings, "modelId": state.model_id}
+        return settings_payload()
 
     @app.put("/settings", dependencies=[guard])
     def put_settings(body: SettingsRequest) -> dict:
         incoming = body.model_dump(by_alias=True, exclude_none=True)
-        wanted = incoming.get("modelId")
-        if(wanted is not None and wanted != state.model_id):
+        wanted = incoming.pop("modelId", None)
+        swapping = wanted is not None and wanted != state.model_id
+        if(swapping):
             # Reject unknown ids before anything is persisted, as a 400 — a
             # bare KeyError here reaches the frontend as an opaque 500.
             try:
@@ -530,8 +688,11 @@ def create_app(state: AppState) -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         touches_ocr = "ocrEngineId" in incoming or "ocrLangs" in incoming
         state.settings = config.save(incoming)
-        if(wanted is not None and wanted != state.model_id):
-            state.switch_model(wanted)
+        if(swapping):
+            # `modelId` is deliberately *not* written here. It moves in
+            # `promote_model`, once the incoming model can actually answer a
+            # query — until then search keeps running on the outgoing one.
+            state.begin_model_swap(wanted)
         if(touches_ocr):
             changed = state.switch_ocr(
                 state.settings.get("ocrEngineId"), state.settings.get("ocrLangs")
@@ -541,7 +702,7 @@ def create_app(state: AppState) -> FastAPI:
             # background; unchanged ones cost one query.
             if(changed):
                 state.indexer.start_ocr_backfill()
-        return {**state.settings, "modelId": state.model_id}
+        return settings_payload()
 
     # -- storage -----------------------------------------------------------
 
