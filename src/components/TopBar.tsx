@@ -10,6 +10,7 @@ export function TopBar(){
     const reindexActive = useStore((s) => s.reindex.active);
     const setQuery = useStore((s) => s.setQuery);
     const clearQuery = useStore((s) => s.clearQuery);
+    const saveSearch = useStore((s) => s.saveCurrentSearch);
     const setView = useStore((s) => s.setView);
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -57,6 +58,20 @@ export function TopBar(){
                     </button>
                 ) : null}
             </div>
+
+            {/* Saving stores the filters too, so it only appears once there is
+                a query to attach them to. */}
+            {query.trim() !== "" ? (
+                <button
+                    type="button"
+                    onClick={() => void saveSearch()}
+                    title="Save this search, with its filters"
+                    aria-label="Save search"
+                    className="h-[30px] flex-shrink-0 cursor-pointer rounded-lg border border-edge bg-raised px-[10px] text-[12.5px] text-fg-dim hover:bg-hover hover:text-fg"
+                >
+                    ☆ Save
+                </button>
+            ) : null}
 
             <div className="flex-1" />
 

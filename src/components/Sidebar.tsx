@@ -112,6 +112,7 @@ function CollectionsSection(){
     const collections = useStore((s) => s.collections);
     const active = useStore((s) => s.activeCollection);
     const setActive = useStore((s) => s.setActiveCollection);
+    const remove = useStore((s) => s.deleteCollection);
     const adding = useStore((s) => s.addingCollection);
     const name = useStore((s) => s.newCollectionName);
     const setName = useStore((s) => s.setNewCollectionName);
@@ -123,19 +124,31 @@ function CollectionsSection(){
         <>
             <SectionLabel>COLLECTIONS</SectionLabel>
             {collections.map((c) => (
-                <button
+                <div
                     key={c.id}
-                    type="button"
-                    onClick={() => setActive(c.id)}
                     className={
-                        "mb-px w-full cursor-pointer rounded-md px-2 py-[7px] text-left text-[13px] transition-colors " +
+                        "group mb-px flex items-center rounded-md transition-colors " +
                         (active === c.id
                             ? "bg-accent-muted text-accent-text"
                             : "text-fg-dim hover:bg-hover")
                     }
                 >
-                    {c.name}
-                </button>
+                    <button
+                        type="button"
+                        onClick={() => setActive(c.id)}
+                        className="flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap px-2 py-[7px] text-left text-[13px]"
+                    >
+                        {c.name}
+                    </button>
+                    <button
+                        type="button"
+                        title={`Delete "${c.name}"`}
+                        onClick={() => void remove(c.id)}
+                        className="mr-1 hidden cursor-pointer rounded px-[6px] py-[2px] text-[13px] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
+                    >
+                        ×
+                    </button>
+                </div>
             ))}
             {adding ? (
                 <input
@@ -169,19 +182,38 @@ function CollectionsSection(){
 function SavedSearchesSection(){
     const saved = useStore((s) => s.savedSearches);
     const run = useStore((s) => s.runSavedSearch);
+    const remove = useStore((s) => s.deleteSavedSearch);
+    if(saved.length === 0){
+        return null;   // an empty labelled section is just noise
+    }
     return (
         <>
             <SectionLabel>SAVED SEARCHES</SectionLabel>
             {saved.map((s) => (
-                <button
+                <div
                     key={s.id}
-                    type="button"
-                    onClick={() => run(s.query)}
-                    className="mb-px flex w-full cursor-pointer items-center gap-[6px] rounded-md px-2 py-[7px] text-left text-[13px] text-fg-dim hover:bg-hover"
+                    className="group mb-px flex items-center rounded-md text-fg-dim hover:bg-hover"
                 >
-                    <span className="text-[11px] text-fg-faint">⌕</span>
-                    <span className="overflow-hidden text-ellipsis whitespace-nowrap">{s.query}</span>
-                </button>
+                    <button
+                        type="button"
+                        // The whole saved search, not just the text: it restores
+                        // the filters and view it was saved with.
+                        onClick={() => run(s)}
+                        title={s.query}
+                        className="flex flex-1 cursor-pointer items-center gap-[6px] overflow-hidden px-2 py-[7px] text-left text-[13px]"
+                    >
+                        <span className="text-[11px] text-fg-faint">⌕</span>
+                        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{s.query}</span>
+                    </button>
+                    <button
+                        type="button"
+                        title="Delete saved search"
+                        onClick={() => void remove(s.id)}
+                        className="mr-1 hidden cursor-pointer rounded px-[6px] py-[2px] text-[13px] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
+                    >
+                        ×
+                    </button>
+                </div>
             ))}
         </>
     );

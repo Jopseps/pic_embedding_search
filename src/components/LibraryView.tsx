@@ -254,10 +254,63 @@ function EmptySearch(props: { query: string; similar: boolean; onClear: () => vo
     );
 }
 
+/** The collection picker that hangs off "Add to collection". */
+function CollectionMenu(){
+    const collections = useStore((s) => s.collections);
+    const add = useStore((s) => s.addSelectionToCollection);
+    const adding = useStore((s) => s.addingCollection);
+    const name = useStore((s) => s.newCollectionName);
+    const setName = useStore((s) => s.setNewCollectionName);
+    const start = useStore((s) => s.startAddCollection);
+    const commit = useStore((s) => s.commitCollection);
+    const cancel = useStore((s) => s.cancelAddCollection);
+
+    return (
+        <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-lg border border-edge bg-raised p-1 shadow-[var(--shadow-bar)]">
+            {collections.map((c) => (
+                <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => void add(c.id)}
+                    className="w-full cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap rounded px-2 py-[6px] text-left text-[13px] text-fg-dim hover:bg-hover hover:text-fg"
+                >
+                    {c.name}
+                </button>
+            ))}
+            {collections.length > 0 ? <div className="my-1 h-px bg-edge" /> : null}
+            {adding ? (
+                <input
+                    autoFocus
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    onKeyDown={(e) => {
+                        if(e.key === "Enter"){
+                            void commit();
+                        }else if(e.key === "Escape"){
+                            cancel();
+                        }
+                    }}
+                    placeholder="Collection name"
+                    className="w-full rounded border border-accent bg-raised px-2 py-[5px] text-[13px] text-fg outline-none"
+                />
+            ) : (
+                <button
+                    type="button"
+                    onClick={start}
+                    className="w-full cursor-pointer rounded px-2 py-[6px] text-left text-[13px] text-fg-faint hover:bg-hover hover:text-fg-dim"
+                >
+                    + New collection
+                </button>
+            )}
+        </div>
+    );
+}
+
 function SelectionBar(){
     const count = useStore((s) => s.selectedIds.size);
     const clear = useStore((s) => s.clearSelection);
-    const addToCollection = useStore((s) => s.addSelectionToCollection);
+    const menuOpen = useStore((s) => s.collectionMenuOpen);
+    const toggleMenu = useStore((s) => s.toggleCollectionMenu);
     const reveal = useStore((s) => s.revealSelected);
     const del = useStore((s) => s.deleteSelected);
 
@@ -269,7 +322,12 @@ function SelectionBar(){
         <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 items-center gap-[10px] rounded-xl border border-edge bg-raised py-2 pr-[10px] pl-4 shadow-[var(--shadow-bar)]">
             <span className="whitespace-nowrap text-[12.5px] text-fg-dim">{count} selected</span>
             <div className="h-5 w-px bg-edge" />
-            <Button variant="subtle" onClick={addToCollection}>Add to collection</Button>
+            <div className="relative">
+                <Button variant="subtle" onClick={toggleMenu}>
+                    Add to collection {menuOpen ? "▴" : "▾"}
+                </Button>
+                {menuOpen ? <CollectionMenu /> : null}
+            </div>
             <Button variant="subtle" onClick={() => void reveal()}>Reveal in files</Button>
             <Button variant="danger" onClick={() => void del()}>Delete</Button>
             <button
