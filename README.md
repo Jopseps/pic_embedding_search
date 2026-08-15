@@ -25,8 +25,11 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 ```bash
 npm install
 cd sidecar && uv sync && cd ..    # torch + CUDA wheels, ~3 GB
+npm run doctor                    # check the machine has what it needs
 npm run tauri dev                 # desktop app, your own photos
 ```
+
+`npm run doctor` is the first thing to run when something looks wrong. Missing Tesseract, missing Turkish language data, torch quietly on the CPU, a config naming an engine that is not installed, no watched folders — all of those show up in the app as the same empty grid and none of them announce themselves. It prints each one with the command that fixes it, loads no model, spawns no server, and changes nothing.
 
 The desktop shell starts the Python sidecar, picks up its port and token, and talks to it over loopback. Add a folder in Settings and indexing begins — roughly 10 images/second on an RTX 4070 laptop GPU, thumbnails included. Screenshots are then read by OCR at about 1.3/second on the CPU, in parallel. Searches answer in a few milliseconds.
 
