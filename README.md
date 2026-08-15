@@ -14,7 +14,7 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 
 > **There are no binary releases.** This is a v0.1 you run from source, and it needs `uv`, Node and Rust on your machine.
 >
-> Semantic search over your own folders works today, and so does text search inside screenshots. **The folder watcher, collections, saved searches and duplicate detection do not** — the UI for them is built and running on placeholder data.
+> Semantic search over your own folders works today, so does text search inside screenshots, and watched folders stay up to date on their own — drop an image in and it is in the grid a couple of seconds later. **Collections, saved searches and duplicate detection do not work yet** — the UI for them is built and running on placeholder data.
 >
 > OCR uses Tesseract, which must be installed (`pacman -S tesseract tesseract-data-eng`). **Turkish also needs `tesseract-data-tur`**; without it the engine falls back to English and says so in the log.
 >
