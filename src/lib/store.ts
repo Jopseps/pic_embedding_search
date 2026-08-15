@@ -57,6 +57,9 @@ interface State{
     newCollectionName: string;
     /** The "Add to collection" dropdown in the selection bar. */
     collectionMenuOpen: boolean;
+    /** Collection whose delete button is armed. One click arms, the next
+     *  confirms — losing a collection loses which photos were in it. */
+    pendingCollectionDelete: string | null;
 
     filters: Filters;
     filtersOpen: FilterSectionsOpen;
@@ -108,6 +111,7 @@ interface Actions{
     cancelAddCollection(): void;
     loadCollections(): Promise<void>;
     deleteCollection(id: string): Promise<void>;
+    cancelDeleteCollection(): void;
     loadSavedSearches(): Promise<void>;
     runSavedSearch(s: SavedSearch): void;
     saveCurrentSearch(): Promise<void>;
@@ -193,6 +197,7 @@ export const useStore = create<State & Actions>((set, get) => ({
     addingCollection: false,
     newCollectionName: "",
     collectionMenuOpen: false,
+    pendingCollectionDelete: null,
 
     filters: EMPTY_FILTERS,
     filtersOpen: { date: false, folder: false, type: false, dims: false },
@@ -340,14 +345,18 @@ export const useStore = create<State & Actions>((set, get) => ({
             set({ addingCollection: false });
             return;
         }
+        // Both entry points share this: the sidebar's inline input and the
+        // selection menu's. Only the second one implies the selection goes in.
+        const fromMenu = get().collectionMenuOpen;
         set({ addingCollection: false, newCollectionName: "" });
         try{
             const made = await api.createCollection(name);
             await get().loadCollections();
             // Creating one from inside the selection menu is a request to put
             // the selection in it — otherwise the user names a collection and
-            // nothing visibly happens.
-            const ids = [...get().selectedIds];
+            // nothing visibly happens. From the sidebar it is not: naming a
+            // collection there asks for an empty one.
+            const ids = fromMenu ? [...get().selectedIds] : [];
             if(ids.length > 0){
                 await api.addToCollection(made.id, ids);
                 set({ collectionMenuOpen: false, selectedIds: new Set() });
@@ -374,6 +383,13 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     async deleteCollection(id){
+        // Same arm-then-confirm shape as the thumbnail cache. The collection is
+        // trivial to recreate; which photos were in it is not.
+        if(get().pendingCollectionDelete !== id){
+            set({ pendingCollectionDelete: id });
+            return;
+        }
+        set({ pendingCollectionDelete: null });
         await api.deleteCollection(id);
         // Looking at it when it goes is the case worth handling: fall back to
         // the library rather than leaving a view that can never load.
@@ -384,6 +400,10 @@ export const useStore = create<State & Actions>((set, get) => ({
         await get().loadCollections();
         await get().runSearch();
         get().showToast("Collection deleted");
+    },
+
+    cancelDeleteCollection(){
+        set({ pendingCollectionDelete: null });
     },
 
     async loadSavedSearches(){
@@ -511,12 +531,17 @@ export const useStore = create<State & Actions>((set, get) => ({
             }else{
                 next.add(id);
             }
-            return { selectedIds: next };
+            // Deselecting the last one unmounts the bar; the menu goes with it.
+            return next.size === 0
+                ? { selectedIds: next, collectionMenuOpen: false, addingCollection: false }
+                : { selectedIds: next };
         });
     },
 
     clearSelection(){
-        set({ selectedIds: new Set() });
+        // The menu hangs off the selection bar, which unmounts at zero — leaving
+        // the flag set means it reappears already open on the next selection.
+        set({ selectedIds: new Set(), collectionMenuOpen: false, addingCollection: false });
     },
 
     openLightbox(i){
@@ -778,7 +803,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             return;
         }
         await api.deletePhotos(ids);
-        set({ selectedIds: new Set() });
+        set({ selectedIds: new Set(), collectionMenuOpen: false });
         await get().runSearch();
         get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} removed from index`);
     },

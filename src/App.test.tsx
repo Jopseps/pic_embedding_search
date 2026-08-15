@@ -156,6 +156,58 @@ describe("App", () => {
         expect(useStore.getState().selectedIds.size).toBe(0);
     });
 
+    it("closes the collection menu when the selection empties", async () => {
+        await mountApp();
+        const first = useStore.getState().results[0]!;
+        await act(async () => {
+            useStore.getState().toggleSelect(first.id);
+            useStore.getState().toggleCollectionMenu();
+        });
+        expect(useStore.getState().collectionMenuOpen).toBe(true);
+
+        // The bar unmounts at zero, so a menu left open reappears already open.
+        await act(async () => {
+            useStore.getState().toggleSelect(first.id);
+        });
+        expect(useStore.getState().collectionMenuOpen).toBe(false);
+    });
+
+    it("does not sweep the selection into a collection named from the sidebar", async () => {
+        await mountApp();
+        const first = useStore.getState().results[0]!;
+        await act(async () => {
+            useStore.getState().toggleSelect(first.id);
+            // Sidebar path: the menu is closed, so naming one asks for an
+            // empty collection, not one holding whatever is selected.
+            useStore.getState().startAddCollection();
+            useStore.getState().setNewCollectionName("Empty");
+        });
+        await act(async () => {
+            await useStore.getState().commitCollection();
+        });
+        const after = useStore.getState().results.find((p) => p.id === first.id)!;
+        const made = useStore.getState().collections.find((c) => c.name === "Empty")!;
+        expect(after.collections).not.toContain(made.id);
+        expect(useStore.getState().selectedIds.size).toBe(1);
+    });
+
+    it("arms before deleting a collection", async () => {
+        await mountApp();
+        const target = useStore.getState().collections[0]!;
+        await act(async () => {
+            await useStore.getState().deleteCollection(target.id);
+        });
+        // First click arms only — losing a collection loses its membership.
+        expect(useStore.getState().pendingCollectionDelete).toBe(target.id);
+        expect(useStore.getState().collections).toContainEqual(target);
+
+        await act(async () => {
+            await useStore.getState().deleteCollection(target.id);
+        });
+        expect(useStore.getState().collections).not.toContainEqual(target);
+        expect(useStore.getState().pendingCollectionDelete).toBeNull();
+    });
+
     it("restores the filters a saved search was saved with", async () => {
         await mountApp();
         await act(async () => {

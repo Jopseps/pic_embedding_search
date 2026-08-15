@@ -113,6 +113,8 @@ function CollectionsSection(){
     const active = useStore((s) => s.activeCollection);
     const setActive = useStore((s) => s.setActiveCollection);
     const remove = useStore((s) => s.deleteCollection);
+    const pendingDelete = useStore((s) => s.pendingCollectionDelete);
+    const cancelDelete = useStore((s) => s.cancelDeleteCollection);
     const adding = useStore((s) => s.addingCollection);
     const name = useStore((s) => s.newCollectionName);
     const setName = useStore((s) => s.setNewCollectionName);
@@ -140,13 +142,21 @@ function CollectionsSection(){
                     >
                         {c.name}
                     </button>
+                    {/* Armed on the first click, confirmed on the second. The
+                        collection is cheap to recreate; its membership is not. */}
                     <button
                         type="button"
-                        title={`Delete "${c.name}"`}
+                        title={pendingDelete === c.id ? "Click again to delete" : `Delete "${c.name}"`}
                         onClick={() => void remove(c.id)}
-                        className="mr-1 hidden cursor-pointer rounded px-[6px] py-[2px] text-[13px] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
+                        onBlur={cancelDelete}
+                        className={
+                            "mr-1 cursor-pointer rounded px-[6px] py-[2px] text-[11px] hover:bg-hover " +
+                            (pendingDelete === c.id
+                                ? "block text-danger"
+                                : "hidden text-[13px] text-fg-faint hover:text-fg group-hover:block")
+                        }
                     >
-                        ×
+                        {pendingDelete === c.id ? "Delete?" : "×"}
                     </button>
                 </div>
             ))}
