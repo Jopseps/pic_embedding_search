@@ -124,10 +124,14 @@ def test_events_streams_a_snapshot(sidecar):
 
 PARENT_SCRIPT = """
 import json, subprocess, sys, time
-proc = subprocess.Popen(
-    [sys.executable, "-m", "picsearch.server", "--port", "0", "--log-level", "warning"],
-    stdout=subprocess.PIPE, text=True,
-)
+args = [sys.executable, "-m", "picsearch.server", "--port", "0", "--log-level", "warning"]
+if len(sys.argv) > 1 and sys.argv[1] == "--indirect":
+    # Stand-in for `uv run python -m picsearch.server`: an intermediary process
+    # owns the sidecar, so its ppid is never the pid that matters.
+    inner = " ".join(args) + " --parent-pid " + str(__import__("os").getpid())
+    proc = subprocess.Popen(["sh", "-c", inner], stdout=subprocess.PIPE, text=True)
+else:
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, text=True)
 line = proc.stdout.readline()
 print(json.dumps({"child": proc.pid, "handshake": json.loads(line)}), flush=True)
 time.sleep(600)
@@ -144,20 +148,26 @@ def alive(pid: int) -> bool:
     return True
 
 
-def test_the_sidecar_dies_with_its_parent(tmp_path):
-    """`pkill -9` on the shell must not leave a process holding VRAM.
+def port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
 
-    Rust also kills the child on window-destroy and on panic; this is the half
-    that survives a parent that never got to run any cleanup at all.
-    """
+
+def run_orphan_check(tmp_path, indirect: bool):
     env = {
         **os.environ,
         "PICSEARCH_DATA_DIR": str(tmp_path / "data"),
         "PICSEARCH_CONFIG_DIR": str(tmp_path / "config"),
         "PICSEARCH_CACHE_DIR": str(tmp_path / "cache"),
     }
+    argv = [sys.executable, "-c", PARENT_SCRIPT]
+    if(indirect):
+        argv.append("--indirect")
     parent = subprocess.Popen(
-        [sys.executable, "-c", PARENT_SCRIPT],
+        argv,
         cwd=str(Path(__file__).resolve().parents[1]),
         env=env,
         stdout=subprocess.PIPE,
@@ -165,16 +175,33 @@ def test_the_sidecar_dies_with_its_parent(tmp_path):
     )
     try:
         info = json.loads(parent.stdout.readline())
-        child_pid = info["child"]
-        assert alive(child_pid)
+        port = info["handshake"]["port"]
+        assert port_open(port), "sidecar never started listening"
 
         os.kill(parent.pid, signal.SIGKILL)
         parent.wait(timeout=10)
 
         deadline = time.monotonic() + 15.0
-        while(time.monotonic() < deadline and alive(child_pid)):
+        while(time.monotonic() < deadline and port_open(port)):
             time.sleep(0.2)
-        assert not alive(child_pid), "orphaned sidecar survived its parent"
+        assert not port_open(port), "orphaned sidecar survived its parent"
     finally:
         if(parent.poll() is None):
             parent.kill()
+
+
+def test_the_sidecar_dies_with_its_parent(tmp_path):
+    """`pkill -9` on the shell must not leave a process holding VRAM.
+
+    Rust also kills the child on window-destroy and on panic; this is the half
+    that survives a parent that never got to run any cleanup at all.
+    """
+    run_orphan_check(tmp_path, indirect=False)
+
+
+def test_the_sidecar_dies_with_the_pid_it_was_told_to_watch(tmp_path):
+    """The real spawn goes through `uv`, so the sidecar's own parent is not the
+    process whose death matters — hence `--parent-pid`. Watching that pid's
+    liveness is the whole mechanism; comparing `getppid()` against it made the
+    sidecar exit the instant it started."""
+    run_orphan_check(tmp_path, indirect=True)

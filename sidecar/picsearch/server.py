@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,11 @@ class EventBus:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         with self._lock:
             self._subscribers.discard(q)
+
+    @property
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
 
     def publish(self, kind: str, payload: dict) -> None:
         self.last[kind] = payload
@@ -200,7 +206,17 @@ async def require_token_or_query(request: Request, t: str | None = Query(default
 # ---------------------------------------------------------------------------
 
 def create_app(state: AppState) -> FastAPI:
-    app = FastAPI(title="picsearch sidecar", version="0.1.0", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # The event bus fans out from ingest worker threads, so it needs the
+        # serving loop to hand work back to.
+        state.events.bind(asyncio.get_running_loop())
+        yield
+
+    app = FastAPI(
+        title="picsearch sidecar", version="0.1.0",
+        docs_url=None, redoc_url=None, lifespan=lifespan,
+    )
     app.state.picsearch = state
 
     # The frontend is served from tauri://localhost (or :1420 in dev), so every
@@ -211,10 +227,6 @@ def create_app(state: AppState) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.on_event("startup")
-    async def _bind_loop() -> None:
-        state.events.bind(asyncio.get_running_loop())
 
     guard = Depends(require_token)
     bytes_guard = Depends(require_token_or_query)
@@ -411,6 +423,7 @@ def create_app(state: AppState) -> FastAPI:
     @app.get("/events", dependencies=[guard])
     async def events(request: Request) -> StreamingResponse:
         queue = state.events.subscribe()
+        log.info("client subscribed to /events (%d live)", state.events.subscriber_count)
 
         async def stream():
             # No is_disconnected() poll here: starlette cancels this generator
@@ -452,20 +465,41 @@ def _spawn(argv: list[str]) -> bool:
 # Parent watchdog
 # ---------------------------------------------------------------------------
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) -> None:
-    """Exit hard when the parent process disappears.
+    """Exit hard when the process we belong to disappears.
 
     Rust also kills the child on window-destroy and on panic, but the happy
     path alone is not enough: this is what survives `pkill -9` on Tauri, and an
     orphan holding VRAM is the failure this whole design guards against.
+
+    `--parent-pid` exists because Tauri spawns us through `uv`, so our direct
+    parent is not the process whose death matters. Watching *liveness of a pid*
+    rather than comparing `getppid()` is what makes that case work — an earlier
+    version compared ppid and killed the sidecar the instant it started, since
+    `uv`'s pid never equals Tauri's.
     """
-    initial = parent_pid or os.getppid()
+    target = parent_pid if parent_pid is not None else os.getppid()
+    # Reparenting is only meaningful when we are watching our own parent.
+    watch_reparent = parent_pid is None
 
     def watch() -> None:
         while(True):
             time.sleep(interval)
-            if(os.getppid() != initial):
-                log.warning("parent %s is gone; exiting", initial)
+            if(not _pid_alive(target)):
+                log.warning("watched process %s is gone; exiting", target)
+                os._exit(0)
+            if(watch_reparent and os.getppid() != target):
+                log.warning("reparented away from %s; exiting", target)
                 os._exit(0)
 
     threading.Thread(target=watch, name="picsearch-parent-watchdog", daemon=True).start()
