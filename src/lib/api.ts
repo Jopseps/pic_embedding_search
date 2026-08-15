@@ -1,15 +1,19 @@
 import type {
     Collection,
     Filters,
+    LibraryCounts,
     Photo,
     SavedSearch,
     SearchQuery,
     SearchResponse,
+    Settings,
+    SettingsResponse,
     SidecarEvent,
     StorageUsage,
     WatchedFolder,
 } from "./types";
 import { buildMockLibrary, type MockPhoto } from "./mockData";
+import { DEFAULT_MODEL_ID, DEFAULT_OCR_ENGINE_ID, DEFAULT_OCR_LANGS } from "./catalog";
 import { pickFolder } from "./tauri";
 
 /**
@@ -29,6 +33,11 @@ export interface PhotoSearchApi{
     addFolder(): Promise<WatchedFolder | null>;
     removeFolder(path: string): Promise<void>;
     setFolderRecursive(path: string, recursive: boolean): Promise<void>;
+    counts(): Promise<LibraryCounts>;
+    getSettings(): Promise<SettingsResponse>;
+    /** Partial update. A new `modelId` starts a background swap; it does not
+     *  take effect until the incoming model can answer a query. */
+    putSettings(patch: Partial<Settings>): Promise<SettingsResponse>;
     listCollections(): Promise<Collection[]>;
     createCollection(name: string): Promise<Collection>;
     deleteCollection(id: string): Promise<void>;
@@ -134,6 +143,13 @@ export class MockApi implements PhotoSearchApi{
     ];
     private nextCollectionId = 1;
     private nextSavedId = 4;
+    private settings: Settings = {
+        modelId: DEFAULT_MODEL_ID,
+        ocrEngineId: DEFAULT_OCR_ENGINE_ID,
+        ocrLangs: [...DEFAULT_OCR_LANGS],
+        theme: "dark",
+        density: 1,
+    };
 
     async search(query: SearchQuery): Promise<SearchResponse>{
         const started = performance.now();
@@ -213,6 +229,30 @@ export class MockApi implements PhotoSearchApi{
 
     async setFolderRecursive(path: string, recursive: boolean): Promise<void>{
         this.folders = this.folders.map((f) => f.path === path ? { ...f, recursive } : f);
+    }
+
+    async counts(): Promise<LibraryCounts>{
+        const week = Date.now() - 7 * DAY_MS;
+        const members: Record<string, number> = {};
+        for(const c of this.collections){
+            members[c.id] = this.items.filter((it) => it.collections.includes(c.id)).length;
+        }
+        return {
+            library: this.items.length,
+            recent: this.items.filter((it) => it.takenMs >= week).length,
+            dupes: this.items.filter((it) => it.isDupe).length,
+            collections: members,
+        };
+    }
+
+    async getSettings(): Promise<SettingsResponse>{
+        return { ...this.settings, pendingModelId: null, pendingCoverage: { done: 0, total: 0 } };
+    }
+
+    async putSettings(patch: Partial<Settings>): Promise<SettingsResponse>{
+        // A swap is instant here: there is no GPU and no coverage to reach.
+        this.settings = { ...this.settings, ...patch };
+        return this.getSettings();
     }
 
     async listCollections(): Promise<Collection[]>{
@@ -403,6 +443,21 @@ export class HttpApi implements PhotoSearchApi{
         await this.req("/folders", {
             method: "PATCH",
             body: JSON.stringify({ path, recursive }),
+        });
+    }
+
+    counts(): Promise<LibraryCounts>{
+        return this.req<LibraryCounts>("/counts");
+    }
+
+    getSettings(): Promise<SettingsResponse>{
+        return this.req<SettingsResponse>("/settings");
+    }
+
+    putSettings(patch: Partial<Settings>): Promise<SettingsResponse>{
+        return this.req<SettingsResponse>("/settings", {
+            method: "PUT",
+            body: JSON.stringify(patch),
         });
     }
 

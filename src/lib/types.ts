@@ -101,7 +101,29 @@ export interface ReindexStatus{
     active: boolean;
     /** 0–100. */
     progress: number;
+    /** Display name of the model being embedded, resolved from the catalog. */
     modelName: string;
+    /** Images embedded so far, and how many need it. Measured, not estimated. */
+    current: number;
+    total: number;
+    /** Images per second, from the batches that have actually landed. */
+    rate: number;
+    etaSec: number;
+}
+
+/**
+ * Sidebar counts, over the whole library.
+ *
+ * These used to be read off the last search response, so "All" showed however
+ * many results the current query returned and "Duplicates" counted only the
+ * loaded window. Both lied the moment anyone typed.
+ */
+export interface LibraryCounts{
+    library: number;
+    recent: number;
+    dupes: number;
+    /** Collection id → member count. */
+    collections: Record<string, number>;
 }
 
 export interface StorageUsage{
@@ -133,11 +155,19 @@ export type ResolvedTheme = "dark" | "light";
 export type Density = 0 | 1 | 2;
 
 export interface Settings{
+    /** The model **answering searches right now**. During a swap this is still
+     *  the outgoing one — it only moves when the incoming model can answer. */
     modelId: string;
     ocrEngineId: string;
     ocrLangs: string[];
     theme: ThemePref;
     density: Density;
+}
+
+/** `GET/PUT /settings`. `pendingModelId` is the swap in flight, if any. */
+export interface SettingsResponse extends Settings{
+    pendingModelId: string | null;
+    pendingCoverage: { done: number; total: number };
 }
 
 /**
@@ -159,6 +189,8 @@ export type SidecarEvent =
         removed: number;
         errors: number;
     }
+    /** The swap completed and the active model moved. */
+    | { type: "model-changed"; modelId: string }
     | { type: "error"; message: string };
 
 /** Which of the six grid states the main area is in. */
