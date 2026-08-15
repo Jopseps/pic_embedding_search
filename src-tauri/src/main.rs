@@ -68,6 +68,9 @@ fn main(){
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Hands the OS a file drag that the frontend starts when the pointer
+        // leaves the window. Inside the window the drop targets are ours.
+        .plugin(tauri_plugin_drag::init())
         .manage(SidecarState{ inner: Mutex::new(running), error })
         .invoke_handler(tauri::generate_handler![sidecar_handshake])
         .on_window_event(|window, event| {
