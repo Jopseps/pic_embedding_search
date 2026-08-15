@@ -1,0 +1,10 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Core window access plus the folder picker. The sidecar is reached over HTTP with its own token, not through a Tauri permission.",
+    "windows": ["main"],
+    "permissions": [
+        "core:default",
+        "dialog:allow-open"
+    ]
+}
