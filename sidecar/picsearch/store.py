@@ -1,0 +1,428 @@
+"""SQLite storage: schema, migrations, and every read/write the sidecar does.
+
+Two things here are load-bearing and easy to break:
+
+* `embeddings` is keyed by **(image_id, model_id)**, never by image_id alone.
+  The embedding model is a user preference, models produce incompatible vector
+  spaces, and never deleting the old rows is what makes switching back instant.
+* `phash` is a 64-bit unsigned value stored in a *signed* SQLite INTEGER
+  column. Anything >= 2**63 raises OverflowError on write, so it is wrapped on
+  the way in and unwrapped on the way out. XOR/popcount over the wrapped form
+  still yields the correct Hamming distance, but read it back through
+  `phash_from_db` so callers never see the wrapped value.
+
+Connections are thread-local: the ingest queue is threaded and a sqlite3
+connection may not cross threads.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from collections.abc import Iterable, Iterator, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .paths import db_path
+
+SCHEMA_VERSION = 1
+
+# Copied from ARCHITECTURE.md § 3. The ocr_fts triggers are a deliberate
+# addition: ocr_fts is an external-content FTS5 table, so writing ocr_text does
+# not index anything on its own. Without these, step 8's text search silently
+# returns nothing.
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS images(
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    mtime       REAL NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    width       INTEGER NOT NULL,
+    height      INTEGER NOT NULL,
+    mime        TEXT NOT NULL,
+    phash       INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    taken_at    TEXT,
+    is_screenshot INTEGER NOT NULL DEFAULT 0,
+    indexed_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_images_taken   ON images(taken_at);
+CREATE INDEX IF NOT EXISTS idx_images_phash   ON images(phash);
+CREATE INDEX IF NOT EXISTS idx_images_sha     ON images(sha256);
+
+CREATE TABLE IF NOT EXISTS embeddings(
+    image_id  INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    model_id  TEXT    NOT NULL,
+    dim       INTEGER NOT NULL,
+    vector    BLOB    NOT NULL,
+    PRIMARY KEY(image_id, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS ocr_text(
+    image_id  INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+    engine    TEXT NOT NULL,
+    langs     TEXT NOT NULL,
+    text      TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(
+    text, content='ocr_text', content_rowid='image_id', tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS ocr_text_ai AFTER INSERT ON ocr_text BEGIN
+    INSERT INTO ocr_fts(rowid, text) VALUES (new.image_id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_text_ad AFTER DELETE ON ocr_text BEGIN
+    INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES ('delete', old.image_id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_text_au AFTER UPDATE ON ocr_text BEGIN
+    INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES ('delete', old.image_id, old.text);
+    INSERT INTO ocr_fts(rowid, text) VALUES (new.image_id, new.text);
+END;
+
+CREATE TABLE IF NOT EXISTS watched_folders(
+    id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+    recursive INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS collections(
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_items(
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    image_id      INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    PRIMARY KEY(collection_id, image_id)
+);
+CREATE TABLE IF NOT EXISTS saved_searches(
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, query_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+# ---------------------------------------------------------------------------
+# 64-bit unsigned <-> signed SQLite INTEGER
+# ---------------------------------------------------------------------------
+
+def phash_to_db(value: int) -> int:
+    v = value & 0xFFFFFFFFFFFFFFFF
+    if(v >= 1 << 63):
+        return v - (1 << 64)
+    return v
+
+
+def phash_from_db(value: int) -> int:
+    if(value < 0):
+        return value + (1 << 64)
+    return value
+
+
+def hamming64(a: int, b: int) -> int:
+    return ((a ^ b) & 0xFFFFFFFFFFFFFFFF).bit_count()
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+class Store:
+    """Owns one database file. Hand it around; do not open sqlite3 elsewhere."""
+
+    def __init__(self, path: Path | str | None = None):
+        self.path = Path(path) if path is not None else db_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        self._write_lock = threading.RLock()
+        self._migrate(self.conn())
+
+    # -- connections --------------------------------------------------------
+
+    def conn(self) -> sqlite3.Connection:
+        existing = getattr(self._local, "conn", None)
+        if(existing is not None):
+            return existing
+        c = sqlite3.connect(self.path, timeout=30.0)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA foreign_keys=ON")
+        c.execute("PRAGMA busy_timeout=30000")
+        self._local.conn = c
+        return c
+
+    def close(self) -> None:
+        existing = getattr(self._local, "conn", None)
+        if(existing is not None):
+            existing.close()
+            self._local.conn = None
+
+    # -- migrations ---------------------------------------------------------
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
+        with self._write_lock:
+            c.executescript(SCHEMA_SQL)
+            c.commit()
+            current = self.get_setting("schema_version")
+            if(current is None):
+                self.set_setting("schema_version", str(SCHEMA_VERSION))
+                return
+            version = int(current)
+            while(version < SCHEMA_VERSION):
+                step = MIGRATIONS.get(version + 1)
+                if(step is None):
+                    raise RuntimeError(f"no migration to schema version {version + 1}")
+                step(c)
+                c.commit()
+                version += 1
+                self.set_setting("schema_version", str(version))
+            if(version > SCHEMA_VERSION):
+                raise RuntimeError(
+                    f"database is schema v{version}, this build understands v{SCHEMA_VERSION}"
+                )
+
+    # -- settings -----------------------------------------------------------
+
+    def get_setting(self, key: str) -> str | None:
+        row = self.conn().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row is not None else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "INSERT INTO settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+            c.commit()
+
+    def get_json_setting(self, key: str, default: Any = None) -> Any:
+        raw = self.get_setting(key)
+        if(raw is None):
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return default
+
+    def set_json_setting(self, key: str, value: Any) -> None:
+        self.set_setting(key, json.dumps(value))
+
+    # -- images -------------------------------------------------------------
+
+    def image_by_path(self, path: str) -> sqlite3.Row | None:
+        return self.conn().execute("SELECT * FROM images WHERE path=?", (path,)).fetchone()
+
+    def image_by_id(self, image_id: int) -> sqlite3.Row | None:
+        return self.conn().execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+
+    def is_unchanged(self, path: str, mtime: float, size_bytes: int) -> bool:
+        """The ingest fast path. Must never touch the GPU."""
+        row = self.conn().execute(
+            "SELECT 1 FROM images WHERE path=? AND size_bytes=? AND abs(mtime - ?) < 0.001",
+            (path, size_bytes, mtime),
+        ).fetchone()
+        return row is not None
+
+    def upsert_image(
+        self,
+        *,
+        path: str,
+        mtime: float,
+        size_bytes: int,
+        width: int,
+        height: int,
+        mime: str,
+        phash: int,
+        sha256: str,
+        taken_at: str | None,
+        is_screenshot: bool,
+    ) -> int:
+        with self._write_lock:
+            c = self.conn()
+            cur = c.execute(
+                "INSERT INTO images(path, mtime, size_bytes, width, height, mime, phash,"
+                " sha256, taken_at, is_screenshot, indexed_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(path) DO UPDATE SET"
+                "  mtime=excluded.mtime, size_bytes=excluded.size_bytes,"
+                "  width=excluded.width, height=excluded.height, mime=excluded.mime,"
+                "  phash=excluded.phash, sha256=excluded.sha256, taken_at=excluded.taken_at,"
+                "  is_screenshot=excluded.is_screenshot, indexed_at=excluded.indexed_at"
+                " RETURNING id",
+                (
+                    path, mtime, size_bytes, width, height, mime,
+                    phash_to_db(phash), sha256, taken_at, int(is_screenshot), now_iso(),
+                ),
+            )
+            image_id = int(cur.fetchone()["id"])
+            c.commit()
+            return image_id
+
+    def delete_images(self, ids: Sequence[int]) -> int:
+        if(not ids):
+            return 0
+        with self._write_lock:
+            c = self.conn()
+            marks = ",".join("?" * len(ids))
+            cur = c.execute(f"DELETE FROM images WHERE id IN ({marks})", tuple(ids))
+            c.commit()
+            return cur.rowcount
+
+    def image_count(self) -> int:
+        return int(self.conn().execute("SELECT count(*) AS n FROM images").fetchone()["n"])
+
+    def all_paths(self) -> set[str]:
+        return {r["path"] for r in self.conn().execute("SELECT path FROM images")}
+
+    # -- embeddings ---------------------------------------------------------
+
+    def put_embedding(self, image_id: int, model_id: str, vector: np.ndarray) -> None:
+        """Vectors are stored L2-normalized float32 so cosine is a dot product."""
+        v = np.asarray(vector, dtype=np.float32).ravel()
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "INSERT INTO embeddings(image_id, model_id, dim, vector) VALUES(?,?,?,?)"
+                " ON CONFLICT(image_id, model_id) DO UPDATE SET"
+                "  dim=excluded.dim, vector=excluded.vector",
+                (image_id, model_id, int(v.shape[0]), v.tobytes()),
+            )
+            c.commit()
+
+    def put_embeddings(self, model_id: str, rows: Iterable[tuple[int, np.ndarray]]) -> int:
+        payload = []
+        for image_id, vector in rows:
+            v = np.asarray(vector, dtype=np.float32).ravel()
+            payload.append((image_id, model_id, int(v.shape[0]), v.tobytes()))
+        if(not payload):
+            return 0
+        with self._write_lock:
+            c = self.conn()
+            c.executemany(
+                "INSERT INTO embeddings(image_id, model_id, dim, vector) VALUES(?,?,?,?)"
+                " ON CONFLICT(image_id, model_id) DO UPDATE SET"
+                "  dim=excluded.dim, vector=excluded.vector",
+                payload,
+            )
+            c.commit()
+            return len(payload)
+
+    def get_embedding(self, image_id: int, model_id: str) -> np.ndarray | None:
+        row = self.conn().execute(
+            "SELECT vector FROM embeddings WHERE image_id=? AND model_id=?",
+            (image_id, model_id),
+        ).fetchone()
+        if(row is None):
+            return None
+        return np.frombuffer(row["vector"], dtype=np.float32)
+
+    def iter_embeddings(self, model_id: str) -> Iterator[tuple[int, np.ndarray]]:
+        cur = self.conn().execute(
+            "SELECT image_id, vector FROM embeddings WHERE model_id=? ORDER BY image_id",
+            (model_id,),
+        )
+        for row in cur:
+            yield int(row["image_id"]), np.frombuffer(row["vector"], dtype=np.float32)
+
+    def embedding_count(self, model_id: str) -> int:
+        return int(self.conn().execute(
+            "SELECT count(*) AS n FROM embeddings WHERE model_id=?", (model_id,)
+        ).fetchone()["n"])
+
+    def images_missing_embedding(self, model_id: str, limit: int | None = None) -> list[int]:
+        sql = (
+            "SELECT i.id FROM images i"
+            " LEFT JOIN embeddings e ON e.image_id = i.id AND e.model_id = ?"
+            " WHERE e.image_id IS NULL ORDER BY i.id"
+        )
+        params: list[Any] = [model_id]
+        if(limit is not None):
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [int(r["id"]) for r in self.conn().execute(sql, params)]
+
+    # -- OCR ----------------------------------------------------------------
+
+    def put_ocr(self, image_id: int, engine: str, langs: str, text: str) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "INSERT INTO ocr_text(image_id, engine, langs, text) VALUES(?,?,?,?)"
+                " ON CONFLICT(image_id) DO UPDATE SET"
+                "  engine=excluded.engine, langs=excluded.langs, text=excluded.text",
+                (image_id, engine, langs, text),
+            )
+            c.commit()
+
+    def get_ocr(self, image_id: int) -> str | None:
+        row = self.conn().execute(
+            "SELECT text FROM ocr_text WHERE image_id=?", (image_id,)
+        ).fetchone()
+        return row["text"] if row is not None else None
+
+    def ocr_ids(self) -> set[int]:
+        return {int(r["image_id"]) for r in self.conn().execute("SELECT image_id FROM ocr_text")}
+
+    # -- watched folders ----------------------------------------------------
+
+    def list_folders(self) -> list[sqlite3.Row]:
+        return list(self.conn().execute("SELECT * FROM watched_folders ORDER BY path"))
+
+    def add_folder(self, path: str, recursive: bool = True) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "INSERT INTO watched_folders(path, recursive, enabled) VALUES(?,?,1)"
+                " ON CONFLICT(path) DO UPDATE SET recursive=excluded.recursive, enabled=1",
+                (path, int(recursive)),
+            )
+            c.commit()
+
+    def remove_folder(self, path: str) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute("DELETE FROM watched_folders WHERE path=?", (path,))
+            c.commit()
+
+    def set_folder_recursive(self, path: str, recursive: bool) -> None:
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "UPDATE watched_folders SET recursive=? WHERE path=?", (int(recursive), path)
+            )
+            c.commit()
+
+    def folder_count(self, path: str) -> int:
+        return int(self.conn().execute(
+            "SELECT count(*) AS n FROM images WHERE path LIKE ?", (path.rstrip("/") + "/%",)
+        ).fetchone()["n"])
+
+    # -- collections --------------------------------------------------------
+
+    def list_collections(self) -> list[sqlite3.Row]:
+        return list(self.conn().execute("SELECT * FROM collections ORDER BY name"))
+
+    def collections_for(self, image_ids: Sequence[int]) -> dict[int, list[str]]:
+        if(not image_ids):
+            return {}
+        marks = ",".join("?" * len(image_ids))
+        cur = self.conn().execute(
+            "SELECT ci.image_id AS iid, c.name AS name FROM collection_items ci"
+            f" JOIN collections c ON c.id = ci.collection_id WHERE ci.image_id IN ({marks})",
+            tuple(image_ids),
+        )
+        out: dict[int, list[str]] = {}
+        for row in cur:
+            out.setdefault(int(row["iid"]), []).append(row["name"])
+        return out
+
+
+MIGRATIONS: dict[int, Any] = {}
+"""version -> callable(conn). Empty at v1; add entries as the schema evolves."""
