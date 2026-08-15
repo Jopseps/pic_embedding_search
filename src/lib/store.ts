@@ -55,6 +55,8 @@ interface State{
     savedSearches: SavedSearch[];
     addingCollection: boolean;
     newCollectionName: string;
+    /** The "Add to collection" dropdown in the selection bar. */
+    collectionMenuOpen: boolean;
 
     filters: Filters;
     filtersOpen: FilterSectionsOpen;
@@ -102,9 +104,14 @@ interface Actions{
     setActiveCollection(id: string): void;
     startAddCollection(): void;
     setNewCollectionName(n: string): void;
-    commitCollection(): void;
+    commitCollection(): Promise<void>;
     cancelAddCollection(): void;
-    runSavedSearch(q: string): void;
+    loadCollections(): Promise<void>;
+    deleteCollection(id: string): Promise<void>;
+    loadSavedSearches(): Promise<void>;
+    runSavedSearch(s: SavedSearch): void;
+    saveCurrentSearch(): Promise<void>;
+    deleteSavedSearch(id: string): Promise<void>;
 
     toggleFilterSection(key: keyof FilterSectionsOpen): void;
     setDatePreset(p: DatePreset): void;
@@ -151,7 +158,8 @@ interface Actions{
     showToast(msg: string): void;
     deleteSelected(): Promise<void>;
     revealSelected(): Promise<void>;
-    addSelectionToCollection(): void;
+    toggleCollectionMenu(): void;
+    addSelectionToCollection(id: string): Promise<void>;
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -178,17 +186,13 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     libraryView: "all",
     activeCollection: null,
-    collections: [
-        { id: "refs", name: "Refs" },
-        { id: "memes", name: "Memes" },
-    ],
-    savedSearches: [
-        { id: "1", query: "dark code editor" },
-        { id: "2", query: "receipts" },
-        { id: "3", query: "masa" },
-    ],
+    // Both come from the backend at boot. `MockApi` still seeds the fixture
+    // ones, so a browser run has collections with real members in them.
+    collections: [],
+    savedSearches: [],
     addingCollection: false,
     newCollectionName: "",
+    collectionMenuOpen: false,
 
     filters: EMPTY_FILTERS,
     filtersOpen: { date: false, folder: false, type: false, dims: false },
@@ -330,26 +334,108 @@ export const useStore = create<State & Actions>((set, get) => ({
         set({ newCollectionName: n });
     },
 
-    commitCollection(){
+    async commitCollection(){
         const name = get().newCollectionName.trim();
         if(name === ""){
             set({ addingCollection: false });
             return;
         }
-        set((s) => ({
-            collections: [...s.collections, { id: `c${Date.now()}`, name }],
-            addingCollection: false,
-            newCollectionName: "",
-        }));
-        get().showToast(`Collection "${name}" created`);
+        set({ addingCollection: false, newCollectionName: "" });
+        try{
+            const made = await api.createCollection(name);
+            await get().loadCollections();
+            // Creating one from inside the selection menu is a request to put
+            // the selection in it — otherwise the user names a collection and
+            // nothing visibly happens.
+            const ids = [...get().selectedIds];
+            if(ids.length > 0){
+                await api.addToCollection(made.id, ids);
+                set({ collectionMenuOpen: false, selectedIds: new Set() });
+                await get().runSearch();
+                get().showToast(`${ids.length} added to "${name}"`);
+                return;
+            }
+            get().showToast(`Collection "${name}" created`);
+        }catch(err){
+            get().showToast(describeError(err));
+        }
     },
 
     cancelAddCollection(){
         set({ addingCollection: false, newCollectionName: "" });
     },
 
-    runSavedSearch(q){
-        get().setQuery(q);
+    async loadCollections(){
+        try{
+            set({ collections: await api.listCollections() });
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
+    },
+
+    async deleteCollection(id){
+        await api.deleteCollection(id);
+        // Looking at it when it goes is the case worth handling: fall back to
+        // the library rather than leaving a view that can never load.
+        if(get().activeCollection === id){
+            set({ activeCollection: id === get().activeCollection ? null : get().activeCollection,
+                  libraryView: "all" });
+        }
+        await get().loadCollections();
+        await get().runSearch();
+        get().showToast("Collection deleted");
+    },
+
+    async loadSavedSearches(){
+        try{
+            set({ savedSearches: await api.listSavedSearches() });
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
+    },
+
+    runSavedSearch(saved){
+        // A saved search restores the whole state it was saved from, not just
+        // the words — otherwise it silently runs against whatever filters
+        // happen to be set and returns something the user did not save.
+        clearTimeout(debounceTimer);
+        set({
+            query: saved.query,
+            filters: saved.filters,
+            view: "library",
+            libraryView: saved.collection === null ? (saved.view ?? "all") : null,
+            activeCollection: saved.collection,
+            similarTo: null,
+            selectedIds: new Set(),
+            searching: true,
+        });
+        void get().runSearch();
+    },
+
+    async saveCurrentSearch(){
+        const s = get();
+        const query = s.query.trim();
+        if(query === ""){
+            get().showToast("Nothing to save — type a search first");
+            return;
+        }
+        try{
+            await api.saveSearch({
+                q: query,
+                view: s.activeCollection === null ? s.libraryView : null,
+                collection: s.activeCollection,
+                filters: s.filters,
+            });
+            await get().loadSavedSearches();
+            get().showToast(`Saved "${query}"`);
+        }catch(err){
+            get().showToast(describeError(err));
+        }
+    },
+
+    async deleteSavedSearch(id){
+        await api.deleteSavedSearch(id);
+        await get().loadSavedSearches();
     },
 
     toggleFilterSection(key){
@@ -703,9 +789,33 @@ export const useStore = create<State & Actions>((set, get) => ({
         get().showToast("Revealing in file manager…");
     },
 
-    addSelectionToCollection(){
-        const n = get().selectedIds.size;
-        get().showToast(`${n} item${n === 1 ? "" : "s"} added to collection`);
+    toggleCollectionMenu(){
+        set((s) => ({
+            collectionMenuOpen: !s.collectionMenuOpen,
+            addingCollection: false,
+            newCollectionName: "",
+        }));
+    },
+
+    async addSelectionToCollection(id){
+        const ids = [...get().selectedIds];
+        const name = get().collections.find((c) => c.id === id)?.name ?? "collection";
+        if(ids.length === 0){
+            set({ collectionMenuOpen: false });
+            return;
+        }
+        try{
+            await api.addToCollection(id, ids);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }finally{
+            set({ collectionMenuOpen: false });
+        }
+        set({ selectedIds: new Set() });
+        // The rows carry `collections`, so the grid is stale until it refetches.
+        await get().runSearch();
+        get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} added to "${name}"`);
     },
 }));
 

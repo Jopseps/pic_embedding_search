@@ -130,7 +130,53 @@ describe("App", () => {
             useStore.getState().toggleSelect(first.id);
         });
         expect(screen.getByText("1 selected")).toBeTruthy();
-        expect(screen.getByText("Add to collection")).toBeTruthy();
+        expect(screen.getByText(/Add to collection/)).toBeTruthy();
+    });
+
+    it("puts the selection into a collection through the menu", async () => {
+        await mountApp();
+        const first = useStore.getState().results[0]!;
+        await act(async () => {
+            useStore.getState().toggleSelect(first.id);
+            useStore.getState().toggleCollectionMenu();
+        });
+        // The menu lists what the backend returned at boot, not a literal. The
+        // name is on screen twice now — the sidebar row and the menu entry.
+        const target = useStore.getState().collections[0]!;
+        expect(screen.getAllByText(target.name).length).toBe(2);
+
+        await act(async () => {
+            await useStore.getState().addSelectionToCollection(target.id);
+        });
+        const after = useStore.getState().results.find((p) => p.id === first.id)!;
+        expect(after.collections).toContain(target.id);
+        // Adding closes the menu and drops the selection, or the bar sticks
+        // around over a selection that has already been dealt with.
+        expect(useStore.getState().collectionMenuOpen).toBe(false);
+        expect(useStore.getState().selectedIds.size).toBe(0);
+    });
+
+    it("restores the filters a saved search was saved with", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setQuery("table");
+            useStore.getState().toggleTypeFilter("Screenshot");
+        });
+        await act(async () => {
+            await useStore.getState().saveCurrentSearch();
+        });
+        const saved = useStore.getState().savedSearches.at(-1)!;
+        expect(saved.filters.types).toEqual(["Screenshot"]);
+
+        await act(async () => {
+            useStore.getState().clearAllFilters();
+            useStore.getState().setQuery("");
+        });
+        await act(async () => {
+            useStore.getState().runSavedSearch(saved);
+        });
+        expect(useStore.getState().query).toBe("table");
+        expect(useStore.getState().filters.types).toEqual(["Screenshot"]);
     });
 
     it("renders settings with the real model catalog, not the design placeholders", async () => {

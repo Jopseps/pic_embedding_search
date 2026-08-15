@@ -20,6 +20,8 @@ export default function App(){
 
     const resolveTheme = useStore((s) => s.resolveTheme);
     const loadFolders = useStore((s) => s.loadFolders);
+    const loadCollections = useStore((s) => s.loadCollections);
+    const loadSavedSearches = useStore((s) => s.loadSavedSearches);
     const loadStorage = useStore((s) => s.loadStorage);
     const runSearch = useStore((s) => s.runSearch);
     const startEventStream = useStore((s) => s.startEventStream);
@@ -30,9 +32,11 @@ export default function App(){
     // ---- boot -------------------------------------------------------------
     useEffect(() => {
         void loadFolders();
+        void loadCollections();
+        void loadSavedSearches();
         void loadStorage();
         void runSearch();
-    }, [loadFolders, loadStorage, runSearch]);
+    }, [loadFolders, loadCollections, loadSavedSearches, loadStorage, runSearch]);
 
     useEffect(() => {
         document.documentElement.setAttribute("data-theme", resolvedTheme);
