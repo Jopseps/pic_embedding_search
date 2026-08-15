@@ -9,6 +9,13 @@ Per new or changed file: decode, EXIF, sha256 + pHash, width/height, screenshot
 heuristic, 256/512 px WebP thumbnails, then embed in batches on the GPU.
 
 Ingest runs on one bounded background thread so the HTTP API stays responsive.
+
+**OCR runs on a side thread pool, not in the scan loop.** It is CPU-bound and
+costs 0.5-2 s per screenshot, which would turn a 30 s scan into minutes if it
+were serial. The engines shell out (tesseract) or drop into ONNX/torch, all of
+which release the GIL, so OCR overlaps GPU embedding almost for free. The pool
+is bounded and drained back into the scan loop so that at most `OCR_INFLIGHT`
+full-resolution grayscale copies are alive at once.
 """
 
 from __future__ import annotations
@@ -17,7 +24,9 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,6 +34,7 @@ from PIL import Image
 
 from . import imaging, paths
 from .embed import BATCH_SIZE, Embedder
+from .ocr import OcrEngine, OcrError
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -33,7 +43,26 @@ log = logging.getLogger(__name__)
 # embed batch is downscaled first so a batch of 32 stays around 50 MB, not 1 GB.
 EMBED_MAX_EDGE = 768
 
+# Leave a core for the scan loop itself. Tesseract runs with OMP_THREAD_LIMIT=1
+# (see ocr.py) precisely so this number means what it says.
+OCR_WORKERS = max(1, min(4, (os.cpu_count() or 2) - 1))
+OCR_INFLIGHT = OCR_WORKERS * 2
+
 EventSink = Callable[[str, dict], None]
+# (image_id, engine id, effective langs, the running read). The engine identity
+# rides along because it may be swapped out before the future is drained.
+PendingOcr = tuple[int, str, str, "Future[str]"]
+
+
+@dataclass
+class Ingested:
+    """What one new file leaves behind for the batched work that follows."""
+
+    image_id: int
+    small: Image.Image
+    # Full-resolution grayscale, present only for screenshots when OCR is on.
+    # OCR must never read `small`: 768 px makes body text unreadable.
+    ocr_image: Image.Image | None = None
 
 
 @dataclass
@@ -65,6 +94,7 @@ class ScanReport:
     ingested: int = 0
     skipped: int = 0
     embedded: int = 0
+    ocred: int = 0
     removed: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -98,11 +128,13 @@ class Indexer:
         self,
         store: Store,
         embedder: Embedder,
+        ocr: OcrEngine | None = None,
         on_event: EventSink | None = None,
         on_vector: Callable[[int, "object"], None] | None = None,
     ):
         self.store = store
         self.embedder = embedder
+        self.ocr = ocr
         self.on_event = on_event
         self.on_vector = on_vector
         self.status = IndexStatus()
@@ -195,47 +227,65 @@ class Indexer:
 
         batch_ids: list[int] = []
         batch_imgs: list[Image.Image] = []
+        pending: deque[PendingOcr] = deque()
 
-        for i, path in enumerate(candidates, start=1):
-            if(self._stop.is_set()):
-                break
-            while(self._pause.is_set() and not self._stop.is_set()):
-                time.sleep(0.15)
+        with ThreadPoolExecutor(
+            max_workers=OCR_WORKERS, thread_name_prefix="picsearch-ocr"
+        ) as pool:
+            for i, path in enumerate(candidates, start=1):
+                if(self._stop.is_set()):
+                    break
+                while(self._pause.is_set() and not self._stop.is_set()):
+                    time.sleep(0.15)
 
-            report.scanned += 1
-            self.status.current = i
-            self.status.current_file = path.name
+                report.scanned += 1
+                self.status.current = i
+                self.status.current_file = path.name
 
-            try:
-                outcome = self._ingest_one(path)
-            except Exception as exc:
-                msg = f"{path}: {exc}"
-                log.warning("ingest failed %s", msg)
-                report.errors.append(msg)
-                continue
+                try:
+                    outcome = self._ingest_one(path)
+                except Exception as exc:
+                    msg = f"{path}: {exc}"
+                    log.warning("ingest failed %s", msg)
+                    report.errors.append(msg)
+                    continue
 
-            if(outcome is None):
-                report.skipped += 1
-            else:
-                image_id, small = outcome
-                report.ingested += 1
-                batch_ids.append(image_id)
-                batch_imgs.append(small)
-                if(len(batch_imgs) >= BATCH_SIZE):
-                    report.embedded += self._flush(batch_ids, batch_imgs)
-                    batch_ids, batch_imgs = [], []
+                if(outcome is None):
+                    report.skipped += 1
+                else:
+                    report.ingested += 1
+                    batch_ids.append(outcome.image_id)
+                    batch_imgs.append(outcome.small)
+                    if(outcome.ocr_image is not None):
+                        self._ocr_submit(pool, pending, outcome.image_id, outcome.ocr_image)
+                        if(len(pending) >= OCR_INFLIGHT):
+                            report.ocred += self._ocr_drain(
+                                pending, report.errors, keep=OCR_WORKERS
+                            )
+                    if(len(batch_imgs) >= BATCH_SIZE):
+                        report.embedded += self._flush(batch_ids, batch_imgs)
+                        batch_ids, batch_imgs = [], []
 
-            elapsed = time.monotonic() - started
-            self.status.rate = (i / elapsed) if elapsed > 0 else 0.0
-            remaining = max(0, len(candidates) - i)
-            self.status.eta_sec = (remaining / self.status.rate) if self.status.rate > 0 else 0.0
-            if(i % 10 == 0 or i == len(candidates)):
-                self._emit("index", self.status.as_wire())
+                elapsed = time.monotonic() - started
+                self.status.rate = (i / elapsed) if elapsed > 0 else 0.0
+                remaining = max(0, len(candidates) - i)
+                self.status.eta_sec = (
+                    (remaining / self.status.rate) if self.status.rate > 0 else 0.0
+                )
+                if(i % 10 == 0 or i == len(candidates)):
+                    self._emit("index", self.status.as_wire())
 
-        report.embedded += self._flush(batch_ids, batch_imgs)
+            report.embedded += self._flush(batch_ids, batch_imgs)
+            report.ocred += self._ocr_drain(pending, report.errors)
 
         if(prune and not self._stop.is_set()):
             report.removed = self._prune_missing(targets, seen)
+
+        # Screenshots indexed before OCR existed — or before the engine or its
+        # languages changed — are read here. A rescan is already an explicit
+        # user action, and unchanged files cost nothing above.
+        if(not self._stop.is_set()):
+            report.ocred += self.ocr_missing()
 
         self.status.running = False
         self.status.current_file = ""
@@ -245,13 +295,14 @@ class Indexer:
             "ingested": report.ingested,
             "skipped": report.skipped,
             "embedded": report.embedded,
+            "ocred": report.ocred,
             "removed": report.removed,
             "errors": len(report.errors),
         })
         return report
 
-    def _ingest_one(self, path: Path) -> tuple[int, Image.Image] | None:
-        """Returns (image_id, downscaled image) for new work, None when skipped."""
+    def _ingest_one(self, path: Path) -> Ingested | None:
+        """Returns the work left for the batches, or None when the file is unchanged."""
         st = path.stat()
         if(self.store.is_unchanged(str(path), st.st_mtime, st.st_size)):
             # The fast path. No decode, no hashing, and above all no GPU.
@@ -261,12 +312,17 @@ class Indexer:
             width, height = img.size
             sha = imaging.sha256_file(path)
             ph = imaging.phash(img)
+            is_screenshot = imaging.is_screenshot(path, width, height)
 
             for size in imaging.THUMB_SIZES:
                 imaging.write_thumbnail(img, paths.thumb_path(sha, size), size)
 
             small = img.copy()
             small.thumbnail((EMBED_MAX_EDGE, EMBED_MAX_EDGE), Image.Resampling.LANCZOS)
+            # Full resolution, taken before the file handle closes.
+            ocr_image = (
+                img.convert("L") if (is_screenshot and self.ocr is not None) else None
+            )
 
         image_id = self.store.upsert_image(
             path=str(path),
@@ -278,9 +334,159 @@ class Indexer:
             phash=ph,
             sha256=sha,
             taken_at=imaging.taken_at(path),
-            is_screenshot=imaging.is_screenshot(path, width, height),
+            is_screenshot=is_screenshot,
         )
-        return image_id, small
+        return Ingested(image_id, small, ocr_image)
+
+    # -- OCR ----------------------------------------------------------------
+
+    def set_ocr(self, engine: OcrEngine | None) -> None:
+        """Swap the engine live. The next scan re-reads whatever it changed."""
+        self.ocr = engine
+
+    def _ocr_submit(
+        self,
+        pool: ThreadPoolExecutor,
+        pending: deque[PendingOcr],
+        image_id: int,
+        image: Image.Image,
+    ) -> None:
+        engine = self.ocr
+        if(engine is None):
+            image.close()
+            return
+
+        def task() -> str:
+            try:
+                return engine.read(image)
+            finally:
+                image.close()
+
+        # The engine's identity travels with the future. `set_ocr()` can land
+        # between submit and drain — PUT /settings does exactly that — and
+        # stamping this text with the *new* engine's id would make a stale row
+        # look current to images_missing_ocr, which would then never re-read it.
+        pending.append((image_id, engine.id, engine.langs_key, pool.submit(task)))
+
+    def _ocr_drain(
+        self,
+        pending: deque[PendingOcr],
+        errors: list[str] | None = None,
+        keep: int = 0,
+    ) -> int:
+        """Write finished OCR results, blocking until only `keep` are in flight.
+
+        A failure writes no row at all, so the next scan retries it. Success
+        writes a row even when the text is empty — that empty row is the marker
+        for "OCR ran and found nothing", and without it every rescan would read
+        every text-free screenshot again forever.
+        """
+        done = 0
+        while(len(pending) > keep):
+            image_id, engine_id, langs_key, future = pending.popleft()
+            try:
+                text = future.result()
+            except OcrError as exc:
+                msg = f"OCR failed for image {image_id}: {exc}"
+                log.warning("%s", msg)
+                if(errors is not None):
+                    errors.append(msg)
+                continue
+            except Exception as exc:
+                msg = f"OCR crashed for image {image_id}: {exc}"
+                log.exception("%s", msg)
+                if(errors is not None):
+                    errors.append(msg)
+                continue
+            self.store.put_ocr(image_id, engine_id, langs_key, text)
+            done += 1
+        return done
+
+    def ocr_missing(self, limit: int | None = None) -> int:
+        """OCR every screenshot lacking text from the *current* engine and langs."""
+        engine = self.ocr
+        if(engine is None):
+            return 0
+        ids = self.store.images_missing_ocr(engine.id, engine.langs_key, limit=limit)
+        if(not ids):
+            return 0
+
+        log.info("OCR backfill: %d screenshots with %s (%s)", len(ids), engine.id,
+                 engine.langs_key)
+        self.status.total = len(ids)
+        self.status.current = 0
+        self.status.rate = 0.0
+        self.status.eta_sec = 0.0
+        self._emit("index", self.status.as_wire())
+
+        started = time.monotonic()
+        done = 0
+        errors: list[str] = []
+        pending: deque[PendingOcr] = deque()
+        with ThreadPoolExecutor(
+            max_workers=OCR_WORKERS, thread_name_prefix="picsearch-ocr"
+        ) as pool:
+            for n, image_id in enumerate(ids, start=1):
+                if(self._stop.is_set()):
+                    break
+                while(self._pause.is_set() and not self._stop.is_set()):
+                    time.sleep(0.15)
+                row = self.store.image_by_id(image_id)
+                if(row is None):
+                    continue
+                try:
+                    with imaging.open_image(row["path"]) as img:
+                        prepared = img.convert("L")
+                except Exception as exc:
+                    log.warning("OCR decode failed %s: %s", row["path"], exc)
+                    continue
+
+                self.status.current = n
+                self.status.current_file = Path(row["path"]).name
+                # Counts submissions, so it runs up to OCR_INFLIGHT ahead of
+                # what is actually written. Over 200 screenshots that is noise,
+                # and a progress bar that never moves is worse.
+                elapsed = time.monotonic() - started
+                self.status.rate = (n / elapsed) if elapsed > 0 else 0.0
+                self.status.eta_sec = (
+                    ((len(ids) - n) / self.status.rate) if self.status.rate > 0 else 0.0
+                )
+                self._ocr_submit(pool, pending, image_id, prepared)
+                if(len(pending) >= OCR_INFLIGHT):
+                    done += self._ocr_drain(pending, errors, keep=OCR_WORKERS)
+                if(n % 10 == 0 or n == len(ids)):
+                    self._emit("index", self.status.as_wire())
+            done += self._ocr_drain(pending, errors)
+        return done
+
+    def start_ocr_backfill(self) -> bool:
+        """Background `ocr_missing()`. False if ingest is already busy."""
+        with self._lock:
+            if(self.running):
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run_ocr_backfill, name="picsearch-ocr-backfill", daemon=True
+            )
+            self._thread.start()
+            return True
+
+    def _run_ocr_backfill(self) -> None:
+        self.status.running = True
+        done = 0
+        try:
+            done = self.ocr_missing()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("OCR backfill failed")
+            self._emit("error", {"message": str(exc)})
+        finally:
+            self.status.running = False
+            self.status.current_file = ""
+            self._emit("index", self.status.as_wire())
+            self._emit("scan-complete", {
+                "scanned": 0, "ingested": 0, "skipped": 0, "embedded": 0,
+                "ocred": done, "removed": 0, "errors": 0,
+            })
 
     def _flush(self, ids: list[int], images: list[Image.Image]) -> int:
         if(not ids):

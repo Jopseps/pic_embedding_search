@@ -368,7 +368,54 @@ class Store:
         return row["text"] if row is not None else None
 
     def ocr_ids(self) -> set[int]:
-        return {int(r["image_id"]) for r in self.conn().execute("SELECT image_id FROM ocr_text")}
+        """Images with *text*, not merely with a row.
+
+        An empty row is the "OCR ran and found nothing" marker that stops every
+        rescan from re-reading the same text-free screenshot forever. It must
+        not light up the TEXT badge in the grid.
+        """
+        return {
+            int(r["image_id"])
+            for r in self.conn().execute(
+                "SELECT image_id FROM ocr_text WHERE length(trim(text)) > 0"
+            )
+        }
+
+    def ocr_map(self, ids: Sequence[int]) -> dict[int, str]:
+        """`image_id -> text` for the non-empty rows among `ids`."""
+        if(not ids):
+            return {}
+        marks = ",".join("?" * len(ids))
+        return {
+            int(r["image_id"]): r["text"]
+            for r in self.conn().execute(
+                f"SELECT image_id, text FROM ocr_text"
+                f" WHERE image_id IN ({marks}) AND length(trim(text)) > 0",
+                tuple(int(i) for i in ids),
+            )
+        }
+
+    def images_missing_ocr(
+        self, engine: str, langs: str, limit: int | None = None
+    ) -> list[int]:
+        """Screenshots with no OCR row, or one from a different engine/langs.
+
+        `langs` is the engine's *effective* language string. Installing new
+        tesseract language data changes it, which is what makes the next rescan
+        pick up the newly readable text without a manual reset.
+        """
+        sql = (
+            "SELECT images.id FROM images"
+            " LEFT JOIN ocr_text ON ocr_text.image_id = images.id"
+            " WHERE images.is_screenshot = 1"
+            "   AND (ocr_text.image_id IS NULL OR ocr_text.engine != ? OR ocr_text.langs != ?)"
+            " ORDER BY images.id"
+        )
+        params: list[Any] = [engine, langs]
+        if(limit is not None):
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [int(r["id"]) for r in self.conn().execute(sql, params)]
 
     # -- watched folders ----------------------------------------------------
 
