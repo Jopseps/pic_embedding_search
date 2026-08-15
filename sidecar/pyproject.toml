@@ -19,10 +19,14 @@ dependencies = [
     "watchdog>=6.0",
 ]
 
+# The default OCR engine is tesseract, which is a system binary and needs no
+# wheel at all — this extra is only for people who want RapidOCR in the engine
+# dropdown. No onnxruntime-gpu here: it and the CPU onnxruntime that
+# rapidocr-onnxruntime pulls in both install as the `onnxruntime` package, so
+# having both is last-write-wins, and screenshot OCR does not need a GPU.
 [project.optional-dependencies]
 ocr = [
     "rapidocr-onnxruntime>=1.4",
-    "onnxruntime-gpu>=1.20",
 ]
 
 [dependency-groups]
