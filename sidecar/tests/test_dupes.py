@@ -211,6 +211,31 @@ def test_overwriting_a_different_image_by_rename_does_invalidate(store):
     assert index.ids == frozenset()
 
 
+def test_every_delete_path_moves_the_epoch(store):
+    """CLAUDE.md claims `upsert_image` and `delete_images` are exhaustive — that
+    every write which can change a pHash goes through one of them.
+
+    `Indexer.forget_paths` is the one the watcher calls on every file deletion,
+    and `_prune_missing` runs on every rescan; both route through
+    `delete_images`, so the epoch moves. `move_image` is the single place that
+    deletes a row directly, which is why it bumps by hand. If a new raw
+    `DELETE FROM images` ever appears, this is the test that should fail.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "picsearch"
+    raw = [
+        (f.name, n)
+        for f in sorted(source.glob("*.py"))
+        for n, line in enumerate(f.read_text().splitlines(), 1)
+        if re.search(r"DELETE\s+FROM\s+images", line)
+    ]
+    # store.py holds exactly two: delete_images, and move_image's displaced row.
+    assert {name for name, _ in raw} == {"store.py"}
+    assert len(raw) == 2
+
+
 def test_the_index_does_not_rebuild_while_nothing_changes(store, monkeypatch):
     add_image(store, "/lib/a.png", 0xAAAA, "sha-a")
     add_image(store, "/lib/b.png", 0xAAAA, "sha-b")

@@ -19,6 +19,7 @@ re-embeds is a rename that was not worth special-casing.
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ import pytest
 from PIL import Image
 
 from picsearch import paths
+from picsearch.dupes import DupeIndex
 from picsearch.index import Indexer, indexable_under
 from picsearch.store import Store
 from picsearch.watch import FolderWatcher
@@ -451,3 +453,26 @@ def test_a_real_observer_picks_up_a_dropped_file(watched):
     finally:
         watcher.stop()
     assert store.image_by_path(str(root / "dropped.jpg")) is not None
+
+
+def test_a_watched_deletion_updates_the_duplicate_index(watched):
+    """The dupe clustering is cached against `Store.pixel_epoch`, and the
+    watcher deletes rows constantly. `forget_paths` routes through
+    `store.delete_images`, so the epoch moves and the cache rebuilds — a raw
+    DELETE here would leave `isDupe` true for an image whose twin is gone.
+    """
+    watcher, root, store, _indexer, _embedder = watched
+    # Byte-identical copies: same pixels, so the same pHash.
+    make_photo(root / "a.jpg")
+    shutil.copyfile(root / "a.jpg", root / "b.jpg")
+    watcher.touch(root / "a.jpg")
+    watcher.touch(root / "b.jpg")
+    watcher.flush()
+
+    index = DupeIndex(store)
+    assert len(index.ids) == 2
+
+    (root / "b.jpg").unlink()
+    watcher.remove(root / "b.jpg")
+    watcher.flush()
+    assert index.ids == frozenset()
