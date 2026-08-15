@@ -275,6 +275,28 @@ class Store:
             c.commit()
             return cur.rowcount
 
+    def move_image(self, old_path: str, new_path: str) -> int | None:
+        """Repoint a row at a renamed file. Returns the image id, or None.
+
+        The whole reason to track renames is that the pixels did not change:
+        the embedding, the OCR text and the thumbnails are all still correct
+        and all of them hang off `image_id`. Re-ingesting would spend the GPU
+        on a file that only moved.
+        """
+        with self._write_lock:
+            c = self.conn()
+            row = c.execute("SELECT id FROM images WHERE path=?", (old_path,)).fetchone()
+            if(row is None):
+                return None
+            image_id = int(row["id"])
+            # Landing on an existing row would violate UNIQUE(path). Whatever
+            # was at the destination has just been overwritten on disk, so its
+            # row is stale — drop it and let the cascade take its rows with it.
+            c.execute("DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id))
+            c.execute("UPDATE images SET path=? WHERE id=?", (new_path, image_id))
+            c.commit()
+            return image_id
+
     def image_count(self) -> int:
         return int(self.conn().execute("SELECT count(*) AS n FROM images").fetchone()["n"])
 

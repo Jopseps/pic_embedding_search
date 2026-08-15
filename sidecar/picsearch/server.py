@@ -53,6 +53,7 @@ from .embed import Embedder, spec_for
 from .index import Indexer
 from .search import DEFAULT_LIMIT, Searcher, SearchParams, VectorIndex, hydrate
 from .store import Store
+from .watch import FolderWatcher
 
 log = logging.getLogger("picsearch.server")
 
@@ -167,6 +168,10 @@ class AppState:
             on_event=self.events.publish,
             on_vector=self._on_vector,
         )
+        # Constructed, not started: `create_app`'s lifespan owns that, so the
+        # tests that build an AppState per case do not each spawn inotify
+        # observer threads on the host filesystem.
+        self.watcher = FolderWatcher(self.store, self.indexer)
         self.searcher = Searcher(self.store, self.vectors, self.embedder)
         self.started = time.time()
 
@@ -229,7 +234,11 @@ def create_app(state: AppState) -> FastAPI:
         # The event bus fans out from ingest worker threads, so it needs the
         # serving loop to hand work back to.
         state.events.bind(asyncio.get_running_loop())
-        yield
+        state.watcher.start()
+        try:
+            yield
+        finally:
+            state.watcher.stop()
 
     app = FastAPI(
         title="picsearch sidecar", version="0.1.0",
@@ -263,6 +272,7 @@ def create_app(state: AppState) -> FastAPI:
             "vectors": state.vectors.size,
             "ocrEngine": None if state.ocr is None else state.ocr.id,
             "ocrLangs": None if state.ocr is None else state.ocr.langs_key,
+            "watching": len(state.watcher.roots()),
             "indexing": state.indexer.status.as_wire(),
             "uptimeSec": round(time.time() - state.started, 1),
         }
@@ -357,6 +367,8 @@ def create_app(state: AppState) -> FastAPI:
         if(not path.is_dir()):
             raise HTTPException(status_code=400, detail=f"not a directory: {path}")
         state.store.add_folder(str(path), body.recursive)
+        # Watch it from now on, then walk what is already there.
+        state.watcher.sync()
         state.indexer.start_rescan()
         return {"path": str(path), "count": state.store.folder_count(str(path)),
                 "recursive": body.recursive}
@@ -364,6 +376,7 @@ def create_app(state: AppState) -> FastAPI:
     @app.delete("/folders", dependencies=[guard])
     def remove_folder(path: str) -> dict:
         state.store.remove_folder(path)
+        state.watcher.sync()
         return {"ok": True}
 
     @app.patch("/folders", dependencies=[guard])
@@ -371,6 +384,8 @@ def create_app(state: AppState) -> FastAPI:
         if(not body.path):
             raise HTTPException(status_code=400, detail="path is required")
         state.store.set_folder_recursive(body.path, body.recursive)
+        # `recursive` changes which events count, so the observer is re-attached.
+        state.watcher.sync()
         return {"ok": True}
 
     @app.post("/rescan", dependencies=[guard])

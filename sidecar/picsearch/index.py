@@ -121,6 +121,34 @@ def walk_images(root: Path, recursive: bool = True) -> Iterator[Path]:
                 yield p
 
 
+def indexable_under(path: Path, root: Path, recursive: bool = True) -> bool:
+    """True when `walk_images(root, recursive)` would have yielded `path`.
+
+    The watcher must apply exactly this rule and nothing looser. A file it
+    ingests that a scan would not walk — inside a dotdir, or below a folder
+    watched non-recursively — is deleted again by `_prune_missing` on the next
+    rescan. The image appears instantly and then vanishes an hour later, which
+    is a far worse bug than never appearing.
+    """
+    path = Path(path)
+    try:
+        rel = path.relative_to(Path(root))
+    except ValueError:
+        return False
+    parts = rel.parts
+    if(not parts):
+        return False
+    if(not recursive and len(parts) > 1):
+        return False
+    if(any(part.startswith(".") for part in parts)):
+        return False
+    # Writing a thumbnail is itself a filesystem event. Watching a folder that
+    # contains the cache would otherwise ingest its own output forever.
+    if(paths.thumbs_dir().resolve() in path.resolve().parents):
+        return False
+    return imaging.is_supported(path)
+
+
 class Indexer:
     """Owns ingest. One instance per process, shared by the API and the watcher."""
 
@@ -159,10 +187,24 @@ class Indexer:
         t = self._thread
         return t is not None and t.is_alive()
 
+    def _claim(self) -> bool:
+        """Take the ingest slot, or report that something else already has it.
+
+        `self.running` covers the background thread; `status.running` covers a
+        synchronous ingest on somebody else's thread, which is what the watcher
+        does. Both are needed — two ingests at once would interleave progress
+        events and run two GPU batches against one embedder.
+        """
+        with self._lock:
+            if(self.running or self.status.running):
+                return False
+            self.status.running = True
+            return True
+
     def start_rescan(self, folders: Sequence[tuple[Path, bool]] | None = None) -> bool:
         """Kick off a scan in the background. False if one is already running."""
         with self._lock:
-            if(self.running):
+            if(self.running or self.status.running):
                 return False
             self._stop.clear()
             targets = folders if folders is not None else self._enabled_folders()
@@ -223,6 +265,34 @@ class Indexer:
 
         self.status = IndexStatus(total=len(candidates), running=True)
         self._emit("index", self.status.as_wire())
+        self._ingest_many(candidates, report)
+
+        if(prune and not self._stop.is_set()):
+            report.removed = self._prune_missing(targets, seen)
+
+        # Screenshots indexed before OCR existed — or before the engine or its
+        # languages changed — are read here. A rescan is already an explicit
+        # user action, and unchanged files cost nothing above.
+        if(not self._stop.is_set()):
+            report.ocred += self.ocr_missing()
+
+        self.status.running = False
+        self.status.current_file = ""
+        self._emit("index", self.status.as_wire())
+        self._emit("scan-complete", self._complete_payload(report))
+        return report
+
+    def _ingest_many(self, candidates: Sequence[Path], report: ScanReport) -> None:
+        """The ingest loop itself, shared by the folder scan and the watcher.
+
+        Progress, GPU batching and the bounded OCR pool all live here, so a
+        watcher batch behaves exactly like a very small scan: same events, same
+        batch size, same ceiling on full-resolution decodes in flight.
+
+        The caller owns `self.status` — it sets the total and clears `running`
+        — because a scan counts a walk this does not know about.
+        """
+        total = len(candidates)
         started = time.monotonic()
 
         batch_ids: list[int] = []
@@ -268,29 +338,18 @@ class Indexer:
 
                 elapsed = time.monotonic() - started
                 self.status.rate = (i / elapsed) if elapsed > 0 else 0.0
-                remaining = max(0, len(candidates) - i)
+                remaining = max(0, total - i)
                 self.status.eta_sec = (
                     (remaining / self.status.rate) if self.status.rate > 0 else 0.0
                 )
-                if(i % 10 == 0 or i == len(candidates)):
+                if(i % 10 == 0 or i == total):
                     self._emit("index", self.status.as_wire())
 
             report.embedded += self._flush(batch_ids, batch_imgs)
             report.ocred += self._ocr_drain(pending, report.errors)
 
-        if(prune and not self._stop.is_set()):
-            report.removed = self._prune_missing(targets, seen)
-
-        # Screenshots indexed before OCR existed — or before the engine or its
-        # languages changed — are read here. A rescan is already an explicit
-        # user action, and unchanged files cost nothing above.
-        if(not self._stop.is_set()):
-            report.ocred += self.ocr_missing()
-
-        self.status.running = False
-        self.status.current_file = ""
-        self._emit("index", self.status.as_wire())
-        self._emit("scan-complete", {
+    def _complete_payload(self, report: ScanReport) -> dict:
+        return {
             "scanned": report.scanned,
             "ingested": report.ingested,
             "skipped": report.skipped,
@@ -298,8 +357,7 @@ class Indexer:
             "ocred": report.ocred,
             "removed": report.removed,
             "errors": len(report.errors),
-        })
-        return report
+        }
 
     def _ingest_one(self, path: Path) -> Ingested | None:
         """Returns the work left for the batches, or None when the file is unchanged."""
@@ -337,6 +395,74 @@ class Indexer:
             is_screenshot=is_screenshot,
         )
         return Ingested(image_id, small, ocr_image)
+
+    # -- watcher entry points ------------------------------------------------
+
+    def ingest_paths(self, paths_in: Sequence[Path]) -> ScanReport | None:
+        """Ingest an explicit set of files, skipping the folder walk.
+
+        `None` means the ingest slot was busy and the caller should hold the
+        paths and try again — the watcher does exactly that. Returning an empty
+        report instead would silently drop the files.
+
+        Unchanged files still cost nothing: `_ingest_one` runs the same
+        `(path, mtime, size)` check, so a burst of `modify` events on a file
+        nobody touched skips the GPU just as a rescan does.
+        """
+        seen: dict[str, Path] = {}
+        for p in paths_in:
+            path = Path(p)
+            if(path.is_file()):
+                seen.setdefault(str(path), path)
+        candidates = list(seen.values())
+        if(not candidates):
+            return ScanReport()
+        if(not self._claim()):
+            return None
+
+        report = ScanReport()
+        try:
+            self.status = IndexStatus(total=len(candidates), running=True)
+            self._emit("index", self.status.as_wire())
+            self._ingest_many(candidates, report)
+        finally:
+            self.status.running = False
+            self.status.current_file = ""
+        self._emit("index", self.status.as_wire())
+        self._emit("scan-complete", self._complete_payload(report))
+        return report
+
+    def forget_paths(self, paths_in: Sequence[Path]) -> int:
+        """Drop rows for files that are gone. Thumbnails stay on disk.
+
+        Thumbnails are content-addressed by sha256, so a duplicate elsewhere in
+        the library may still need them and a file that comes back costs no
+        re-encode. The cache is a cache — Settings reports its size and can
+        purge it.
+        """
+        gone: list[int] = []
+        for p in paths_in:
+            path = Path(p)
+            # Deleted and recreated between the event and now — a save-by-
+            # replace does this, and dropping the row would lose the image.
+            if(path.exists()):
+                continue
+            row = self.store.image_by_path(str(path))
+            if(row is not None):
+                gone.append(int(row["id"]))
+        if(gone):
+            self.store.delete_images(gone)
+        return len(gone)
+
+    def move_path(self, src: Path, dest: Path) -> bool:
+        """Follow a rename in place. False when there was no row at `src`.
+
+        Nothing is verified about the destination on purpose: if the file was
+        modified as well as moved, its stored `(mtime, size)` no longer match
+        and the next scan re-ingests it. The cheap path stays cheap and the
+        expensive path stays correct.
+        """
+        return self.store.move_image(str(src), str(dest)) is not None
 
     # -- OCR ----------------------------------------------------------------
 
