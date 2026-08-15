@@ -1,0 +1,21 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Python sidecar
+sidecar/.venv/
+sidecar/.pytest_cache/
+__pycache__/
+*.py[cod]
+
+.DS_Store
+*.log
+
+# Markdown is untracked by default — scratch notes, plans and design briefs stay
+# local. The four docs below are the project's actual documentation.
+*.md
+!README.md
+!CLAUDE.md
+!ARCHITECTURE.md
+!PLAN.md
