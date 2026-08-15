@@ -10,12 +10,17 @@ whole ingest design exists to make a rescan free.
 
 from __future__ import annotations
 
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 from PIL import Image
 
 from picsearch import imaging, paths
 from picsearch.index import Indexer, walk_images
+from picsearch.ocr import OcrError
 from picsearch.store import Store, hamming64, phash_from_db
 
 DIM = 8
@@ -276,3 +281,156 @@ def test_background_rescan_runs_and_finishes(store: Store, library):
     idx.join(timeout=60)
     assert store.image_count() == 20
     assert idx.running is False
+
+
+# -- OCR --------------------------------------------------------------------
+
+class FakeOcr:
+    """Stands in for tesseract. Thread-safe: the pool calls it from 4 threads."""
+
+    id = "fake"
+
+    def __init__(self, langs_key: str = "eng", text: str = "build failed", fail: bool = False):
+        self.langs_key = langs_key
+        self.text = text
+        self.fail = fail
+        self.reads = 0
+        self.sizes: list[tuple[int, int]] = []
+        self._lock = threading.Lock()
+
+    def read(self, image):
+        with self._lock:
+            self.reads += 1
+            self.sizes.append(image.size)
+        if(self.fail):
+            raise OcrError("engine said no")
+        return self.text
+
+
+def screenshot_ids(store: Store) -> set[int]:
+    return {
+        int(r["id"]) for r in store.conn().execute("SELECT id FROM images WHERE is_screenshot = 1")
+    }
+
+
+def test_scan_ocrs_screenshots_and_nothing_else(store: Store, library):
+    fake = FakeOcr()
+    idx = Indexer(store, FakeEmbedder(), ocr=fake)
+    report = idx.scan([(library, True)])
+
+    shots = screenshot_ids(store)
+    assert len(shots) == 6
+    assert fake.reads == 6
+    assert report.ocred == 6
+    # Photos are never read: OCR is the expensive half of ingest.
+    assert store.ocr_ids() == shots
+
+
+def test_ocr_reads_full_resolution_not_the_embed_copy(store: Store, library):
+    fake = FakeOcr()
+    Indexer(store, FakeEmbedder(), ocr=fake).scan([(library, True)])
+    # 768 px (EMBED_MAX_EDGE) would make body text unreadable.
+    assert (1920, 1080) in fake.sizes
+
+
+def test_second_scan_does_not_reocr(store: Store, library):
+    fake = FakeOcr()
+    idx = Indexer(store, FakeEmbedder(), ocr=fake)
+    idx.scan([(library, True)])
+    idx.scan([(library, True)])
+    assert fake.reads == 6
+
+
+def test_an_empty_result_is_stored_as_a_marker(store: Store, library):
+    fake = FakeOcr(text="")
+    idx = Indexer(store, FakeEmbedder(), ocr=fake)
+    idx.scan([(library, True)])
+
+    # The row exists so the screenshot is never read again...
+    assert idx.scan([(library, True)]) and fake.reads == 6
+    assert store.get_ocr(next(iter(screenshot_ids(store)))) == ""
+    # ...but an empty row is not "has text", or the grid lights up a TEXT badge
+    # on every screenshot that happens to contain no words.
+    assert store.ocr_ids() == set()
+
+
+def test_changing_the_languages_reocrs(store: Store, library):
+    first = FakeOcr(langs_key="eng")
+    idx = Indexer(store, FakeEmbedder(), ocr=first)
+    idx.scan([(library, True)])
+
+    # What installing tesseract-data-tur looks like from here.
+    second = FakeOcr(langs_key="eng+tur", text="masaüstü")
+    idx.set_ocr(second)
+    idx.scan([(library, True)])
+
+    assert second.reads == 6
+    assert store.get_ocr(next(iter(screenshot_ids(store)))) == "masaüstü"
+
+
+def test_a_failed_read_writes_no_row_and_is_retried(store: Store, library):
+    broken = FakeOcr(fail=True)
+    idx = Indexer(store, FakeEmbedder(), ocr=broken)
+    report = idx.scan([(library, True)])
+
+    assert store.ocr_ids() == set()
+    assert len(report.errors) == 6
+    # No row means the next scan tries again, which is the point.
+    working = FakeOcr()
+    idx.set_ocr(working)
+    idx.scan([(library, True)])
+    assert working.reads == 6
+    assert store.ocr_ids() == screenshot_ids(store)
+
+
+def test_backfill_reads_screenshots_indexed_before_ocr_existed(store: Store, library):
+    idx = Indexer(store, FakeEmbedder())
+    idx.scan([(library, True)])
+    assert store.ocr_ids() == set()
+
+    fake = FakeOcr()
+    idx.set_ocr(fake)
+    assert idx.ocr_missing() == 6
+    assert store.ocr_ids() == screenshot_ids(store)
+    # Idempotent: a second call has nothing left to do.
+    assert idx.ocr_missing() == 0
+
+
+def test_background_ocr_backfill_finishes_and_announces_itself(store: Store, library):
+    seen: list[tuple[str, dict]] = []
+    idx = Indexer(store, FakeEmbedder(), on_event=lambda k, p: seen.append((k, p)))
+    idx.scan([(library, True)])
+    idx.set_ocr(FakeOcr())
+
+    assert idx.start_ocr_backfill() is True
+    idx.join(timeout=60)
+    assert idx.running is False
+    assert store.ocr_ids() == screenshot_ids(store)
+    # The frontend refreshes its results on scan-complete; without it the TEXT
+    # badges only appear on the next manual reload.
+    assert seen[-1][0] == "scan-complete"
+    assert seen[-1][1]["ocred"] == 6
+
+
+def test_a_result_is_stamped_with_the_engine_that_produced_it(store: Store, library):
+    """`PUT /settings` can swap the engine while reads are still in flight.
+
+    Stamping that text with the *new* engine's identity would make a stale row
+    look current to images_missing_ocr, which would then never re-read it.
+    """
+    idx = Indexer(store, FakeEmbedder(), ocr=FakeOcr(langs_key="eng", text="old engine"))
+    idx.scan([(library, True)])
+    shot = min(screenshot_ids(store))
+
+    pending: deque = deque()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        idx._ocr_submit(pool, pending, shot, Image.new("L", (64, 64)))
+        idx.set_ocr(FakeOcr(langs_key="eng+tur", text="new engine"))
+        idx._ocr_drain(pending)
+
+    row = store.conn().execute(
+        "SELECT langs, text FROM ocr_text WHERE image_id = ?", (shot,)
+    ).fetchone()
+    assert (row["langs"], row["text"]) == ("eng", "old engine")
+    # And it is still stale under the new engine, so the backfill picks it up.
+    assert shot in store.images_missing_ocr("fake", "eng+tur")

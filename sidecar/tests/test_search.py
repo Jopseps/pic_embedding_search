@@ -26,6 +26,8 @@ from picsearch.search import (
     VectorIndex,
     build_filter_sql,
     candidate_ids,
+    fts_match_query,
+    fts_search,
     rrf_merge,
 )
 from picsearch.server import TOKEN_HEADER, AppState, create_app
@@ -101,6 +103,11 @@ def library(tmp_path):
 @pytest.fixture()
 def app_state(xdg_tmp, library):
     state = AppState(model_id=MODEL, embedder=ColorEmbedder())
+    # OCR is driven by explicit put_ocr() rows below, never by shelling out to
+    # a real engine — whether this machine has tesseract must not change what
+    # any of these assertions mean.
+    state.ocr = None
+    state.indexer.set_ocr(None)
     state.store.add_folder(str(library), recursive=True)
     state.indexer.scan([(library, True)])
     return state
@@ -397,7 +404,9 @@ def test_item_keys_match_types_ts(app_state):
     assert set(browsing) == expected - {"score"}
 
 
-def test_ocr_fields_are_present_and_null_before_step_8(app_state):
+def test_ocr_fields_are_present_and_null_without_text(app_state):
+    # Present-and-null, never absent: the frontend tells "no OCR" from "field
+    # missing", and a blanket exclude_none would delete both.
     item = app_state.searcher.search(SearchParams(q=""))["items"][0]
     assert item["hasOcr"] is False
     assert item["ocrText"] is None
@@ -612,3 +621,140 @@ def test_indexer_and_searcher_share_the_store(xdg_tmp, library):
     searcher = Searcher(store, vectors, embedder)
     assert vectors.size == 10
     assert searcher.search(SearchParams(q="green"))["items"][0]["filename"].startswith("green")
+
+
+# ---------------------------------------------------------------------------
+# Text leg: FTS5 over OCR, and its fusion with the vector leg
+# ---------------------------------------------------------------------------
+
+def shot_ids(app_state) -> list[int]:
+    """The three 1920x1080 blue fixtures, which the heuristic calls screenshots."""
+    return [
+        int(r["id"])
+        for r in app_state.store.conn().execute(
+            "SELECT id FROM images WHERE is_screenshot = 1 ORDER BY id"
+        )
+    ]
+
+
+def test_fts_match_query_quotes_every_token():
+    assert fts_match_query("build failed") == '"build" "failed"'
+
+
+def test_fts_match_query_is_none_when_there_are_no_words():
+    assert fts_match_query("   ") is None
+    assert fts_match_query("-- ** ?") is None
+
+
+def test_fts_match_query_defuses_fts5_syntax():
+    # A photo search is never a query language. `*`, `-`, `OR` and a stray quote
+    # must reach SQLite as literal terms, not as operators.
+    assert fts_match_query('build* OR -failed "x"') == '"build" "OR" "failed" "x"'
+
+
+def test_fts_match_query_keeps_turkish_words_whole():
+    assert fts_match_query("masaüstü görüntüsü") == '"masaüstü" "görüntüsü"'
+
+
+def test_fts_search_ranks_matches_and_returns_a_snippet(app_state):
+    hit, miss, _rest = shot_ids(app_state)
+    app_state.store.put_ocr(hit, "fake", "eng", "ERROR: the build failed after 3 minutes")
+    app_state.store.put_ocr(miss, "fake", "eng", "a note about gardening")
+
+    ids, snippets = fts_search(app_state.store, "build failed")
+    assert ids == [hit]
+    assert "build" in snippets[hit]
+
+
+def test_fts_search_respects_the_candidate_set(app_state):
+    first, second, _rest = shot_ids(app_state)
+    for image_id in (first, second):
+        app_state.store.put_ocr(image_id, "fake", "eng", "build failed")
+
+    # Without this the folder/type/date filters silently stop applying to text
+    # hits, and no assertion about the vector leg would ever catch it.
+    ids, _snippets = fts_search(app_state.store, "build failed", candidates={second})
+    assert ids == [second]
+
+
+def test_fts_search_degrades_to_empty_on_a_match_sqlite_rejects(app_state, monkeypatch):
+    import picsearch.search as search_mod
+
+    app_state.store.put_ocr(shot_ids(app_state)[0], "fake", "eng", "build failed")
+    monkeypatch.setattr(search_mod, "fts_match_query", lambda q: 'NEAR("a"')
+    # A bad query is a bad query, not a 500 — the vector leg still answers it.
+    assert fts_search(app_state.store, "anything") == ([], {})
+
+
+def test_a_screenshot_is_retrievable_by_the_text_in_it(app_state):
+    target = shot_ids(app_state)[0]
+    app_state.store.put_ocr(target, "fake", "eng", "ERROR: build failed\nnpm run tauri dev")
+
+    res = app_state.searcher.search(SearchParams(q="build failed"))
+    top = res["items"][0]
+    assert top["id"] == target
+    assert top["hasOcr"] is True
+    assert top["ocrText"].startswith("ERROR")
+    assert "build" in top["snippet"]
+
+
+def test_an_unrelated_phrase_does_not_surface_it(app_state):
+    target = shot_ids(app_state)[0]
+    app_state.store.put_ocr(target, "fake", "eng", "ERROR: build failed\nnpm run tauri dev")
+
+    # The vector leg ranks every image for every query, so the assertion that
+    # means something is about *rank*, not membership.
+    top = app_state.searcher.search(SearchParams(q="red"))["items"][:3]
+    assert all(item["filename"].startswith("red") for item in top)
+    assert target not in [item["id"] for item in top]
+
+
+def test_a_text_hit_outranks_a_better_visual_match(app_state):
+    """The reason fusion is RRF and not a weighted sum.
+
+    A blue screenshot with the word "red" in it beats a perfectly red photo,
+    because rank 1 in the text list is worth more than rank 1 in only one list —
+    and cosine 0.99 versus BM25 -4.2 could never have been compared directly.
+    """
+    target = shot_ids(app_state)[0]
+    app_state.store.put_ocr(target, "fake", "eng", "the red banner at the top")
+
+    res = app_state.searcher.search(SearchParams(q="red"))
+    assert res["items"][0]["id"] == target
+    assert res["items"][1]["filename"].startswith("red")
+
+
+def test_scores_are_rrf_not_cosine(app_state):
+    # The colour embedder returns cosine 1.0 for an exact match; RRF at rank 1
+    # of one list is 1/61. Any weighted sum of the two would sit between them.
+    res = app_state.searcher.search(SearchParams(q="red"))
+    assert 0.0 < res["items"][0]["score"] < 0.05
+
+
+def test_text_matches_still_respect_the_filters(app_state):
+    target = shot_ids(app_state)[0]
+    app_state.store.put_ocr(target, "fake", "eng", "build failed")
+
+    res = app_state.searcher.search(SearchParams(q="build failed", types=["Photo"]))
+    assert target not in [item["id"] for item in res["items"]]
+
+
+def test_an_empty_ocr_row_is_not_has_ocr(app_state):
+    target = shot_ids(app_state)[0]
+    app_state.store.put_ocr(target, "fake", "eng", "")
+
+    item = next(
+        i for i in app_state.searcher.search(SearchParams(q=""))["items"] if i["id"] == target
+    )
+    # The row is the "OCR ran, found nothing" marker. It must not light up the
+    # TEXT badge or render an empty quote in the lightbox.
+    assert item["hasOcr"] is False
+    assert item["ocrText"] is None
+
+
+def test_an_unavailable_ocr_engine_is_still_persisted(client, app_state):
+    body = client.put("/settings", json={"ocrEngineId": "easyocr"}).json()
+    app_state.indexer.join(timeout=60)
+    # The preference is the user's; what actually runs is whatever is installed.
+    assert body["ocrEngineId"] == "easyocr"
+    assert client.get("/health").json()["ocrEngine"] != "easyocr"
