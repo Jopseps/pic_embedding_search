@@ -1,4 +1,5 @@
-import { useStore } from "../lib/store";
+import { memo, useRef, useState } from "react";
+import { SIDEBAR_DEFAULT_W, SIDEBAR_SNAP_W, useStore } from "../lib/store";
 import { fmtCount } from "../lib/format";
 import { Chip, CheckRow, SectionLabel } from "./ui";
 import type { DatePreset, DimsFilter, LibraryView, PhotoKind } from "../lib/types";
@@ -17,22 +18,93 @@ const DIMS: { key: DimsFilter; label: string }[] = [
     { key: "small", label: "Small" },
 ];
 
-export function Sidebar(){
+/** Memoised for the same reason as `TopBar`: nothing here moves with the
+ *  grid's scroll position, and `App` re-renders on every frame of it. */
+export const Sidebar = memo(function Sidebar(){
     const collapsed = useStore((s) => s.sidebarCollapsed);
+    const width = useStore((s) => s.sidebarWidth);
+    const setWidth = useStore((s) => s.setSidebarWidth);
+    const setCollapsed = useStore((s) => s.setSidebarCollapsed);
+    const [dragging, setDragging] = useState(false);
+    const shell = useRef<HTMLDivElement>(null);
+
+    function onPointerDown(e: React.PointerEvent){
+        if(e.button !== 0){
+            return;
+        }
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setDragging(true);
+    }
+
+    function onPointerMove(e: React.PointerEvent){
+        if(!dragging || shell.current === null){
+            return;
+        }
+        const w = e.clientX - shell.current.getBoundingClientRect().left;
+        if(w < SIDEBAR_SNAP_W){
+            setCollapsed(true);
+            return;
+        }
+        setCollapsed(false);
+        setWidth(w, false);
+    }
+
+    function endDrag(e: React.PointerEvent){
+        if(e.currentTarget.hasPointerCapture(e.pointerId)){
+            e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+        if(dragging){
+            setWidth(useStore.getState().sidebarWidth);   // the release makes it final
+        }
+        setDragging(false);
+    }
+
     return (
         <div
-            className="flex-shrink-0 overflow-hidden border-r border-edge bg-panel transition-[width] duration-150"
-            style={{ width: collapsed ? 0 : 240 }}
+            ref={shell}
+            className={
+                "relative flex-shrink-0 overflow-hidden border-r border-edge bg-panel "
+                // Animating width while the pointer drives it fights the pointer:
+                // the panel lags a frame behind the handle the whole way.
+                + (dragging ? "" : "transition-[width] duration-150")
+            }
+            style={{ width: collapsed ? 0 : width }}
         >
-            <div className="h-full w-[240px] overflow-y-auto px-[10px] pt-[14px] pb-14">
+            <div
+                className="h-full overflow-y-auto px-[10px] pt-[14px] pb-14"
+                // Pinned to the target width so the collapse animation slides the
+                // panel out instead of reflowing every row down to nothing.
+                style={{ width }}
+            >
                 <LibrarySection />
                 <CollectionsSection />
                 <SavedSearchesSection />
                 <FiltersSection />
             </div>
+
+            {/* Kept mounted while dragging even after a snap to collapsed —
+                unmounting it there drops the pointer capture and the panel can
+                never be dragged back open in the same gesture. */}
+            {collapsed && !dragging ? null : (
+                <div
+                    role="separator"
+                    aria-label="Resize sidebar"
+                    aria-orientation="vertical"
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={endDrag}
+                    onPointerCancel={endDrag}
+                    onDoubleClick={() => setWidth(SIDEBAR_DEFAULT_W)}
+                    className={
+                        "absolute top-0 right-0 z-[6] h-full w-[6px] cursor-col-resize "
+                        + (dragging ? "bg-accent/40" : "hover:bg-accent/30")
+                    }
+                />
+            )}
         </div>
     );
-}
+});
 
 function NavRow(props: {
     label: string;
@@ -70,10 +142,9 @@ function LibrarySection(){
     const activeCollection = useStore((s) => s.activeCollection);
     const setLibraryView = useStore((s) => s.setLibraryView);
     const toggleSidebar = useStore((s) => s.toggleSidebar);
-    const total = useStore((s) => s.total);
-    const results = useStore((s) => s.results);
-
-    const dupes = results.filter((r) => r.isDupe).length;
+    // Library-wide, from /counts. Reading these off the current search made
+    // "All" show however many results the query returned.
+    const counts = useStore((s) => s.counts);
     const isActive = (v: LibraryView) => activeCollection === null && libraryView === v;
 
     return (
@@ -94,14 +165,19 @@ function LibrarySection(){
             <NavRow
                 label="All"
                 active={isActive("all")}
-                count={total}
+                count={counts.library}
                 onClick={() => setLibraryView("all")}
             />
-            <NavRow label="Recent" active={isActive("recent")} onClick={() => setLibraryView("recent")} />
+            <NavRow
+                label="Recent"
+                active={isActive("recent")}
+                count={counts.recent}
+                onClick={() => setLibraryView("recent")}
+            />
             <NavRow
                 label="Duplicates"
                 active={isActive("dupes")}
-                count={dupes}
+                count={counts.dupes}
                 onClick={() => setLibraryView("dupes")}
             />
         </>
@@ -110,6 +186,7 @@ function LibrarySection(){
 
 function CollectionsSection(){
     const collections = useStore((s) => s.collections);
+    const counts = useStore((s) => s.counts.collections);
     const active = useStore((s) => s.activeCollection);
     const setActive = useStore((s) => s.setActiveCollection);
     const remove = useStore((s) => s.deleteCollection);
@@ -121,6 +198,7 @@ function CollectionsSection(){
     const start = useStore((s) => s.startAddCollection);
     const commit = useStore((s) => s.commitCollection);
     const cancel = useStore((s) => s.cancelAddCollection);
+    const dropTarget = useStore((s) => s.dragOut.overCollection);
 
     return (
         <>
@@ -128,9 +206,17 @@ function CollectionsSection(){
             {collections.map((c) => (
                 <div
                     key={c.id}
+                    // The gesture machine finds this row with `elementFromPoint`
+                    // rather than HTML5 dragover: the drag is a plain pointer
+                    // drag until it leaves the window, and mixing the two drag
+                    // protocols would also fight App's find-similar file drop.
+                    data-collection-id={c.id}
                     className={
-                        "group mb-px flex items-center rounded-md transition-colors " +
-                        (active === c.id
+                        "group mb-px flex items-center rounded-md transition-colors "
+                        + (dropTarget === c.id
+                            ? "ring-2 ring-accent ring-inset bg-accent-muted text-accent-text "
+                            : "")
+                        + (active === c.id
                             ? "bg-accent-muted text-accent-text"
                             : "text-fg-dim hover:bg-hover")
                     }
@@ -138,9 +224,14 @@ function CollectionsSection(){
                     <button
                         type="button"
                         onClick={() => setActive(c.id)}
-                        className="flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap px-2 py-[7px] text-left text-[13px]"
+                        className="flex flex-1 cursor-pointer items-center justify-between gap-2 overflow-hidden px-2 py-[7px] text-left text-[13px]"
                     >
-                        {c.name}
+                        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{c.name}</span>
+                        {counts[c.id] !== undefined && counts[c.id]! > 0 ? (
+                            <span className="shrink-0 text-[11px] tabular-nums text-fg-faint">
+                                {fmtCount(counts[c.id]!)}
+                            </span>
+                        ) : null}
                     </button>
                     {/* Armed on the first click, confirmed on the second. The
                         collection is cheap to recreate; its membership is not. */}

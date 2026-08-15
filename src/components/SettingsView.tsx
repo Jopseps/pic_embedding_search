@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { memo, useEffect } from "react";
 import { useStore } from "../lib/store";
 import {
     EMBEDDING_MODELS,
@@ -6,10 +6,14 @@ import {
     OCR_LANGUAGES,
     modelById,
 } from "../lib/catalog";
-import { fmtCount, fmtGb } from "../lib/format";
+import { fmtCount, fmtEta, fmtGb } from "../lib/format";
 import { isMockMode } from "../lib/api";
 import { Box, Button, Chip, Radio, Toggle } from "./ui";
 import type { Density, ThemePref } from "../lib/types";
+
+/** Embed-only throughput on the reference GPU (RTX 4070 laptop). Used for the
+ *  pre-flight estimate only — the live panel shows the measured rate. */
+const PREFLIGHT_IMG_PER_SEC = 25;
 
 const THEMES: ThemePref[] = ["dark", "light", "system"];
 const DENSITIES: { v: Density; label: string }[] = [
@@ -18,7 +22,7 @@ const DENSITIES: { v: Density; label: string }[] = [
     { v: 2, label: "Large" },
 ];
 
-export function SettingsView(){
+export const SettingsView = memo(function SettingsView(){
     const setView = useStore((s) => s.setView);
     const loadStorage = useStore((s) => s.loadStorage);
 
@@ -55,7 +59,7 @@ export function SettingsView(){
             </div>
         </div>
     );
-}
+});
 
 function Group(props: { title: string; hint?: string; children: React.ReactNode }){
     return (
@@ -117,11 +121,15 @@ function ModelSection(){
     const select = useStore((s) => s.selectModel);
     const confirm = useStore((s) => s.confirmModelChange);
     const cancel = useStore((s) => s.cancelModelChange);
-    const indexTotal = useStore((s) => s.indexing.total);
+    // The library size, not `indexing.total` — that is 0 unless a scan happens
+    // to be running, so the warning used to read "~1 minutes for 0 images".
+    const libraryTotal = useStore((s) => s.counts.library);
+    const activeName = useStore((s) => modelById(s.settings.modelId)?.name ?? s.settings.modelId);
 
     const pending = pendingId === null ? null : (modelById(pendingId) ?? null);
-    // ~150 img/s on the reference GPU; enough to set expectations, not a promise.
-    const etaMin = Math.max(1, Math.round(indexTotal / 150 / 60));
+    // A pre-flight guess only: nothing has been measured yet. Once batches land
+    // the panel below switches to the rate the sidecar actually reports.
+    const etaMin = Math.max(1, Math.round(libraryTotal / PREFLIGHT_IMG_PER_SEC / 60));
 
     return (
         <Group
@@ -167,9 +175,10 @@ function ModelSection(){
                     <div className="mb-1 text-[12.5px] font-semibold text-fg">Re-index required</div>
                     <div className="mb-[10px] text-[12px] leading-[1.5] text-fg-dim">
                         Switching to {pending.name} means every image needs to be re-embedded —
-                        the two models produce incompatible vectors. Estimated time: ~{etaMin} minute
-                        {etaMin === 1 ? "" : "s"} for {fmtCount(indexTotal)} images. Search will be
-                        unavailable while this runs.
+                        the two models produce incompatible vectors. Roughly ~{etaMin} minute
+                        {etaMin === 1 ? "" : "s"} for {fmtCount(libraryTotal)} images.{" "}
+                        <span className="text-fg">Search keeps working</span> the whole time —
+                        {" "}{activeName} answers queries until the new model is ready.
                     </div>
                     <div className="flex gap-2">
                         <button
@@ -194,6 +203,11 @@ function ModelSection(){
                 <div className="mt-[10px] rounded-lg border border-edge bg-raised p-[14px]">
                     <div className="mb-2 text-[12.5px] text-fg">
                         Re-indexing with {reindex.modelName}… {Math.round(reindex.progress)}%
+                        {reindex.total > 0 ? (
+                            <span className="text-fg-faint">
+                                {" "}({fmtCount(reindex.current)} / {fmtCount(reindex.total)})
+                            </span>
+                        ) : null}
                     </div>
                     <div className="mb-2 h-[6px] overflow-hidden rounded-[3px] bg-hover">
                         <div
@@ -201,7 +215,12 @@ function ModelSection(){
                             style={{ width: `${reindex.progress}%` }}
                         />
                     </div>
-                    <div className="text-[11.5px] text-danger">Search unavailable while re-indexing</div>
+                    {/* Not "unavailable": the outgoing model keeps every vector
+                        it had until the incoming one has full coverage. */}
+                    <div className="text-[11.5px] text-fg-faint">
+                        Still searching with {activeName}
+                        {reindex.rate > 0 ? ` · ${reindex.rate.toFixed(1)} img/s · ${fmtEta(reindex.etaSec)} left` : ""}
+                    </div>
                 </div>
             ) : null}
         </Group>

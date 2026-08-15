@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { useStore } from "../lib/store";
 import { GRID_GAP } from "../lib/catalog";
 import { visibleRange } from "../lib/grid";
 import { GRID_PAD_X, type GridLayoutHandle } from "../lib/useGridLayout";
+import { useGridGesture } from "../lib/useGridGesture";
 import { fmtCount } from "../lib/format";
 import { GridCell, SkeletonCell } from "./GridCell";
 import { Button } from "./ui";
@@ -13,6 +14,7 @@ const ZOOM_DOTS = [6, 9, 12];
 export function LibraryView(props: { grid: GridLayoutHandle }){
     const { grid } = props;
     const { layout, mode, scrollRef, scrollTop, viewportHeight } = grid;
+    const gesture = useGridGesture(grid);
 
     const density = useStore((s) => s.density);
     const setDensity = useStore((s) => s.setDensity);
@@ -24,6 +26,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const collections = useStore((s) => s.collections);
     const libraryView = useStore((s) => s.libraryView);
     const clearQuery = useStore((s) => s.clearQuery);
+    const exitSimilar = useStore((s) => s.exitSimilar);
     const addFolder = useStore((s) => s.addFolder);
 
     const isSearch = mode === "results" || mode === "emptySearch";
@@ -53,22 +56,39 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
         return m;
     }, [layout]);
 
+    // Month headers, extracted once per layout. Pulled out of the sticky-label
+    // lookup below because that runs on every scroll frame and walking the full
+    // block list there is the one O(all photos) step on the scroll path.
+    const headers = useMemo(() => {
+        const out: { top: number; label: string }[] = [];
+        for(const b of layout.blocks){
+            if(b.kind === "header"){
+                out.push({ top: b.top, label: b.label });
+            }
+        }
+        return out;
+    }, [layout.blocks]);
+
     // Month header currently scrolled past — pinned so the date context never
     // disappears, which plain absolute positioning would otherwise lose.
     const stickyLabel = useMemo(() => {
-        if(mode !== "idle"){
+        if(mode !== "idle" || headers.length === 0){
             return null;
         }
-        let label: string | null = null;
-        for(const b of layout.blocks){
-            if(b.kind === "header" && b.top <= scrollTop + 1){
-                label = b.label;
-            }else if(b.top > scrollTop + 1){
-                break;
+        let lo = 0;
+        let hi = headers.length - 1;
+        let found = -1;
+        while(lo <= hi){
+            const mid = (lo + hi) >> 1;
+            if((headers[mid]?.top ?? 0) <= scrollTop + 1){
+                found = mid;
+                lo = mid + 1;
+            }else{
+                hi = mid - 1;
             }
         }
-        return label;
-    }, [layout.blocks, scrollTop, mode]);
+        return found < 0 ? null : headers[found]?.label ?? null;
+    }, [headers, scrollTop, mode]);
 
     return (
         <div className="relative flex min-w-0 flex-1 flex-col">
@@ -110,8 +130,15 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
 
             <div
                 ref={scrollRef}
+                onPointerDown={gesture.onPointerDown}
                 className="relative flex-1 overflow-y-auto pt-2 pb-[90px]"
-                style={{ paddingLeft: GRID_PAD_X, paddingRight: GRID_PAD_X }}
+                style={{
+                    paddingLeft: GRID_PAD_X,
+                    paddingRight: GRID_PAD_X,
+                    // The sweep keeps painting under a pointer that has left the
+                    // photos, so the cursor has to say so everywhere in the pane.
+                    cursor: gesture.sweeping ? "crosshair" : undefined,
+                }}
             >
                 {stickyLabel !== null ? (
                     <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[10px] pb-2 text-[12.5px] font-semibold text-fg-dim">
@@ -124,11 +151,19 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                 ) : null}
 
                 {mode === "emptySearch" ? (
-                    <EmptySearch query={query} similar={similarTo !== null} onClear={clearQuery} />
+                    <EmptySearch
+                        query={query}
+                        similar={similarTo !== null}
+                        onClear={similarTo !== null ? exitSimilar : clearQuery}
+                    />
                 ) : null}
 
                 {layout.totalHeight > 0 ? (
-                    <div className="relative" style={{ height: layout.totalHeight }}>
+                    <div
+                        ref={gesture.canvasRef}
+                        className="relative"
+                        style={{ height: layout.totalHeight }}
+                    >
                         {blocks.map((block) => {
                             if(block.kind === "header"){
                                 return (
@@ -161,6 +196,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                                 </div>
                             );
                         })}
+
                     </div>
                 ) : null}
             </div>
@@ -171,8 +207,14 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
 }
 
 /** Split out so each cell subscribes to only its own slice of selection state —
- *  otherwise selecting one photo re-renders the entire visible window. */
-function Cell(props: {
+ *  otherwise selecting one photo re-renders the entire visible window.
+ *
+ *  Memoised on top of that. Every one of these hooks is a fresh store
+ *  subscription on each render, and the whole visible window re-renders on
+ *  every scroll frame — the grid's scroll position is state in `App`. Without
+ *  the memo that is ~40 cells × 7 subscriptions per frame, which is what the
+ *  scroll stutter was. */
+const Cell = memo(function Cell(props: {
     id: number;
     photo: Photo;
     width: number;
@@ -218,7 +260,7 @@ function Cell(props: {
             onHover={(h) => setHovered(h ? id : null)}
         />
     );
-}
+});
 
 function EmptyLibrary(props: { onAddFolder: () => void }){
     return (

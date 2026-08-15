@@ -31,15 +31,11 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
 
     return (
         <div
-            style={{
-                width,
-                height,
-                transform: hovered ? "translateY(-3px)" : "translateY(0)",
-            }}
+            style={{ width, height }}
             onClick={onOpen}
             onMouseEnter={() => onHover(true)}
             onMouseLeave={() => onHover(false)}
-            className="relative flex-shrink-0 cursor-pointer transition-transform duration-100"
+            className="relative flex-shrink-0 cursor-pointer"
         >
             <div
                 className="absolute inset-0 overflow-hidden rounded-md"
@@ -85,6 +81,23 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
                     </div>
                 </div>
 
+                {/* Selection wash. A checkbox alone is too quiet to read while
+                    a sweep paints photos under a moving hand, but the tint is
+                    deliberately light: the outline carries the state, and at
+                    0.28 a pale photo disappeared under it. Non-interactive so
+                    it never eats a pointermove the sweep needs. */}
+                {selected ? (
+                    <div
+                        className="pointer-events-none absolute inset-0"
+                        style={{
+                            background: "var(--accent)",
+                            opacity: 0.12,
+                            outline: "2px solid var(--accent)",
+                            outlineOffset: -2,
+                        }}
+                    />
+                ) : null}
+
                 <button
                     type="button"
                     aria-label={selected ? "Deselect" : "Select"}
@@ -99,7 +112,20 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
                         background: selected ? "var(--accent)" : "rgb(0 0 0 / 0.35)",
                     }}
                 >
-                    {selected ? <span className="text-[12px] font-bold text-white">✓</span> : null}
+                    {/* Drawn, not typed. A ✓ text node is the one thing in a cell
+                        a stray text selection can grab, and it sits under the
+                        pointer for the whole length of a sweep. */}
+                    {selected ? (
+                        <svg viewBox="0 0 12 12" fill="none" aria-hidden="true" className="h-3 w-3">
+                            <path
+                                d="M2.5 6.3 4.9 8.6 9.5 3.6"
+                                stroke="white"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                        </svg>
+                    ) : null}
                 </button>
             </div>
         </div>

@@ -95,14 +95,22 @@ body {
     background: var(--accent-muted);
 }
 
-/* Desktop app chrome: text is UI, not content. Inputs opt back in. */
+/* Desktop app chrome: text is UI, not content. Inputs opt back in.
+   The `-webkit-` prefix is written by hand and is not redundant: Lightning CSS
+   only adds it in the production build, and `npm run tauri dev` serves this
+   file unprefixed to a WebKitGTK that ignores the unprefixed property. That is
+   exactly the build the app is developed in, and there a paint sweep drags a
+   real text selection across the grid — `::selection` then paints
+   --accent-muted over every ✓, TEXT badge and month header it crosses. */
 #root {
+    -webkit-user-select: none;
     user-select: none;
 }
 
 input,
 textarea,
 [data-selectable] {
+    -webkit-user-select: text;
     user-select: text;
 }
 

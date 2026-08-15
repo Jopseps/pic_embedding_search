@@ -1,12 +1,16 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { useStore } from "../lib/store";
 import { fmtCount, fmtEta } from "../lib/format";
 
 const RING_CIRCUMFERENCE = 37.7;
 
-export function TopBar(){
+/** Memoised: `App` re-renders on every scroll frame — the grid's scroll
+ *  position is state up there — and the top bar depends on none of it. */
+export const TopBar = memo(function TopBar(){
     const query = useStore((s) => s.query);
     const searching = useStore((s) => s.searching);
+    // A re-index no longer disables search: the outgoing model keeps answering
+    // until the incoming one has full coverage.
     const reindexActive = useStore((s) => s.reindex.active);
     const setQuery = useStore((s) => s.setQuery);
     const clearQuery = useStore((s) => s.clearQuery);
@@ -32,11 +36,10 @@ export function TopBar(){
                 <input
                     ref={inputRef}
                     value={query}
-                    disabled={reindexActive}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder={
                         reindexActive
-                            ? "Search unavailable while re-indexing…"
+                            ? "Search your photos — re-indexing in the background…"
                             : "Search your photos and screenshots…"
                     }
                     className="min-w-0 flex-1 border-none bg-transparent text-[13px] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
@@ -87,7 +90,7 @@ export function TopBar(){
             </button>
         </div>
     );
-}
+});
 
 function IndexingIndicator(){
     const indexing = useStore((s) => s.indexing);
