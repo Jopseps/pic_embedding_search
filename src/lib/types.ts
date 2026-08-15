@@ -21,7 +21,7 @@ export interface Photo{
     ocrText: string | null;
     /** FTS5 highlight fragment, null for vector-only hits. */
     snippet: string | null;
-    /** RRF score once hybrid search lands; cosine before that. Absent when browsing. */
+    /** RRF fusion score — ~0.016 for a rank-1 hit, not a cosine. Absent when browsing. */
     score?: number;
     isDupe: boolean;
     collections: string[];

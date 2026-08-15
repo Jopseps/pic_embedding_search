@@ -44,23 +44,29 @@ export const DEFAULT_MODEL_ID = "siglip2-so400m-patch14-384";
 
 export const OCR_ENGINES: OcrEngine[] = [
     {
-        id: "rapidocr",
-        label: "RapidOCR",
-        desc: "ONNX · GPU · strongest on UI screenshots",
-    },
-    {
         id: "tesseract",
         label: "Tesseract",
-        desc: "CPU only · mature · weaker on anti-aliased text",
+        desc: "CPU · real tur+eng · strongest on crisp UI text",
+    },
+    {
+        id: "rapidocr",
+        label: "RapidOCR",
+        desc: "ONNX · better on photos · Turkish diacritics degrade",
     },
     {
         id: "easyocr",
         label: "EasyOCR",
-        desc: "PyTorch · GPU · 80+ languages",
+        desc: "PyTorch · 80+ languages · separate install",
     },
 ];
 
-export const DEFAULT_OCR_ENGINE_ID = "rapidocr";
+/**
+ * Tesseract, not RapidOCR: its `-l tur+eng` is the only one of the three that
+ * reads Turkish correctly today. RapidOCR's bundled PP-OCRv4 dictionary has no
+ * `ş ğ ı İ`. The sidecar falls back through the registry if the chosen engine
+ * is not installed, so a stale preference degrades rather than breaking.
+ */
+export const DEFAULT_OCR_ENGINE_ID = "tesseract";
 
 export const OCR_LANGUAGES: OcrLanguage[] = [
     { code: "en", label: "English" },
