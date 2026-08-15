@@ -130,6 +130,25 @@ export interface Settings{
     density: Density;
 }
 
+/**
+ * Server-sent events from the sidecar's `/events` stream. The index and
+ * reindex payloads are the wire form of `IndexingStatus` / `ReindexStatus`, so
+ * the store can apply them without translation.
+ */
+export type SidecarEvent =
+    | ({ type: "index"; running: boolean } & IndexingStatus)
+    | ({ type: "reindex" } & ReindexStatus)
+    | {
+        type: "scan-complete";
+        scanned: number;
+        ingested: number;
+        skipped: number;
+        embedded: number;
+        removed: number;
+        errors: number;
+    }
+    | { type: "error"; message: string };
+
 /** Which of the six grid states the main area is in. */
 export type GridMode =
     | "idle"
