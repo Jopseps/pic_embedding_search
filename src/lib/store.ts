@@ -14,6 +14,7 @@ import type {
     Filters,
     GridMode,
     IndexingStatus,
+    LibraryCounts,
     LibraryView,
     Photo,
     PhotoKind,
@@ -29,7 +30,43 @@ import type {
 const SEARCH_DEBOUNCE_MS = 220;
 const MOCK_INDEX_TICK_MS = 1400;
 
+export const SIDEBAR_MIN_W = 180;
+export const SIDEBAR_MAX_W = 480;
+export const SIDEBAR_DEFAULT_W = 240;
+/** Drag narrower than this and the sidebar collapses instead of shrinking —
+ *  below it the counts and chips stop fitting and the panel is just noise. */
+export const SIDEBAR_SNAP_W = 140;
+const SIDEBAR_WIDTH_KEY = "picsearch.sidebarWidth";
+
+export function clampSidebarWidth(w: number): number{
+    return Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, Math.round(w)));
+}
+
+function loadSidebarWidth(): number{
+    try{
+        const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+        if(raw === null){
+            return SIDEBAR_DEFAULT_W;
+        }
+        const n = Number(raw);
+        return Number.isFinite(n) ? clampSidebarWidth(n) : SIDEBAR_DEFAULT_W;
+    }catch{
+        // Private mode, or no DOM under vitest. A default width is not worth
+        // failing store construction over.
+        return SIDEBAR_DEFAULT_W;
+    }
+}
+
 export type MainView = "library" | "settings";
+
+/** The search that was showing when "find similar" took over. */
+export interface SimilarOrigin{
+    query: string;
+    filters: Filters;
+    libraryView: LibraryView | null;
+    activeCollection: string | null;
+    focusedIndex: number;
+}
 
 export interface FilterSectionsOpen{
     date: boolean;
@@ -48,6 +85,9 @@ interface State{
     tookMs: number;
     /** Set when results came from "find similar" rather than a text query. */
     similarTo: Photo | null;
+    /** What was on screen before "find similar" replaced it, so Esc can put it
+     *  back. Null when not in similar-mode. */
+    beforeSimilar: SimilarOrigin | null;
 
     libraryView: LibraryView | null;
     activeCollection: string | null;
@@ -65,19 +105,36 @@ interface State{
     filtersOpen: FilterSectionsOpen;
 
     sidebarCollapsed: boolean;
+    /** Dragged width of the sidebar. Frontend-only preference: it describes this
+     *  window, not the library, so it lives in localStorage rather than in the
+     *  sidecar's config.toml alongside `density`. */
+    sidebarWidth: number;
     density: Density;
     selectedIds: Set<number>;
+    /** Where a Shift-range starts. Set by every gesture that picks a single
+     *  photo, so Shift always extends from the last thing touched. */
+    anchorId: number | null;
+    /** A drag carrying photos: onto a sidebar collection, or out to the OS. */
+    dragOut: { active: boolean; count: number; overCollection: string | null };
     focusedIndex: number;
     hoveredId: number | null;
 
     lightboxIndex: number | null;
     lightboxStripVisible: boolean;
+    /** F: image only, no chrome. Lives here rather than in the component so the
+     *  global Escape handler can exit it before closing the lightbox. */
+    lightboxFullscreen: boolean;
     ocrExpanded: boolean;
 
     indexing: IndexingStatus;
     indexingPanelOpen: boolean;
     reindex: ReindexStatus;
+    /** The model the user picked but has not confirmed yet — it drives the
+     *  "re-index required" card, and is cleared the moment the swap starts. */
     pendingModelId: string | null;
+    /** Library-wide counts for the sidebar. Never derived from the current
+     *  search, which is what made "All" show the result count instead. */
+    counts: LibraryCounts;
 
     settings: Settings;
     resolvedTheme: ResolvedTheme;
@@ -102,6 +159,7 @@ interface Actions{
     clearQuery(): void;
     runSearch(): Promise<void>;
     findSimilar(photo: Photo): Promise<void>;
+    exitSimilar(): void;
 
     setLibraryView(v: LibraryView): void;
     setActiveCollection(id: string): void;
@@ -125,16 +183,32 @@ interface Actions{
     clearAllFilters(): void;
 
     toggleSidebar(): void;
+    setSidebarCollapsed(v: boolean): void;
+    /** `persist` is false for the frames of a drag — writing localStorage once
+     *  per pointermove is a sync write per frame for a value only the release
+     *  makes final. */
+    setSidebarWidth(w: number, persist?: boolean): void;
     setDensity(d: Density): void;
+    stepDensity(dir: 1 | -1): void;
     setHovered(id: number | null): void;
     setFocusedIndex(i: number): void;
     toggleSelect(id: number): void;
+    /** Batch add or remove, for a paint sweep. */
+    paintSelection(ids: readonly number[], mode: "add" | "remove"): void;
+    /** Wholesale replacement, for a Shift-range that must shrink as well as
+     *  grow while the pointer moves. */
+    setSelection(ids: readonly number[]): void;
+    setAnchor(id: number | null): void;
+    startDragOut(count: number): void;
+    setDragOverCollection(id: string | null): void;
+    endDragOut(): void;
     clearSelection(): void;
 
     openLightbox(i: number): void;
     closeLightbox(): void;
     stepLightbox(dir: 1 | -1, count: number): void;
     toggleLightboxStrip(): void;
+    toggleLightboxFullscreen(): void;
     toggleOcrExpanded(): void;
 
     toggleIndexingPanel(): void;
@@ -144,7 +218,10 @@ interface Actions{
 
     selectModel(id: string): void;
     cancelModelChange(): void;
-    confirmModelChange(): void;
+    confirmModelChange(): Promise<void>;
+    loadSettings(): Promise<void>;
+    persistSettings(patch: Partial<Settings>): Promise<void>;
+    loadCounts(): Promise<void>;
     setOcrEngine(id: string): void;
     toggleOcrLang(code: string): void;
     setTheme(t: ThemePref): void;
@@ -164,11 +241,13 @@ interface Actions{
     revealSelected(): Promise<void>;
     toggleCollectionMenu(): void;
     addSelectionToCollection(id: string): Promise<void>;
+    /** The drop target half: a drag carries its own ids, which are not always
+     *  the selection — dropping one unselected photo must not move the rest. */
+    addPhotosToCollection(id: string, ids: readonly number[]): Promise<void>;
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
-let reindexTimer: ReturnType<typeof setInterval> | undefined;
 /** Guards against an older in-flight search overwriting a newer one. */
 let searchSeq = 0;
 
@@ -176,6 +255,52 @@ const EMPTY_FILTERS: Filters = { datePreset: null, folders: [], types: [], dims:
 
 function describeError(err: unknown): string{
     return err instanceof Error ? err.message : String(err);
+}
+
+let mockReindexTimer: ReturnType<typeof setInterval> | undefined;
+
+/**
+ * Mock-mode stand-in for the sidecar's `reindex` / `model-changed` events.
+ *
+ * Only ever called when `isMockMode`. It ends the same way the real path does —
+ * `settings.modelId` moves, `reindex.active` clears, one search re-runs — so
+ * the model-swap flow is exercisable in a browser with no Python at all.
+ */
+function simulateReindex(
+    set: (partial: Partial<State & Actions> | ((s: State & Actions) => Partial<State & Actions>)) => void,
+    get: () => State & Actions,
+    modelId: string,
+){
+    clearInterval(mockReindexTimer);
+    const total = Math.max(1, get().counts.library);
+    mockReindexTimer = setInterval(() => {
+        const cur = get().reindex;
+        if(!cur.active){
+            clearInterval(mockReindexTimer);   // cancelled from elsewhere
+            return;
+        }
+        const next = Math.min(100, cur.progress + 7);
+        if(next >= 100){
+            clearInterval(mockReindexTimer);
+            set((s) => ({
+                reindex: { ...s.reindex, active: false, progress: 0 },
+                settings: { ...s.settings, modelId },
+            }));
+            get().showToast(`Now searching with ${modelById(modelId)?.name ?? modelId}`);
+            void get().runSearch();
+            return;
+        }
+        set({
+            reindex: {
+                ...cur,
+                progress: next,
+                current: Math.round(total * next / 100),
+                total,
+                rate: 24,
+                etaSec: Math.round(total * (100 - next) / 100 / 24),
+            },
+        });
+    }, 200);
 }
 
 export const useStore = create<State & Actions>((set, get) => ({
@@ -187,6 +312,7 @@ export const useStore = create<State & Actions>((set, get) => ({
     total: 0,
     tookMs: 0,
     similarTo: null,
+    beforeSimilar: null,
 
     libraryView: "all",
     activeCollection: null,
@@ -203,13 +329,17 @@ export const useStore = create<State & Actions>((set, get) => ({
     filtersOpen: { date: false, folder: false, type: false, dims: false },
 
     sidebarCollapsed: false,
+    sidebarWidth: loadSidebarWidth(),
     density: 1,
     selectedIds: new Set(),
+    anchorId: null,
+    dragOut: { active: false, count: 0, overCollection: null },
     focusedIndex: -1,
     hoveredId: null,
 
     lightboxIndex: null,
     lightboxStripVisible: true,
+    lightboxFullscreen: false,
     ocrExpanded: false,
 
     // The fixture library ships a scan already in flight so the progress UI is
@@ -225,8 +355,9 @@ export const useStore = create<State & Actions>((set, get) => ({
         }
         : { current: 0, total: 0, rate: 0, etaSec: 0, paused: false, currentFile: "" },
     indexingPanelOpen: false,
-    reindex: { active: false, progress: 0, modelName: "" },
+    reindex: { active: false, progress: 0, modelName: "", current: 0, total: 0, rate: 0, etaSec: 0 },
     pendingModelId: null,
+    counts: { library: 0, recent: 0, dupes: 0, collections: {} },
 
     settings: {
         modelId: DEFAULT_MODEL_ID,
@@ -271,12 +402,9 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     async runSearch(){
         const s = get();
-        // Search stays disabled while the library is being re-embedded — the
-        // vectors in flight belong to two different models.
-        if(s.reindex.active){
-            set({ searching: false, results: [], total: 0 });
-            return;
-        }
+        // A re-index no longer blocks this. The outgoing model keeps every
+        // vector it had until the incoming one reaches full coverage, so
+        // search answers normally for the whole swap — see `confirmModelChange`.
         const seq = ++searchSeq;
         try{
             const res = await api.search({
@@ -306,7 +434,24 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     async findSimilar(photo){
         const seq = ++searchSeq;
-        set({ searching: true, lightboxIndex: null, query: "", similarTo: photo });
+        const s = get();
+        set({
+            searching: true,
+            lightboxIndex: null,
+            query: "",
+            similarTo: photo,
+            selectedIds: new Set(),
+            // Everything "find similar" is about to overwrite. Leaving it
+            // unsaved is why Esc used to dump you into the All tab having
+            // silently thrown away the search you came from.
+            beforeSimilar: s.similarTo !== null ? s.beforeSimilar : {
+                query: s.query,
+                filters: s.filters,
+                libraryView: s.libraryView,
+                activeCollection: s.activeCollection,
+                focusedIndex: s.focusedIndex,
+            },
+        });
         const res = await api.similar(photo.id);
         if(seq !== searchSeq){
             return;
@@ -319,6 +464,26 @@ export const useStore = create<State & Actions>((set, get) => ({
             focusedIndex: -1,
         });
         get().showToast(`Showing images visually similar to ${photo.filename}`);
+    },
+
+    /**
+     * Leave similar-mode and put back exactly what was on screen before it —
+     * query, filters, view, collection and the cell that had focus. Falling
+     * back to the All tab loses a search the user may have spent real effort on.
+     */
+    exitSimilar(){
+        const origin = get().beforeSimilar;
+        set({
+            similarTo: null,
+            beforeSimilar: null,
+            query: origin?.query ?? "",
+            filters: origin?.filters ?? EMPTY_FILTERS,
+            libraryView: origin?.libraryView ?? "all",
+            activeCollection: origin?.activeCollection ?? null,
+            focusedIndex: origin?.focusedIndex ?? -1,
+            searching: true,
+        });
+        void get().runSearch();
     },
 
     setLibraryView(v){
@@ -360,6 +525,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             if(ids.length > 0){
                 await api.addToCollection(made.id, ids);
                 set({ collectionMenuOpen: false, selectedIds: new Set() });
+                await get().loadCounts();
                 await get().runSearch();
                 get().showToast(`${ids.length} added to "${name}"`);
                 return;
@@ -398,6 +564,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                   libraryView: "all" });
         }
         await get().loadCollections();
+        await get().loadCounts();
         await get().runSearch();
         get().showToast("Collection deleted");
     },
@@ -511,8 +678,35 @@ export const useStore = create<State & Actions>((set, get) => ({
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }));
     },
 
+    setSidebarCollapsed(v){
+        set({ sidebarCollapsed: v });
+    },
+
+    setSidebarWidth(w, persist = true){
+        const width = clampSidebarWidth(w);
+        set({ sidebarWidth: width });
+        if(!persist){
+            return;
+        }
+        try{
+            window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+        }catch{
+            // Non-fatal: the width still applies for this session.
+        }
+    },
+
     setDensity(d){
-        set({ density: d });
+        set((st) => ({ density: d, settings: { ...st.settings, density: d } }));
+        void get().persistSettings({ density: d });
+    },
+
+    stepDensity(dir){
+        // Zooming in means bigger photos, which is a *higher* density index —
+        // GRID_ROW_HEIGHTS is ordered smallest row first.
+        const next = Math.min(2, Math.max(0, get().density + dir)) as Density;
+        if(next !== get().density){
+            get().setDensity(next);
+        }
     },
 
     setHovered(id){
@@ -531,17 +725,82 @@ export const useStore = create<State & Actions>((set, get) => ({
             }else{
                 next.add(id);
             }
+            // Every single-photo pick moves the anchor: Shift extends from the
+            // last thing touched, which is the only reading that matches what
+            // the hand just did.
+            const rest = { anchorId: id };
             // Deselecting the last one unmounts the bar; the menu goes with it.
+            return next.size === 0
+                ? { ...rest, selectedIds: next, collectionMenuOpen: false, addingCollection: false }
+                : { ...rest, selectedIds: next };
+        });
+    },
+
+    paintSelection(ids, mode){
+        if(ids.length === 0){
+            return;
+        }
+        set((s) => {
+            // A sweep re-crosses the same photos constantly; handing every cell
+            // a new Set when nothing changed re-renders the visible window on
+            // every pointermove.
+            const changed = ids.some((id) => s.selectedIds.has(id) === (mode === "remove"));
+            if(!changed){
+                return {};
+            }
+            const next = new Set(s.selectedIds);
+            for(const id of ids){
+                if(mode === "add"){
+                    next.add(id);
+                }else{
+                    next.delete(id);
+                }
+            }
             return next.size === 0
                 ? { selectedIds: next, collectionMenuOpen: false, addingCollection: false }
                 : { selectedIds: next };
         });
     },
 
+    setSelection(ids){
+        set((s) => {
+            if(s.selectedIds.size === ids.length && ids.every((id) => s.selectedIds.has(id))){
+                return {};
+            }
+            const next = new Set(ids);
+            return next.size === 0
+                ? { selectedIds: next, collectionMenuOpen: false, addingCollection: false }
+                : { selectedIds: next };
+        });
+    },
+
+    setAnchor(id){
+        set({ anchorId: id });
+    },
+
+    startDragOut(count){
+        set({ dragOut: { active: true, count, overCollection: null } });
+    },
+
+    setDragOverCollection(id){
+        set((s) => (s.dragOut.overCollection === id
+            ? {}
+            : { dragOut: { ...s.dragOut, overCollection: id } }));
+    },
+
+    endDragOut(){
+        set({ dragOut: { active: false, count: 0, overCollection: null } });
+    },
+
     clearSelection(){
         // The menu hangs off the selection bar, which unmounts at zero — leaving
         // the flag set means it reappears already open on the next selection.
-        set({ selectedIds: new Set(), collectionMenuOpen: false, addingCollection: false });
+        set({
+            selectedIds: new Set(),
+            anchorId: null,
+            collectionMenuOpen: false,
+            addingCollection: false,
+        });
     },
 
     openLightbox(i){
@@ -549,7 +808,7 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     closeLightbox(){
-        set({ lightboxIndex: null });
+        set({ lightboxIndex: null, lightboxFullscreen: false });
     },
 
     stepLightbox(dir, count){
@@ -562,6 +821,10 @@ export const useStore = create<State & Actions>((set, get) => ({
                 ocrExpanded: false,
             };
         });
+    },
+
+    toggleLightboxFullscreen(){
+        set((s) => ({ lightboxFullscreen: !s.lightboxFullscreen }));
     },
 
     toggleLightboxStrip(){
@@ -607,9 +870,26 @@ export const useStore = create<State & Actions>((set, get) => ({
                     reindex: {
                         active: event.active,
                         progress: event.progress,
-                        modelName: event.modelName,
+                        // The sidecar sends the model *id*; the panel shows a
+                        // name a human recognises.
+                        modelName: modelById(event.modelName)?.name ?? event.modelName,
+                        current: event.current,
+                        total: event.total,
+                        rate: event.rate,
+                        etaSec: event.etaSec,
                     },
                 });
+            }else if(event.type === "model-changed"){
+                // The swap finished: the incoming model is now the one
+                // answering queries, so the visible results came from the old
+                // vector space and have to be re-run.
+                set((s) => ({
+                    settings: { ...s.settings, modelId: event.modelId },
+                    pendingModelId: null,
+                    reindex: { ...s.reindex, active: false, progress: 0 },
+                }));
+                get().showToast(`Now searching with ${modelById(event.modelId)?.name ?? event.modelId}`);
+                void get().runSearch();
             }else if(event.type === "scan-complete"){
                 // New rows exist now, so the visible results are stale. `ocred`
                 // counts too: an OCR backfill changes hasOcr and the snippets
@@ -618,6 +898,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 if(event.ingested > 0 || event.removed > 0 || event.ocred > 0){
                     void get().loadFolders();
                     void get().loadStorage();
+                    void get().loadCounts();
                     void get().runSearch();
                 }
             }else if(event.type === "error"){
@@ -667,42 +948,93 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     /**
-     * Switching models invalidates every stored vector — different space,
-     * different dims. Search is disabled until coverage is back to 100%.
-     * Old rows are never deleted, so switching back is instant.
+     * Switching models needs every image re-embedded — different space,
+     * different dims, incompatible vectors.
+     *
+     * **Search is not disabled.** The outgoing model's rows are never deleted,
+     * so it goes on answering queries for the whole run; the sidecar flips the
+     * active model only once the incoming one has full coverage, and sends
+     * `model-changed` when it does.
      */
-    confirmModelChange(){
+    async confirmModelChange(){
         const pending = get().pendingModelId;
         if(pending === null){
             return;
         }
         const model = modelById(pending);
         set({
-            reindex: { active: true, progress: 0, modelName: model?.name ?? pending },
-            results: [],
-            total: 0,
+            pendingModelId: null,
+            // Optimistic, so the panel appears before the first batch lands.
+            reindex: {
+                active: true, progress: 0, modelName: model?.name ?? pending,
+                current: 0, total: get().counts.library, rate: 0, etaSec: 0,
+            },
         });
-        clearInterval(reindexTimer);
-        reindexTimer = setInterval(() => {
-            const cur = get().reindex;
-            const next = Math.min(100, cur.progress + 4 + Math.random() * 3);
-            if(next >= 100){
-                clearInterval(reindexTimer);
-                set((s) => ({
-                    reindex: { active: false, progress: 0, modelName: "" },
-                    settings: { ...s.settings, modelId: pending },
-                    pendingModelId: null,
-                }));
-                get().showToast("Re-indexing complete");
-                void get().runSearch();
-                return;
+        try{
+            await api.putSettings({ modelId: pending });
+        }catch(err){
+            set((s) => ({ reindex: { ...s.reindex, active: false } }));
+            get().showToast(describeError(err));
+            return;
+        }
+        if(isMockMode){
+            // With a sidecar, `model-changed` off /events ends the swap. In a
+            // browser there is no sidecar and nothing else would ever clear
+            // `reindex.active` — the banner would sit at 0% forever, and
+            // `tickIndexing` bails while it is set, so indexing would freeze
+            // too. CLAUDE.md requires this flow to be exercisable without
+            // Python, so mock mode simulates the backfill it cannot run.
+            simulateReindex(set, get, pending);
+        }
+    },
+
+    /**
+     * Settings live in `~/.config/pic-search/config.toml`, not in this store.
+     * `modelId` is the model **answering searches**, which during a swap is
+     * still the outgoing one — so a reload mid-swap shows the truth rather
+     * than a model that cannot answer yet.
+     */
+    async loadSettings(){
+        try{
+            const s = await api.getSettings();
+            const { pendingModelId: _p, pendingCoverage: cov, ...settings } = s;
+            set({ settings, density: settings.density });
+            get().resolveTheme();
+            if(s.pendingModelId !== null){
+                // A swap the sidecar resumed on its own after a restart.
+                set({
+                    reindex: {
+                        active: true,
+                        progress: cov.total > 0 ? Math.round(100 * cov.done / cov.total) : 0,
+                        modelName: modelById(s.pendingModelId)?.name ?? s.pendingModelId,
+                        current: cov.done, total: cov.total, rate: 0, etaSec: 0,
+                    },
+                });
             }
-            set({ reindex: { ...cur, progress: next } });
-        }, 220);
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
+    },
+
+    async persistSettings(patch){
+        try{
+            await api.putSettings(patch);
+        }catch(err){
+            get().showToast(describeError(err));
+        }
+    },
+
+    async loadCounts(){
+        try{
+            set({ counts: await api.counts() });
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
     },
 
     setOcrEngine(id){
         set((s) => ({ settings: { ...s.settings, ocrEngineId: id } }));
+        void get().persistSettings({ ocrEngineId: id });
     },
 
     toggleOcrLang(code){
@@ -713,11 +1045,13 @@ export const useStore = create<State & Actions>((set, get) => ({
                 : [...s.settings.ocrLangs, code];
             return { settings: { ...s.settings, ocrLangs: langs } };
         });
+        void get().persistSettings({ ocrLangs: get().settings.ocrLangs });
     },
 
     setTheme(t){
         set((s) => ({ settings: { ...s.settings, theme: t } }));
         get().resolveTheme();
+        void get().persistSettings({ theme: t });
     },
 
     resolveTheme(){
@@ -804,6 +1138,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         }
         await api.deletePhotos(ids);
         set({ selectedIds: new Set(), collectionMenuOpen: false });
+        await get().loadCounts();
         await get().runSearch();
         get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} removed from index`);
     },
@@ -823,14 +1158,17 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     async addSelectionToCollection(id){
-        const ids = [...get().selectedIds];
+        await get().addPhotosToCollection(id, [...get().selectedIds]);
+    },
+
+    async addPhotosToCollection(id, ids){
         const name = get().collections.find((c) => c.id === id)?.name ?? "collection";
         if(ids.length === 0){
             set({ collectionMenuOpen: false });
             return;
         }
         try{
-            await api.addToCollection(id, ids);
+            await api.addToCollection(id, [...ids]);
         }catch(err){
             get().showToast(describeError(err));
             return;
@@ -839,6 +1177,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         }
         set({ selectedIds: new Set() });
         // The rows carry `collections`, so the grid is stale until it refetches.
+        await get().loadCounts();
         await get().runSearch();
         get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} added to "${name}"`);
     },
