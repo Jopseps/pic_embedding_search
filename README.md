@@ -14,7 +14,9 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 
 > **There are no binary releases.** This is a v0.1 you run from source, and it needs `uv`, Node and Rust on your machine.
 >
-> Semantic search over your own folders works today. **OCR, the folder watcher, collections, saved searches and duplicate detection do not** — the UI for them is built and running on placeholder data.
+> Semantic search over your own folders works today, and so does text search inside screenshots. **The folder watcher, collections, saved searches and duplicate detection do not** — the UI for them is built and running on placeholder data.
+>
+> OCR uses Tesseract, which must be installed (`pacman -S tesseract tesseract-data-eng`). **Turkish also needs `tesseract-data-tur`**; without it the engine falls back to English and says so in the log.
 >
 > `PLAN.md` has the ordered next steps; `ARCHITECTURE.md` has the design.
 
@@ -26,7 +28,7 @@ cd sidecar && uv sync && cd ..    # torch + CUDA wheels, ~3 GB
 npm run tauri dev                 # desktop app, your own photos
 ```
 
-The desktop shell starts the Python sidecar, picks up its port and token, and talks to it over loopback. Add a folder in Settings and indexing begins — roughly 10 images/second on an RTX 4070 laptop GPU, thumbnails included. Searches answer in a few milliseconds.
+The desktop shell starts the Python sidecar, picks up its port and token, and talks to it over loopback. Add a folder in Settings and indexing begins — roughly 10 images/second on an RTX 4070 laptop GPU, thumbnails included. Screenshots are then read by OCR at about 1.3/second on the CPU, in parallel. Searches answer in a few milliseconds.
 
 ```bash
 npm run dev            # just the UI in a browser at :1420
@@ -66,6 +68,7 @@ Read `CLAUDE.md` first. Two things routinely surprise people:
 
 - **The brace style is deliberate** (`if(cond){` / `}else{`). There is no Prettier and there must not be — it cannot express this and will silently rewrite every file.
 - **Embeddings are keyed by `(image_id, model_id)`.** Switching models does not delete the old vectors, which is what makes switching back instant.
+- **Visual and text results are merged by rank, not by score.** Cosine sits around 0.2–0.35 and BM25 around 0–20; the `score` field is Reciprocal Rank Fusion and reads about 0.03.
 
 ## License
 
