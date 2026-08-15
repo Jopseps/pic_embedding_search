@@ -88,8 +88,43 @@ class FolderRequest(Camel):
     recursive: bool = True
 
 
+class NameRequest(Camel):
+    name: str
+
+
+class SavedSearchRequest(Camel):
+    query: str
+    view: str | None = None
+    collection: str | None = None
+    filters: dict[str, Any] | None = None
+
+
 class SettingsRequest(Camel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
+# `Filters` in types.ts, with every key present. A saved search written before a
+# filter existed must still deserialize into the full shape.
+EMPTY_FILTERS: dict[str, Any] = {
+    "datePreset": None, "folders": [], "types": [], "dims": None,
+}
+
+
+def saved_search_payload(row) -> dict:
+    """Wire shape of `SavedSearch` in types.ts."""
+    try:
+        data = json.loads(row["query_json"])
+    except (TypeError, ValueError):
+        # Hand-edited or truncated JSON degrades to a plain text search rather
+        # than breaking the whole sidebar list.
+        data = {}
+    return {
+        "id": str(int(row["id"])),
+        "query": data.get("q") or row["name"],
+        "view": data.get("view"),
+        "collection": data.get("collection"),
+        "filters": {**EMPTY_FILTERS, **(data.get("filters") or {})},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +339,7 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.get("/images/{image_id}", dependencies=[guard])
     def image_detail(image_id: int) -> dict:
-        items = hydrate(state.store, [image_id])
+        items = hydrate(state.store, [image_id], dupes=state.searcher.dupes.ids)
         if(not items):
             raise HTTPException(status_code=404, detail="no such image")
         return items[0]
@@ -391,6 +426,90 @@ def create_app(state: AppState) -> FastAPI:
     @app.post("/rescan", dependencies=[guard])
     def rescan() -> dict:
         return {"started": state.indexer.start_rescan()}
+
+    # -- collections -------------------------------------------------------
+
+    # Ids go over the wire as strings: `Collection.id` in types.ts is a string,
+    # and the mock adapter's ids ("refs", "memes") were never numeric.
+
+    @app.get("/collections", dependencies=[guard])
+    def list_collections() -> list[dict]:
+        return [
+            {"id": str(int(r["id"])), "name": r["name"]}
+            for r in state.store.list_collections()
+        ]
+
+    @app.post("/collections", dependencies=[guard])
+    def create_collection(body: NameRequest) -> dict:
+        name = body.name.strip()
+        if(not name):
+            raise HTTPException(status_code=400, detail="name is required")
+        row = state.store.create_collection(name)
+        return {"id": str(int(row["id"])), "name": row["name"]}
+
+    @app.delete("/collections/{collection_id}", dependencies=[guard])
+    def delete_collection(collection_id: int) -> dict:
+        if(not state.store.delete_collection(collection_id)):
+            raise HTTPException(status_code=404, detail="no such collection")
+        return {"ok": True}
+
+    @app.patch("/collections/{collection_id}", dependencies=[guard])
+    def rename_collection(collection_id: int, body: NameRequest) -> dict:
+        name = body.name.strip()
+        if(not name):
+            raise HTTPException(status_code=400, detail="name is required")
+        if(not state.store.rename_collection(collection_id, name)):
+            raise HTTPException(status_code=404, detail="no such collection")
+        return {"id": str(collection_id), "name": name}
+
+    @app.post("/collections/{collection_id}/items", dependencies=[guard])
+    def add_collection_items(collection_id: int, body: IdsRequest) -> dict:
+        _require_collection(collection_id)
+        added = state.store.add_to_collection(collection_id, body.ids)
+        return {"added": added, "count": state.store.collection_count(collection_id)}
+
+    @app.delete("/collections/{collection_id}/items", dependencies=[guard])
+    def remove_collection_items(collection_id: int, body: IdsRequest) -> dict:
+        _require_collection(collection_id)
+        removed = state.store.remove_from_collection(collection_id, body.ids)
+        return {"removed": removed, "count": state.store.collection_count(collection_id)}
+
+    def _require_collection(collection_id: int) -> None:
+        known = {int(r["id"]) for r in state.store.list_collections()}
+        if(collection_id not in known):
+            # Without this the insert fails on the foreign key and returns 500;
+            # a request naming a collection that was deleted in another window
+            # is a 404.
+            raise HTTPException(status_code=404, detail="no such collection")
+
+    # -- saved searches ----------------------------------------------------
+
+    @app.get("/searches", dependencies=[guard])
+    def list_searches() -> list[dict]:
+        return [saved_search_payload(r) for r in state.store.list_saved_searches()]
+
+    @app.post("/searches", dependencies=[guard])
+    def create_search(body: SavedSearchRequest) -> dict:
+        query = body.query.strip()
+        if(not query):
+            raise HTTPException(status_code=400, detail="query is required")
+        # The full search is stored, not just the words: `filters` and `view`
+        # ride along so running a saved search restores what was on screen. The
+        # `name` column holds the query text — there is no separate naming step.
+        payload = json.dumps({
+            "q": query,
+            "view": body.view,
+            "collection": body.collection,
+            "filters": body.filters or {},
+        })
+        row = state.store.create_saved_search(query, payload)
+        return saved_search_payload(row)
+
+    @app.delete("/searches/{search_id}", dependencies=[guard])
+    def delete_search(search_id: int) -> dict:
+        if(not state.store.delete_saved_search(search_id)):
+            raise HTTPException(status_code=404, detail="no such saved search")
+        return {"ok": True}
 
     # -- settings ----------------------------------------------------------
 
