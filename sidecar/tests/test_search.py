@@ -1,0 +1,614 @@
+"""Search and HTTP contract tests.
+
+Nothing here loads a model: a fake embedder maps images to a colour axis and
+queries to the same axis, so ranking is exact and the tests run in milliseconds.
+
+The contract test that matters is `test_item_keys_match_types_ts` — the wire
+shape is frozen against src/lib/types.ts, and drifting from it breaks the app
+across two languages.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from picsearch.index import Indexer
+from picsearch.search import (
+    Searcher,
+    SearchParams,
+    VectorIndex,
+    build_filter_sql,
+    candidate_ids,
+    rrf_merge,
+)
+from picsearch.server import TOKEN_HEADER, AppState, create_app
+from picsearch.store import Store
+
+MODEL = "siglip2-base-patch16-224"
+DIM = 768
+TYPES_TS = Path(__file__).resolve().parents[2] / "src" / "lib" / "types.ts"
+
+COLORS = {
+    "red": (220, 30, 30),
+    "green": (30, 200, 60),
+    "blue": (30, 50, 220),
+}
+AXIS = {"red": 0, "green": 1, "blue": 2}
+
+
+class ColorEmbedder:
+    """Images and text both land on a 3-axis colour space padded out to DIM."""
+
+    model_id = MODEL
+    dim = DIM
+    loaded = True
+    device = "cpu"
+
+    def embed_pil(self, images, batch_size: int = 32) -> np.ndarray:
+        out = np.zeros((len(images), DIM), dtype=np.float32)
+        for i, img in enumerate(images):
+            mean = np.asarray(img.convert("RGB").resize((8, 8)), dtype=np.float32).mean(axis=(0, 1))
+            out[i, :3] = mean / (np.linalg.norm(mean) or 1.0)
+        return out
+
+    def embed_text(self, text: str) -> np.ndarray:
+        v = np.zeros(DIM, dtype=np.float32)
+        for name, axis in AXIS.items():
+            if(name in text.lower()):
+                v[axis] = 1.0
+        if(not v.any()):
+            v[:3] = 1.0
+        return v / np.linalg.norm(v)
+
+
+def make_image(path: Path, color, size=(800, 600), seed=0):
+    """`seed` paints a small corner block so fixtures are not byte-identical.
+
+    It has to be a block, not a pixel: JPEG quantization erases a single-pixel
+    difference and every same-coloured fixture would hash identically and read
+    as an exact duplicate.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", size, color)
+    img.paste((seed * 5 % 256, 255 - color[1], seed * 3 % 256), (0, 0, 32, 8 + seed))
+    img.save(path)
+    return path
+
+
+@pytest.fixture()
+def library(tmp_path):
+    root = tmp_path / "lib"
+    for i in range(4):
+        make_image(root / "photos" / f"red_{i}.jpg", COLORS["red"], seed=i + 1)
+    for i in range(3):
+        make_image(
+            root / "photos" / f"green_{i}.jpg", COLORS["green"], size=(3000, 2000), seed=i + 20
+        )
+    for i in range(3):
+        make_image(
+            root / "shots" / f"blue_{i}.png", COLORS["blue"], size=(1920, 1080), seed=i + 40
+        )
+    return root
+
+
+@pytest.fixture()
+def app_state(xdg_tmp, library):
+    state = AppState(model_id=MODEL, embedder=ColorEmbedder())
+    state.store.add_folder(str(library), recursive=True)
+    state.indexer.scan([(library, True)])
+    return state
+
+
+@pytest.fixture()
+def client(app_state):
+    c = TestClient(create_app(app_state))
+    c.headers.update({TOKEN_HEADER: app_state.token})
+    return c
+
+
+# ---------------------------------------------------------------------------
+# RRF
+# ---------------------------------------------------------------------------
+
+def test_rrf_merge():
+    """score(id) = Σ 1/(60 + rank). Never a weighted sum of the raw scores."""
+    vector = [10, 20, 30]
+    text = [30, 10, 40]
+    merged = rrf_merge([vector, text])
+
+    expected = {
+        10: 1 / 61 + 1 / 62,   # rank 1 in one list, rank 2 in the other
+        20: 1 / 62,
+        30: 1 / 63 + 1 / 61,
+        40: 1 / 63,
+    }
+    assert [i for i, _ in merged] == [10, 30, 20, 40]
+    for image_id, score in merged:
+        assert score == pytest.approx(expected[image_id])
+
+
+def test_rrf_ties_break_on_id_for_a_stable_order():
+    # 10 and 30 score identically here; the order must still be deterministic.
+    merged = rrf_merge([[10, 20, 30], [30, 40, 10]])
+    assert [i for i, _ in merged] == [10, 30, 20, 40]
+
+
+def test_rrf_rewards_agreement_over_a_single_strong_hit():
+    top_of_one = rrf_merge([[1, 2, 3], [4, 5, 6]])
+    assert dict(top_of_one)[1] == pytest.approx(1 / 61)
+    both = rrf_merge([[1, 2], [2, 1]])
+    assert dict(both)[1] == dict(both)[2]
+
+
+def test_rrf_ignores_lists_an_id_is_absent_from():
+    merged = dict(rrf_merge([[7], []]))
+    assert merged == {7: pytest.approx(1 / 61)}
+
+
+def test_rrf_k_dampens_rank_one_dominance():
+    tight = rrf_merge([[1], [2]], k=1)
+    assert dict(tight)[1] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# VectorIndex
+# ---------------------------------------------------------------------------
+
+def unit(*first3) -> np.ndarray:
+    v = np.zeros(DIM, dtype=np.float32)
+    v[:len(first3)] = first3
+    return v / np.linalg.norm(v)
+
+
+def test_vector_index_loads_only_the_active_model(store: Store):
+    store.upsert_image(
+        path="/a.jpg", mtime=1.0, size_bytes=1, width=10, height=10, mime="image/jpeg",
+        phash=1, sha256="a" * 64, taken_at=None, is_screenshot=False,
+    )
+    store.put_embedding(1, MODEL, unit(1, 0, 0))
+    store.put_embedding(1, "jina-clip-v2", np.ones(1024, dtype=np.float32))
+
+    idx = VectorIndex.load(store, MODEL, DIM)
+    assert idx.size == 1
+    assert idx.matrix.shape == (1, DIM)
+    assert VectorIndex.load(store, "openclip-vit-l14", 768).size == 0
+
+
+def test_vector_index_search_ranks_by_cosine():
+    idx = VectorIndex(MODEL, DIM)
+    idx.add(1, unit(1, 0, 0))
+    idx.add(2, unit(0, 1, 0))
+    idx.add(3, unit(0.7, 0.7, 0))
+
+    ranked = idx.search(unit(1, 0, 0), limit=3)
+    assert [i for i, _ in ranked] == [1, 3, 2]
+    assert ranked[0][1] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_vector_index_restricts_to_candidates():
+    idx = VectorIndex(MODEL, DIM)
+    idx.add(1, unit(1, 0, 0))
+    idx.add(2, unit(0, 1, 0))
+    assert [i for i, _ in idx.search(unit(1, 0, 0), 5, candidates={2})] == [2]
+    assert idx.search(unit(1, 0, 0), 5, candidates=set()) == []
+
+
+def test_vector_index_add_replaces_and_remove_drops():
+    idx = VectorIndex(MODEL, DIM)
+    idx.add(1, unit(1, 0, 0))
+    idx.add(1, unit(0, 1, 0))
+    assert idx.size == 1
+    np.testing.assert_allclose(idx.vector_for(1)[:3], [0, 1, 0], atol=1e-6)
+
+    idx.add(2, unit(0, 0, 1))
+    idx.remove([1])
+    assert idx.size == 1 and idx.vector_for(1) is None
+    assert idx.vector_for(2) is not None
+
+
+def test_vector_index_rejects_a_foreign_dimension():
+    idx = VectorIndex(MODEL, DIM)
+    with pytest.raises(ValueError):
+        idx.add(1, np.ones(1024, dtype=np.float32))
+
+
+# ---------------------------------------------------------------------------
+# Filters
+# ---------------------------------------------------------------------------
+
+def test_type_filter_sql():
+    where, args = build_filter_sql(SearchParams(types=["Screenshot"]))
+    assert "is_screenshot = 1" in where
+    where, _ = build_filter_sql(SearchParams(types=["Photo"]))
+    assert "is_screenshot = 0" in where
+    # Both selected is the same as neither.
+    where, _ = build_filter_sql(SearchParams(types=["Photo", "Screenshot"]))
+    assert where == ""
+
+
+def test_dims_filter_sql():
+    where, args = build_filter_sql(SearchParams(dims="large"))
+    assert ">= ?" in where and args == [2500]
+    where, args = build_filter_sql(SearchParams(dims="small"))
+    assert "< ?" in where and args == [2500]
+
+
+def test_candidate_ids_by_folder(app_state, library):
+    ids = candidate_ids(app_state.store, SearchParams(folders=[str(library / "shots")]))
+    assert ids is not None and len(ids) == 3
+    for image_id in ids:
+        assert "shots" in app_state.store.image_by_id(image_id)["path"]
+
+
+def test_folder_filter_matches_a_watched_root_and_its_subtree(app_state, library):
+    """The sidebar checkboxes carry watched roots from listFolders(), and no
+    image sits directly in one — matching the dirname alone would find nothing."""
+    ids = candidate_ids(app_state.store, SearchParams(folders=[str(library)]))
+    assert ids is not None and len(ids) == 10
+
+
+def test_folder_filter_accepts_several_folders(app_state, library):
+    ids = candidate_ids(
+        app_state.store,
+        SearchParams(folders=[str(library / "shots"), str(library / "photos")]),
+    )
+    assert len(ids) == 10
+
+
+def test_folder_filter_does_not_match_a_sibling_prefix(app_state, library, tmp_path):
+    """~/Pictures must not sweep in ~/Pictures-old."""
+    sibling = library.parent / (library.name + "-old")
+    make_image(sibling / "photos" / "stray.jpg", COLORS["red"], seed=77)
+    app_state.indexer.scan([(sibling, True)], prune=False)
+
+    ids = candidate_ids(app_state.store, SearchParams(folders=[str(library)]))
+    assert len(ids) == 10
+    assert app_state.store.image_count() == 11
+
+
+def test_folder_filter_escapes_like_wildcards(app_state, library):
+    """`_` and `%` are legal in directory names and must not act as wildcards."""
+    odd = library.parent / "a_b"
+    twin = library.parent / "axb"
+    make_image(odd / "one.jpg", COLORS["red"], seed=81)
+    make_image(twin / "two.jpg", COLORS["red"], seed=82)
+    app_state.indexer.scan([(odd, True), (twin, True)], prune=False)
+
+    ids = candidate_ids(app_state.store, SearchParams(folders=[str(odd)]))
+    assert len(ids) == 1
+    assert app_state.store.image_by_id(next(iter(ids)))["path"].endswith("a_b/one.jpg")
+
+
+def test_candidate_ids_by_type(app_state):
+    shots = candidate_ids(app_state.store, SearchParams(types=["Screenshot"]))
+    assert len(shots) == 3  # the 1920x1080 blues
+    photos = candidate_ids(app_state.store, SearchParams(types=["Photo"]))
+    assert len(photos) == 7
+
+
+def test_candidate_ids_by_dims(app_state):
+    large = candidate_ids(app_state.store, SearchParams(dims="large"))
+    assert len(large) == 3  # the 3000x2000 greens
+
+
+def test_no_filters_means_no_restriction(app_state):
+    assert candidate_ids(app_state.store, SearchParams()) is None
+
+
+# ---------------------------------------------------------------------------
+# Searcher
+# ---------------------------------------------------------------------------
+
+def test_query_ranks_the_matching_colour_first(app_state):
+    res = app_state.searcher.search(SearchParams(q="a blue image"))
+    assert res["items"]
+    top = res["items"][0]
+    assert "blue" in top["filename"]
+    assert top["score"] > res["items"][-1]["score"]
+
+
+def test_browsing_omits_score_entirely(app_state):
+    """types.ts declares `score?: number` — absent, never null."""
+    res = app_state.searcher.search(SearchParams(q=""))
+    assert res["total"] == 10
+    assert all("score" not in item for item in res["items"])
+
+
+def test_search_includes_score(app_state):
+    res = app_state.searcher.search(SearchParams(q="red"))
+    assert all(isinstance(item["score"], float) for item in res["items"])
+
+
+def test_filters_apply_to_a_text_query(app_state):
+    res = app_state.searcher.search(SearchParams(q="red", types=["Screenshot"]))
+    assert all(item["isScreenshot"] for item in res["items"])
+    assert len(res["items"]) == 3
+
+
+def test_pagination_walks_the_cursor(app_state):
+    first = app_state.searcher.search(SearchParams(q="", limit=4))
+    assert len(first["items"]) == 4
+    assert first["cursor"] == "4"
+
+    second = app_state.searcher.search(SearchParams(q="", limit=4, cursor=first["cursor"]))
+    assert len(second["items"]) == 4
+    assert second["cursor"] == "8"
+
+    third = app_state.searcher.search(SearchParams(q="", limit=4, cursor=second["cursor"]))
+    assert len(third["items"]) == 2
+    assert third["cursor"] is None
+
+    seen = [i["id"] for page in (first, second, third) for i in page["items"]]
+    assert len(set(seen)) == 10
+
+
+def test_similar_uses_cosine_and_excludes_the_subject(app_state):
+    blue = [
+        i for i in app_state.searcher.search(SearchParams(q=""))["items"]
+        if "blue" in i["filename"]
+    ][0]
+    res = app_state.searcher.similar(blue["id"])
+    assert blue["id"] not in [i["id"] for i in res["items"]]
+    assert "blue" in res["items"][0]["filename"]
+
+
+def test_exact_duplicates_are_flagged(app_state, library):
+    """isDupe is exact-sha today; pHash near-dupes land at step 10."""
+    copy = library / "photos" / "red_copy.jpg"
+    # A byte copy, not a re-encode: exact duplicates are a sha256 match.
+    shutil.copyfile(library / "photos" / "red_0.jpg", copy)
+    app_state.indexer.scan([(library, True)])
+
+    res = app_state.searcher.search(SearchParams(q=""))
+    dupes = [i for i in res["items"] if i["isDupe"]]
+    assert {Path(i["filename"]).stem for i in dupes} == {"red_0", "red_copy"}
+
+    only_dupes = app_state.searcher.search(SearchParams(q="", view="dupes"))
+    assert {i["id"] for i in only_dupes["items"]} == {i["id"] for i in dupes}
+
+
+# ---------------------------------------------------------------------------
+# Wire contract
+# ---------------------------------------------------------------------------
+
+def photo_keys_from_types_ts() -> set[str]:
+    text = TYPES_TS.read_text(encoding="utf-8")
+    block = text.split("export interface Photo{", 1)[1].split("}", 1)[0]
+    block = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+    block = re.sub(r"//.*", "", block)
+    return set(re.findall(r"^\s*(\w+)\??:", block, flags=re.M))
+
+
+def test_item_keys_match_types_ts(app_state):
+    expected = photo_keys_from_types_ts()
+    assert "score" in expected
+
+    item = app_state.searcher.search(SearchParams(q="red"))["items"][0]
+    assert set(item) == expected
+
+    browsing = app_state.searcher.search(SearchParams(q=""))["items"][0]
+    assert set(browsing) == expected - {"score"}
+
+
+def test_ocr_fields_are_present_and_null_before_step_8(app_state):
+    item = app_state.searcher.search(SearchParams(q=""))["items"][0]
+    assert item["hasOcr"] is False
+    assert item["ocrText"] is None
+    assert item["snippet"] is None
+
+
+def test_envelope_shape(app_state):
+    res = app_state.searcher.search(SearchParams(q=""))
+    assert set(res) == {"items", "total", "tookMs", "cursor"}
+    assert isinstance(res["tookMs"], float)
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+def test_every_route_requires_the_token(app_state):
+    bare = TestClient(create_app(app_state))
+    for method, path in (
+        ("get", "/health"), ("get", "/search?q=red"), ("get", "/folders"),
+        ("get", "/settings"), ("get", "/storage"), ("get", "/images/1"),
+        ("get", "/thumb/1"), ("get", "/file/1"), ("get", "/events"),
+    ):
+        res = getattr(bare, method)(path)
+        assert res.status_code == 401, f"{path} answered {res.status_code} without a token"
+
+
+def test_a_wrong_token_is_rejected(app_state):
+    bare = TestClient(create_app(app_state))
+    res = bare.get("/search", headers={TOKEN_HEADER: "not-the-token"})
+    assert res.status_code == 401
+
+
+def test_search_over_http(client):
+    res = client.get("/search", params={"q": "blue", "limit": 5})
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body) == {"items", "total", "tookMs", "cursor"}
+    assert "blue" in body["items"][0]["filename"]
+
+
+def test_repeated_filter_params_over_http(client, app_state, library):
+    res = client.get(
+        "/search",
+        params=[("q", ""), ("type", "Screenshot"), ("folder", str(library / "shots"))],
+    )
+    assert res.status_code == 200
+    assert len(res.json()["items"]) == 3
+
+
+def test_similar_accepts_the_snake_case_body_api_ts_sends(client):
+    first = client.get("/search", params={"q": ""}).json()["items"][0]
+    res = client.post("/search/similar", json={"image_id": first["id"]})
+    assert res.status_code == 200
+    assert first["id"] not in [i["id"] for i in res.json()["items"]]
+
+
+def test_thumb_accepts_the_token_as_a_query_param(client, app_state):
+    """`<img src>` cannot set headers, so ?t= has to work."""
+    image_id = client.get("/search", params={"q": ""}).json()["items"][0]["id"]
+    bare = TestClient(create_app(app_state))
+
+    res = bare.get(f"/thumb/{image_id}", params={"size": 256, "t": app_state.token})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/webp"
+
+    assert bare.get(f"/thumb/{image_id}", params={"size": 256}).status_code == 401
+    assert bare.get(f"/thumb/{image_id}", params={"size": 256, "t": "wrong"}).status_code == 401
+
+
+def test_thumb_rejects_an_unknown_size(client):
+    image_id = client.get("/search", params={"q": ""}).json()["items"][0]["id"]
+    assert client.get(f"/thumb/{image_id}", params={"size": 1024}).status_code == 400
+
+
+def test_file_serves_the_original(client):
+    image_id = client.get("/search", params={"q": ""}).json()["items"][0]["id"]
+    res = client.get(f"/file/{image_id}")
+    assert res.status_code == 200
+    assert res.headers["content-type"] in ("image/jpeg", "image/png")
+
+
+def test_image_detail_carries_ocr_text(client, app_state):
+    image_id = client.get("/search", params={"q": ""}).json()["items"][0]["id"]
+    app_state.store.put_ocr(image_id, "rapidocr", "tur+eng", "build failed")
+
+    body = client.get(f"/images/{image_id}").json()
+    assert body["hasOcr"] is True
+    assert body["ocrText"] == "build failed"
+
+
+def test_folders_crud_over_http(client, tmp_path, library):
+    listed = client.get("/folders").json()
+    assert listed[0]["path"] == str(library)
+    assert listed[0]["count"] == 10
+    assert listed[0]["recursive"] is True
+
+    assert client.post("/folders", json=None).json() is None
+
+    other = tmp_path / "other"
+    other.mkdir()
+    added = client.post("/folders", json={"path": str(other), "recursive": False}).json()
+    assert added["path"] == str(other)
+    assert added["recursive"] is False
+
+    assert client.patch("/folders", json={"path": str(other), "recursive": True}).status_code == 200
+    assert client.request("DELETE", "/folders", params={"path": str(other)}).status_code == 200
+    assert [f["path"] for f in client.get("/folders").json()] == [str(library)]
+
+
+def test_adding_a_missing_folder_is_a_400(client, tmp_path):
+    res = client.post("/folders", json={"path": str(tmp_path / "nope")})
+    assert res.status_code == 400
+
+
+def test_health_reports_the_active_model(client):
+    body = client.get("/health").json()
+    assert body["ok"] is True
+    assert body["modelId"] == MODEL
+    assert body["images"] == 10
+    assert body["vectors"] == 10
+
+
+def test_storage_reports_usage(client):
+    body = client.get("/storage").json()
+    assert set(body) == {"thumbnailCacheGb", "indexGb"}
+    assert body["thumbnailCacheGb"] >= 0
+    assert client.request("DELETE", "/storage/thumbnails").status_code == 200
+    assert client.get("/storage").json()["thumbnailCacheGb"] == 0
+
+
+def test_settings_round_trip_over_http(client):
+    body = client.get("/settings").json()
+    assert body["modelId"] == MODEL
+    assert body["ocrLangs"] == ["en", "tr"]
+
+    updated = client.put("/settings", json={"theme": "light", "density": 2}).json()
+    assert updated["theme"] == "light"
+    assert updated["density"] == 2
+    assert client.get("/settings").json()["theme"] == "light"
+
+
+def test_settings_rejects_an_unknown_model(client):
+    res = client.put("/settings", json={"modelId": "clip-vit-nope"})
+    assert res.status_code == 400
+    assert client.get("/settings").json()["modelId"] == MODEL
+
+
+def test_deleting_images_drops_rows_and_vectors(client, app_state):
+    items = client.get("/search", params={"q": ""}).json()["items"]
+    victim = items[0]["id"]
+
+    res = client.request("DELETE", "/images", json={"ids": [victim]})
+    assert res.json() == {"removed": 1}
+    assert app_state.vectors.size == 9
+    assert victim not in [i["id"] for i in client.get("/search", params={"q": ""}).json()["items"]]
+
+
+def test_new_ingest_appends_to_the_live_vector_index(app_state, library):
+    before = app_state.vectors.size
+    make_image(library / "photos" / "red_new.jpg", COLORS["red"])
+    app_state.indexer.scan([(library, True)])
+    assert app_state.vectors.size == before + 1
+
+
+def test_rescan_starts_a_background_pass(client, app_state):
+    assert client.post("/rescan").json() == {"started": True}
+    app_state.indexer.join(timeout=60)
+
+
+def test_event_bus_fans_out_to_subscribers(app_state):
+    """/events itself is covered end-to-end in test_server_live.py — TestClient
+    buffers streaming responses, so this exercises the bus directly."""
+    import asyncio
+
+    async def exercise():
+        app_state.events.bind(asyncio.get_running_loop())
+        q = app_state.events.subscribe()
+        app_state.events.publish("index", {"current": 1, "total": 2})
+        await asyncio.sleep(0)
+        event = await asyncio.wait_for(q.get(), timeout=2.0)
+        assert event == {"type": "index", "current": 1, "total": 2}
+
+        app_state.events.unsubscribe(q)
+        app_state.events.publish("index", {"current": 2, "total": 2})
+        await asyncio.sleep(0)
+        assert q.empty()
+
+    asyncio.run(exercise())
+    assert app_state.events.last["index"]["current"] == 2
+
+
+def test_indexer_progress_reaches_the_bus(app_state, library):
+    make_image(library / "photos" / "red_evt.jpg", COLORS["red"], seed=99)
+    app_state.indexer.scan([(library, True)])
+    assert app_state.events.last["scan-complete"]["ingested"] == 1
+
+
+def test_searcher_survives_an_empty_index(xdg_tmp):
+    state = AppState(model_id=MODEL, embedder=ColorEmbedder())
+    res = state.searcher.search(SearchParams(q="red"))
+    assert res == {"items": [], "total": 0, "tookMs": res["tookMs"], "cursor": None}
+
+
+def test_indexer_and_searcher_share_the_store(xdg_tmp, library):
+    store = Store()
+    embedder = ColorEmbedder()
+    vectors = VectorIndex(MODEL, DIM)
+    indexer = Indexer(store, embedder, on_vector=vectors.add)
+    indexer.scan([(library, True)])
+
+    searcher = Searcher(store, vectors, embedder)
+    assert vectors.size == 10
+    assert searcher.search(SearchParams(q="green"))["items"][0]["filename"].startswith("green")
