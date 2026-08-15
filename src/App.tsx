@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { useStore } from "./lib/store";
+import { modelById } from "./lib/catalog";
 import { useGridLayout } from "./lib/useGridLayout";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
@@ -14,14 +15,18 @@ export default function App(){
     const themePref = useStore((s) => s.settings.theme);
     const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
     const reindex = useStore((s) => s.reindex);
+    const activeModelName = useStore((s) => modelById(s.settings.modelId)?.name ?? s.settings.modelId);
     const isDragging = useStore((s) => s.isDraggingFile);
     const toast = useStore((s) => s.toast);
+    const dragOut = useStore((s) => s.dragOut);
     const backendError = useStore((s) => s.backendError);
 
     const resolveTheme = useStore((s) => s.resolveTheme);
     const loadFolders = useStore((s) => s.loadFolders);
     const loadCollections = useStore((s) => s.loadCollections);
     const loadSavedSearches = useStore((s) => s.loadSavedSearches);
+    const loadSettings = useStore((s) => s.loadSettings);
+    const loadCounts = useStore((s) => s.loadCounts);
     const loadStorage = useStore((s) => s.loadStorage);
     const runSearch = useStore((s) => s.runSearch);
     const startEventStream = useStore((s) => s.startEventStream);
@@ -34,9 +39,12 @@ export default function App(){
         void loadFolders();
         void loadCollections();
         void loadSavedSearches();
+        void loadSettings();
+        void loadCounts();
         void loadStorage();
         void runSearch();
-    }, [loadFolders, loadCollections, loadSavedSearches, loadStorage, runSearch]);
+    }, [loadFolders, loadCollections, loadSavedSearches, loadSettings, loadCounts,
+        loadStorage, runSearch]);
 
     useEffect(() => {
         document.documentElement.setAttribute("data-theme", resolvedTheme);
@@ -119,8 +127,15 @@ export default function App(){
             }
 
             if(e.key === "Escape"){
-                if(s.lightboxIndex !== null){
+                if(s.lightboxFullscreen){
+                    // Leave fullscreen first — closing outright loses the photo
+                    // the user was looking at, which is not what Esc means here.
+                    s.toggleLightboxFullscreen();
+                }else if(s.lightboxIndex !== null){
                     s.closeLightbox();
+                }else if(s.similarTo !== null){
+                    // Back to the search "find similar" replaced, not to All.
+                    s.exitSimilar();
                 }else if(s.query !== ""){
                     s.clearQuery();
                 }else if(s.selectedIds.size > 0){
@@ -136,6 +151,9 @@ export default function App(){
                     s.stepLightbox(-1, grid.layout.flat.length);
                 }else if(e.key === "ArrowRight"){
                     s.stepLightbox(1, grid.layout.flat.length);
+                }else if((e.key === "f" || e.key === "F") && !inInput){
+                    e.preventDefault();
+                    s.toggleLightboxFullscreen();
                 }
                 return;
             }
@@ -165,6 +183,76 @@ export default function App(){
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [grid, moveFocus]);
+
+    // ---- zoom -------------------------------------------------------------
+    // Ctrl+wheel and trackpad pinch (which arrives as a wheel event with
+    // `ctrlKey` set) are the webview's page-zoom gesture: left alone they scale
+    // the whole app — sidebar, top bar, text and all. Zoom here means the
+    // photos, so the default is blocked and the gesture is re-pointed at the
+    // grid density, or at the lightbox's own image zoom when one is open.
+    useEffect(() => {
+        let acc = 0;
+
+        function onWheel(e: WheelEvent){
+            if(!e.ctrlKey && !e.metaKey){
+                return;
+            }
+            // `preventDefault` only. `stopPropagation` would also kill the
+            // lightbox stage listener, which sits downstream on the bubble path
+            // — this one runs in the capture phase, ahead of it.
+            e.preventDefault();
+            const s = useStore.getState();
+            if(s.lightboxIndex !== null || s.view !== "library"){
+                return;
+            }
+            // `deltaY` is not in pixels everywhere. WebKitGTK — which is the
+            // webview Tauri uses on Linux — reports deltaMode 1 (lines) with a
+            // deltaY of 1–3 per notch, where Chrome reports ~100 pixels.
+            // Accumulating the raw value there needs a dozen notches per step
+            // and reads as "ctrl+wheel does nothing".
+            const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1;
+            acc += e.deltaY * unit;
+            // One physical gesture must mean one density step: a notch lands
+            // near 100 once normalised, a pinch arrives in single digits.
+            if(Math.abs(acc) < 45){
+                return;
+            }
+            s.stepDensity(acc < 0 ? 1 : -1);
+            acc = 0;
+        }
+
+        function onZoomKey(e: KeyboardEvent){
+            if(!e.ctrlKey && !e.metaKey){
+                return;
+            }
+            if(!["+", "=", "-", "_", "0"].includes(e.key)){
+                return;
+            }
+            const tag = (e.target as HTMLElement | null)?.tagName ?? "";
+            if(tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT"){
+                return;
+            }
+            e.preventDefault();
+            const s = useStore.getState();
+            if(s.lightboxIndex !== null || s.view !== "library"){
+                return;
+            }
+            if(e.key === "0"){
+                s.setDensity(1);
+            }else if(e.key === "-" || e.key === "_"){
+                s.stepDensity(-1);
+            }else{
+                s.stepDensity(1);
+            }
+        }
+
+        window.addEventListener("wheel", onWheel, { passive: false, capture: true });
+        window.addEventListener("keydown", onZoomKey, { capture: true });
+        return () => {
+            window.removeEventListener("wheel", onWheel, { capture: true });
+            window.removeEventListener("keydown", onZoomKey, { capture: true });
+        };
+    }, []);
 
     // ---- drag & drop ------------------------------------------------------
     // A depth counter is required: dragenter/dragleave fire per descendant, so a
@@ -231,14 +319,20 @@ export default function App(){
                 </div>
             ) : null}
 
+            {/* Informational, not a warning: the outgoing model keeps every
+                vector it had, so search answers normally for the whole swap. */}
             {reindex.active ? (
-                <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-danger-muted px-4 py-2">
-                    <span className="text-[12.5px] text-fg">
-                        Search unavailable while re-indexing — {Math.round(reindex.progress)}% complete
+                <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-raised px-4 py-2">
+                    <span className="text-[12.5px] text-fg-dim">
+                        Re-indexing with {reindex.modelName} — {Math.round(reindex.progress)}%
+                        {reindex.total > 0
+                            ? ` (${reindex.current} / ${reindex.total})`
+                            : ""}
+                        . Still searching with {activeModelName}.
                     </span>
                     <div className="h-1 max-w-[220px] flex-1 overflow-hidden rounded-sm bg-hover">
                         <div
-                            className="h-full bg-danger transition-[width]"
+                            className="h-full bg-accent transition-[width]"
                             style={{ width: `${reindex.progress}%` }}
                         />
                     </div>
@@ -274,6 +368,16 @@ export default function App(){
                             We'll search your library by visual similarity
                         </div>
                     </div>
+                </div>
+            ) : null}
+
+            {/* Carried-photo hint. Positioned rather than pinned to the cursor:
+                a element that follows the pointer needs a state write per move,
+                which is the one thing a drag cannot afford. */}
+            {dragOut.active ? (
+                <div className="pointer-events-none absolute bottom-6 left-1/2 z-[250] -translate-x-1/2 rounded-xl border border-accent bg-raised px-4 py-[10px] text-[12.5px] text-fg shadow-[var(--shadow-bar)]">
+                    Carrying {dragOut.count} photo{dragOut.count === 1 ? "" : "s"} —
+                    drop on a collection, or outside the window to export
                 </div>
             ) : null}
 

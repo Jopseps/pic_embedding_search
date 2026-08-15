@@ -208,6 +208,113 @@ describe("App", () => {
         expect(useStore.getState().pendingCollectionDelete).toBeNull();
     });
 
+    it("restores the previous search when leaving \"find similar\"", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setQuery("table");
+            useStore.getState().toggleTypeFilter("Screenshot");
+        });
+        await act(async () => {
+            await useStore.getState().runSearch();
+        });
+        const wasShowing = useStore.getState().results.map((p) => p.id);
+
+        await act(async () => {
+            await useStore.getState().findSimilar(useStore.getState().results[0]!);
+        });
+        expect(useStore.getState().similarTo).not.toBeNull();
+        expect(useStore.getState().query).toBe("");
+
+        await act(async () => {
+            useStore.getState().exitSimilar();
+        });
+        // Not the All tab: the search the user came from, filters included.
+        expect(useStore.getState().query).toBe("table");
+        expect(useStore.getState().filters.types).toEqual(["Screenshot"]);
+        expect(useStore.getState().similarTo).toBeNull();
+        expect(useStore.getState().results.map((p) => p.id)).toEqual(wasShowing);
+    });
+
+    it("keeps one origin when find-similar is used twice in a row", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setQuery("table");
+        });
+        await act(async () => {
+            await useStore.getState().runSearch();
+        });
+        await act(async () => {
+            await useStore.getState().findSimilar(useStore.getState().results[0]!);
+        });
+        // Chaining must not overwrite the origin with the similar-results view,
+        // or Esc lands somewhere the user was never at.
+        await act(async () => {
+            await useStore.getState().findSimilar(useStore.getState().results[0]!);
+        });
+        await act(async () => {
+            useStore.getState().exitSimilar();
+        });
+        expect(useStore.getState().query).toBe("table");
+    });
+
+    it("shows the library count in the sidebar, not the result count", async () => {
+        await mountApp();
+        const library = useStore.getState().counts.library;
+        expect(library).toBeGreaterThan(0);
+
+        await act(async () => {
+            useStore.getState().setQuery("nothing-matches-this-xyzzy");
+        });
+        await act(async () => {
+            await useStore.getState().runSearch();
+        });
+        // The count that used to move with every keystroke.
+        expect(useStore.getState().total).toBe(0);
+        expect(useStore.getState().counts.library).toBe(library);
+    });
+
+    it("keeps search working while a model swap runs", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().selectModel("jina-clip-v2");
+        });
+        await act(async () => {
+            await useStore.getState().confirmModelChange();
+        });
+        expect(useStore.getState().reindex.active).toBe(true);
+
+        await act(async () => {
+            useStore.getState().setQuery("table");
+        });
+        await act(async () => {
+            await useStore.getState().runSearch();
+        });
+        // The old model still holds every vector it had — searching it is the
+        // whole reason the swap does not delete anything.
+        expect(useStore.getState().results.length).toBeGreaterThan(0);
+    });
+
+    it("exits fullscreen before closing the lightbox", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().openLightbox(0);
+            useStore.getState().toggleLightboxFullscreen();
+        });
+        expect(useStore.getState().lightboxFullscreen).toBe(true);
+
+        await act(async () => {
+            window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        });
+        // First Escape leaves fullscreen; the photo is still open.
+        expect(useStore.getState().lightboxFullscreen).toBe(false);
+        expect(useStore.getState().lightboxIndex).not.toBeNull();
+
+        await act(async () => {
+            window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        });
+        expect(useStore.getState().lightboxIndex).toBeNull();
+    });
+
     it("restores the filters a saved search was saved with", async () => {
         await mountApp();
         await act(async () => {
@@ -244,16 +351,30 @@ describe("App", () => {
         expect(screen.queryByText("CLIP ViT-B/32")).toBeNull();
     });
 
-    it("blocks search and warns while a model change re-indexes", async () => {
+    it("says which model is still answering while a model change re-indexes", async () => {
         await mountApp();
+        // A different target from the swap test above: `MockApi` is a module
+        // singleton, so a model it already switched to is a no-op here.
         await act(async () => {
-            useStore.getState().selectModel("jina-clip-v2");
-            useStore.getState().confirmModelChange();
+            useStore.getState().selectModel("siglip2-base-patch16-224");
+        });
+        await act(async () => {
+            await useStore.getState().confirmModelChange();
         });
         expect(useStore.getState().reindex.active).toBe(true);
-        expect(screen.getByText(/Search unavailable while re-indexing/)).toBeTruthy();
-        const input = screen.getByPlaceholderText(/re-indexing/i) as HTMLInputElement;
-        expect(input.disabled).toBe(true);
+        expect(screen.getByText(/Still searching with/)).toBeTruthy();
+        // The search box stays usable — the old vectors are all still there.
+        const input = screen.getByPlaceholderText(/re-indexing in the background/i) as HTMLInputElement;
+        expect(input.disabled).toBe(false);
+
+        // And it finishes. With a sidecar `model-changed` ends the swap; in a
+        // browser nothing else would, so the banner would sit at 0% forever
+        // and `tickIndexing` — which bails while `reindex.active` — with it.
+        await waitFor(
+            () => expect(useStore.getState().reindex.active).toBe(false),
+            { timeout: 6000 },
+        );
+        expect(useStore.getState().settings.modelId).toBe("siglip2-base-patch16-224");
     });
 
     it("shows the empty-library state when no folders are watched", async () => {
@@ -267,6 +388,62 @@ describe("App", () => {
         render(<App />);
         await waitFor(() => expect(useStore.getState().foldersLoaded).toBe(true));
         expect(await screen.findByText("No folders yet")).toBeTruthy();
+    });
+
+    /**
+     * The page-zoom guard. jsdom has no page zoom, so what is checkable here is
+     * that the handler is bound and that it reads the wheel event the way every
+     * webview reports it — which is the half that was wrong: `deltaMode` is
+     * lines, not pixels, in WebKitGTK.
+     */
+    it("steps the grid density on ctrl+wheel rather than scaling the app", async () => {
+        // `setDensity` persists, and the mock backend keeps what it was given
+        // for the whole file — boot reads it back, so a neighbouring test that
+        // zoomed would decide where this one starts.
+        await api.putSettings({ density: 1 });
+        await mountApp();
+        expect(useStore.getState().density).toBe(1);
+
+        await act(async () => {
+            window.dispatchEvent(new WheelEvent("wheel", {
+                deltaY: -120, ctrlKey: true, bubbles: true, cancelable: true,
+            }));
+        });
+        expect(useStore.getState().density).toBe(2);
+
+        await act(async () => {
+            window.dispatchEvent(new WheelEvent("wheel", {
+                deltaY: 120, ctrlKey: true, bubbles: true, cancelable: true,
+            }));
+        });
+        expect(useStore.getState().density).toBe(1);
+    });
+
+    it("reads a line-mode wheel, which is what the Linux webview sends", async () => {
+        await api.putSettings({ density: 1 });
+        await mountApp();
+        // deltaMode 1 with deltaY 3 is one notch in WebKitGTK. Treated as
+        // pixels it needs fifteen notches per step and reads as a dead control.
+        await act(async () => {
+            window.dispatchEvent(new WheelEvent("wheel", {
+                deltaY: -3, deltaMode: 1, ctrlKey: true, bubbles: true, cancelable: true,
+            }));
+        });
+        expect(useStore.getState().density).toBe(2);
+    });
+
+    it("leaves the grid alone when the lightbox is open, so the image zooms", async () => {
+        await api.putSettings({ density: 1 });
+        await mountApp();
+        await act(async () => {
+            useStore.getState().openLightbox(0);
+        });
+        await act(async () => {
+            window.dispatchEvent(new WheelEvent("wheel", {
+                deltaY: -400, ctrlKey: true, bubbles: true, cancelable: true,
+            }));
+        });
+        expect(useStore.getState().density).toBe(1);
     });
 
     it("recovers from a backend failure instead of pinning to the loading state", async () => {
