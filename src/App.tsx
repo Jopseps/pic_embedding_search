@@ -7,8 +7,6 @@ import { LibraryView } from "./components/LibraryView";
 import { SettingsView } from "./components/SettingsView";
 import { Lightbox } from "./components/Lightbox";
 
-const INDEX_TICK_MS = 1400;
-
 export default function App(){
     const grid = useGridLayout();
     const view = useStore((s) => s.view);
@@ -24,7 +22,7 @@ export default function App(){
     const loadFolders = useStore((s) => s.loadFolders);
     const loadStorage = useStore((s) => s.loadStorage);
     const runSearch = useStore((s) => s.runSearch);
-    const tickIndexing = useStore((s) => s.tickIndexing);
+    const startEventStream = useStore((s) => s.startEventStream);
     const toggleSidebar = useStore((s) => s.toggleSidebar);
     const setDragging = useStore((s) => s.setDragging);
     const showToast = useStore((s) => s.showToast);
@@ -51,11 +49,9 @@ export default function App(){
         return () => mq.removeEventListener("change", onChange);
     }, [themePref, resolveTheme]);
 
-    // Stands in for the sidecar's SSE progress stream until build step 4.
-    useEffect(() => {
-        const id = setInterval(tickIndexing, INDEX_TICK_MS);
-        return () => clearInterval(id);
-    }, [tickIndexing]);
+    // Indexing progress: the sidecar's /events stream, or a simulated ticker in
+    // mock mode. The store decides which; both hand back an unsubscribe.
+    useEffect(() => startEventStream(), [startEventStream]);
 
     // ---- keyboard ---------------------------------------------------------
     const moveFocus = useCallback(

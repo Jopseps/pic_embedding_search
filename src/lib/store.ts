@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api } from "./api";
+import { api, isMockMode } from "./api";
 import {
     DEFAULT_MODEL_ID,
     DEFAULT_OCR_ENGINE_ID,
@@ -27,6 +27,7 @@ import type {
 } from "./types";
 
 const SEARCH_DEBOUNCE_MS = 220;
+const MOCK_INDEX_TICK_MS = 1400;
 
 export type MainView = "library" | "settings";
 
@@ -127,6 +128,7 @@ interface Actions{
 
     toggleIndexingPanel(): void;
     toggleIndexingPause(): void;
+    startEventStream(): () => void;
     tickIndexing(): void;
 
     selectModel(id: string): void;
@@ -201,14 +203,18 @@ export const useStore = create<State & Actions>((set, get) => ({
     lightboxStripVisible: true,
     ocrExpanded: false,
 
-    indexing: {
-        current: 412,
-        total: 3241,
-        rate: 18.4,
-        etaSec: 154,
-        paused: false,
-        currentFile: "IMG_9931.heic",
-    },
+    // The fixture library ships a scan already in flight so the progress UI is
+    // visible without a backend; a real sidecar reports the truth over /events.
+    indexing: isMockMode
+        ? {
+            current: 412,
+            total: 3241,
+            rate: 18.4,
+            etaSec: 154,
+            paused: false,
+            currentFile: "IMG_9931.heic",
+        }
+        : { current: 0, total: 0, rate: 0, etaSec: 0, paused: false, currentFile: "" },
     indexingPanelOpen: false,
     reindex: { active: false, progress: 0, modelName: "" },
     pendingModelId: null,
@@ -463,7 +469,50 @@ export const useStore = create<State & Actions>((set, get) => ({
         set((s) => ({ indexing: { ...s.indexing, paused: !s.indexing.paused } }));
     },
 
-    /** Stand-in for the sidecar's SSE `/events` stream (build step 4). */
+    /**
+     * Live indexing progress. With a sidecar this is its `/events` SSE stream;
+     * in mock mode it is the simulated ticker below, so the progress UI stays
+     * exercisable without Python. Returns an unsubscribe function.
+     */
+    startEventStream(){
+        if(isMockMode){
+            const id = setInterval(() => get().tickIndexing(), MOCK_INDEX_TICK_MS);
+            return () => clearInterval(id);
+        }
+        return api.subscribeEvents((event) => {
+            if(event.type === "index"){
+                set({
+                    indexing: {
+                        current: event.current,
+                        total: event.total,
+                        rate: event.rate,
+                        etaSec: event.etaSec,
+                        paused: event.paused,
+                        currentFile: event.currentFile,
+                    },
+                });
+            }else if(event.type === "reindex"){
+                set({
+                    reindex: {
+                        active: event.active,
+                        progress: event.progress,
+                        modelName: event.modelName,
+                    },
+                });
+            }else if(event.type === "scan-complete"){
+                // New rows exist now, so the visible results are stale.
+                if(event.ingested > 0 || event.removed > 0){
+                    void get().loadFolders();
+                    void get().loadStorage();
+                    void get().runSearch();
+                }
+            }else if(event.type === "error"){
+                set({ backendError: event.message });
+            }
+        });
+    },
+
+    /** Mock-mode only — see startEventStream. */
     tickIndexing(){
         set((s) => {
             if(s.indexing.paused || s.reindex.active || s.indexing.current >= s.indexing.total){
