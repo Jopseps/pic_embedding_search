@@ -139,7 +139,25 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        self._pixel_epoch = 0
         self._migrate(self.conn())
+
+    # -- pixel epoch --------------------------------------------------------
+
+    @property
+    def pixel_epoch(self) -> int:
+        """Bumped whenever the set of images or their pixels change.
+
+        `dupes.DupeIndex` caches an O(N) clustering pass and rebuilds when this
+        moves. Every write that could change a pHash goes through `upsert_image`
+        or `delete_images`, so hooking those two is exhaustive in a way that
+        hooking the ingest paths would not be — the watcher and the scanner both
+        end up here.
+
+        **`move_image` deliberately does not bump it.** A rename changes a path;
+        the pixels, and therefore every hash, are untouched.
+        """
+        return self._pixel_epoch
 
     # -- connections --------------------------------------------------------
 
@@ -263,6 +281,7 @@ class Store:
             )
             image_id = int(cur.fetchone()["id"])
             c.commit()
+            self._pixel_epoch += 1
             return image_id
 
     def delete_images(self, ids: Sequence[int]) -> int:
@@ -273,6 +292,8 @@ class Store:
             marks = ",".join("?" * len(ids))
             cur = c.execute(f"DELETE FROM images WHERE id IN ({marks})", tuple(ids))
             c.commit()
+            if(cur.rowcount):
+                self._pixel_epoch += 1
             return cur.rowcount
 
     def move_image(self, old_path: str, new_path: str) -> int | None:
@@ -292,9 +313,15 @@ class Store:
             # Landing on an existing row would violate UNIQUE(path). Whatever
             # was at the destination has just been overwritten on disk, so its
             # row is stale — drop it and let the cascade take its rows with it.
-            c.execute("DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id))
+            displaced = c.execute(
+                "DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id)
+            ).rowcount
             c.execute("UPDATE images SET path=? WHERE id=?", (new_path, image_id))
             c.commit()
+            # The rename itself changes no pixels and must not invalidate the
+            # dupe index. Overwriting a *different* image does — that row is gone.
+            if(displaced):
+                self._pixel_epoch += 1
             return image_id
 
     def image_count(self) -> int:
@@ -479,18 +506,119 @@ class Store:
         return list(self.conn().execute("SELECT * FROM collections ORDER BY name"))
 
     def collections_for(self, image_ids: Sequence[int]) -> dict[int, list[str]]:
+        """image_id -> collection **ids**, as strings.
+
+        Ids rather than names because `Photo.collections` in `types.ts` is what
+        `MockApi` filters on, and a collection that gets renamed must not drop
+        out of its own membership list.
+        """
         if(not image_ids):
             return {}
         marks = ",".join("?" * len(image_ids))
         cur = self.conn().execute(
-            "SELECT ci.image_id AS iid, c.name AS name FROM collection_items ci"
-            f" JOIN collections c ON c.id = ci.collection_id WHERE ci.image_id IN ({marks})",
+            "SELECT image_id AS iid, collection_id AS cid FROM collection_items"
+            f" WHERE image_id IN ({marks}) ORDER BY collection_id",
             tuple(image_ids),
         )
         out: dict[int, list[str]] = {}
         for row in cur:
-            out.setdefault(int(row["iid"]), []).append(row["name"])
+            out.setdefault(int(row["iid"]), []).append(str(int(row["cid"])))
         return out
+
+    def create_collection(self, name: str) -> sqlite3.Row:
+        """Idempotent on name: `collections.name` is UNIQUE, and a second
+        "New collection" with the same name should select the existing one
+        rather than fail the request."""
+        with self._write_lock:
+            c = self.conn()
+            c.execute(
+                "INSERT INTO collections(name, created_at) VALUES(?,?)"
+                " ON CONFLICT(name) DO NOTHING",
+                (name, now_iso()),
+            )
+            c.commit()
+        row = self.conn().execute(
+            "SELECT * FROM collections WHERE name=?", (name,)
+        ).fetchone()
+        return row
+
+    def delete_collection(self, collection_id: int) -> bool:
+        with self._write_lock:
+            c = self.conn()
+            cur = c.execute("DELETE FROM collections WHERE id=?", (collection_id,))
+            c.commit()
+            return cur.rowcount > 0
+
+    def rename_collection(self, collection_id: int, name: str) -> bool:
+        with self._write_lock:
+            c = self.conn()
+            cur = c.execute(
+                "UPDATE collections SET name=? WHERE id=?", (name, collection_id)
+            )
+            c.commit()
+            return cur.rowcount > 0
+
+    def collection_count(self, collection_id: int) -> int:
+        return int(self.conn().execute(
+            "SELECT count(*) AS n FROM collection_items WHERE collection_id=?",
+            (collection_id,),
+        ).fetchone()["n"])
+
+    def add_to_collection(self, collection_id: int, image_ids: Sequence[int]) -> int:
+        """Returns how many rows were newly added — re-adding is not an error."""
+        if(not image_ids):
+            return 0
+        with self._write_lock:
+            c = self.conn()
+            before = self.collection_count(collection_id)
+            c.executemany(
+                "INSERT INTO collection_items(collection_id, image_id) VALUES(?,?)"
+                " ON CONFLICT DO NOTHING",
+                [(collection_id, int(i)) for i in image_ids],
+            )
+            c.commit()
+            return self.collection_count(collection_id) - before
+
+    def remove_from_collection(self, collection_id: int, image_ids: Sequence[int]) -> int:
+        if(not image_ids):
+            return 0
+        with self._write_lock:
+            c = self.conn()
+            marks = ",".join("?" * len(image_ids))
+            cur = c.execute(
+                f"DELETE FROM collection_items WHERE collection_id=? AND image_id IN ({marks})",
+                (collection_id, *[int(i) for i in image_ids]),
+            )
+            c.commit()
+            return cur.rowcount
+
+    # -- saved searches -----------------------------------------------------
+
+    def list_saved_searches(self) -> list[sqlite3.Row]:
+        return list(self.conn().execute("SELECT * FROM saved_searches ORDER BY id"))
+
+    def create_saved_search(self, name: str, query_json: str) -> sqlite3.Row:
+        """`query_json` holds the whole search — text, view and filters — so
+        running a saved search restores what was on screen, not just the words
+        in the box. `name` is what the sidebar shows."""
+        with self._write_lock:
+            c = self.conn()
+            cur = c.execute(
+                "INSERT INTO saved_searches(name, query_json) VALUES(?,?) RETURNING id",
+                (name, query_json),
+            )
+            new_id = int(cur.fetchone()["id"])
+            c.commit()
+        return self.conn().execute(
+            "SELECT * FROM saved_searches WHERE id=?", (new_id,)
+        ).fetchone()
+
+    def delete_saved_search(self, search_id: int) -> bool:
+        with self._write_lock:
+            c = self.conn()
+            cur = c.execute("DELETE FROM saved_searches WHERE id=?", (search_id,))
+            c.commit()
+            return cur.rowcount > 0
 
 
 MIGRATIONS: dict[int, Any] = {}

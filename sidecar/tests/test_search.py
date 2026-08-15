@@ -367,7 +367,15 @@ def test_similar_uses_cosine_and_excludes_the_subject(app_state):
 
 
 def test_exact_duplicates_are_flagged(app_state, library):
-    """isDupe is exact-sha today; pHash near-dupes land at step 10."""
+    """A byte copy is always a duplicate, and `view=dupes` shows exactly the
+    flagged set.
+
+    Every same-coloured fixture is *already* a pHash duplicate of its siblings —
+    `make_image`'s corner block is 32 px wide and disappears entirely when pHash
+    downscales to 32x32, so all four reds hash identically. That is the correct
+    answer for near-identical images and it is why this asserts the copy joins
+    red_0 rather than asserting the copy is the only duplicate in the library.
+    """
     copy = library / "photos" / "red_copy.jpg"
     # A byte copy, not a re-encode: exact duplicates are a sha256 match.
     shutil.copyfile(library / "photos" / "red_0.jpg", copy)
@@ -375,7 +383,15 @@ def test_exact_duplicates_are_flagged(app_state, library):
 
     res = app_state.searcher.search(SearchParams(q=""))
     dupes = [i for i in res["items"] if i["isDupe"]]
-    assert {Path(i["filename"]).stem for i in dupes} == {"red_0", "red_copy"}
+    stems = {Path(i["filename"]).stem for i in dupes}
+    assert {"red_0", "red_copy"} <= stems
+
+    by_id = {i["id"]: Path(i["filename"]).stem for i in res["items"]}
+    copy_id = next(i for i, stem in by_id.items() if stem == "red_copy")
+    group = next(g for g in app_state.searcher.dupes.groups if copy_id in g)
+    assert "red_0" in {by_id[i] for i in group}
+    # Different colours are 16 apart — past the threshold, so they stay out.
+    assert not {by_id[i] for i in group} & {"blue_0", "green_0"}
 
     only_dupes = app_state.searcher.search(SearchParams(q="", view="dupes"))
     assert {i["id"] for i in only_dupes["items"]} == {i["id"] for i in dupes}

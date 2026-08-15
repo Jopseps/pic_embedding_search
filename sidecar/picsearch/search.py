@@ -13,6 +13,10 @@ Design notes that are decisions, not accidents:
   noise. `score = Σ 1/(60 + rank_i)`.
 * A user's query is never FTS5 syntax. Every token is quoted, and a MATCH that
   SQLite still rejects degrades to vector-only rather than to a 500.
+* `isDupe` and `view=dupes` come from `dupes.DupeIndex`, a cached pHash
+  clustering, never from cosine and no longer from exact `sha256` alone.
+  `hydrate` runs on every response, so it is handed the cached set rather than
+  computing one.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .dupes import DupeIndex
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -237,32 +242,45 @@ def build_filter_sql(params: SearchParams) -> tuple[str, list]:
     return (" AND ".join(clauses) if clauses else ""), args
 
 
-def candidate_ids(store: Store, params: SearchParams) -> set[int] | None:
+def candidate_ids(
+    store: Store, params: SearchParams, dupes: frozenset[int] | None = None
+) -> set[int] | None:
     """Ids surviving the metadata filters, or None meaning "no restriction"."""
     where, args = build_filter_sql(params)
     joins = ""
 
     if(params.collection):
+        # By id, not name: renaming a collection must not silently empty the
+        # view the user is looking at. `api.ts` sends `Collection.id`.
         joins += (
             " JOIN collection_items ci ON ci.image_id = images.id"
-            " JOIN collections c ON c.id = ci.collection_id AND c.name = ?"
+            " AND ci.collection_id = ?"
         )
-        args = [params.collection] + args
+        args = [_collection_id(params.collection)] + args
 
-    # Exact duplicates are cheap and real today; pHash near-dupes land at step 10.
-    if(params.view == "dupes"):
-        extra = (
-            "images.sha256 IN (SELECT sha256 FROM images GROUP BY sha256 HAVING count(*) > 1)"
-        )
-        where = f"{where} AND {extra}" if where else extra
-
-    if(not where and not joins):
+    if(not where and not joins and params.view != "dupes"):
         return None
 
     sql = f"SELECT images.id FROM images{joins}"
     if(where):
         sql += f" WHERE {where}"
-    return {int(r["id"]) for r in store.conn().execute(sql, args)}
+    ids = {int(r["id"]) for r in store.conn().execute(sql, args)}
+
+    # Near-duplicates are a pHash clustering, not a SQL predicate — see
+    # `dupes.py` for why the grouping is complete linkage. Intersecting here
+    # rather than joining keeps that entirely out of the query builder.
+    if(params.view == "dupes"):
+        ids &= (dupes if dupes is not None else frozenset())
+    return ids
+
+
+def _collection_id(value: str) -> int:
+    """`-1` for a malformed id, which matches no row — an unknown collection is
+    an empty view, never every image in the library."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -359,20 +377,12 @@ def rrf_merge(ranked_lists: Sequence[Sequence[int]], k: int = RRF_K) -> list[tup
 # Row hydration
 # ---------------------------------------------------------------------------
 
-def dupe_sha_set(store: Store) -> set[str]:
-    return {
-        r["sha256"]
-        for r in store.conn().execute(
-            "SELECT sha256 FROM images GROUP BY sha256 HAVING count(*) > 1"
-        )
-    }
-
-
 def hydrate(
     store: Store,
     ids: Sequence[int],
     scores: dict[int, float] | None = None,
     snippets: dict[int, str] | None = None,
+    dupes: frozenset[int] | None = None,
 ) -> list[dict]:
     """Turn ids into wire-shape dicts, preserving the order of `ids`."""
     if(not ids):
@@ -386,7 +396,10 @@ def hydrate(
     # not light up the TEXT badge. The lightbox wants the text while browsing
     # too, so this runs for every response, not just for text queries.
     ocr = store.ocr_map(ids)
-    dupes = dupe_sha_set(store)
+    # `dupes` is the cached pHash clustering (`dupes.DupeIndex`). Callers that
+    # have no index — tests, one-off hydrations — get `isDupe: false` rather
+    # than an O(N) rebuild hidden inside a row formatter.
+    in_a_group = dupes if dupes is not None else frozenset()
     collections = store.collections_for(ids)
 
     out: list[dict] = []
@@ -410,7 +423,7 @@ def hydrate(
             # OCR" from "field missing", and a blanket exclude_none breaks it.
             "ocrText": ocr.get(int(row["id"])),
             "snippet": (snippets or {}).get(int(row["id"])),
-            "isDupe": row["sha256"] in dupes,
+            "isDupe": int(row["id"]) in in_a_group,
             "collections": collections.get(int(row["id"]), []),
         }
         # `score` is optional in types.ts — omitted when browsing, never null.
@@ -429,15 +442,20 @@ class Searcher:
         self.store = store
         self.vectors = vectors
         self.embedder = embedder
+        self.dupes = DupeIndex(store)
 
     def search(self, params: SearchParams) -> dict:
         started = time.perf_counter()
-        candidates = candidate_ids(self.store, params)
+        # One read of the cached clustering per request: the property refreshes
+        # on a stale epoch, and both the `dupes` view and every item's `isDupe`
+        # must agree within one response.
+        dupes = self.dupes.ids
+        candidates = candidate_ids(self.store, params, dupes)
         query = params.q.strip()
 
         if(query == ""):
             ids, total = self._browse(params, candidates)
-            items = hydrate(self.store, ids)
+            items = hydrate(self.store, ids, dupes=dupes)
         else:
             # Two ranked lists, fused by rank. The text leg is usually short or
             # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
@@ -448,7 +466,7 @@ class Searcher:
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
-            items = hydrate(self.store, [i for i, _ in window], scores, snippets)
+            items = hydrate(self.store, [i for i, _ in window], scores, snippets, dupes)
 
         consumed = params.offset + len(items)
         cursor = str(consumed) if consumed < total else None
@@ -507,7 +525,7 @@ class Searcher:
         ][:limit]
         scores = {i: s for i, s in ranked}
         return {
-            "items": hydrate(self.store, [i for i, _ in ranked], scores),
+            "items": hydrate(self.store, [i for i, _ in ranked], scores, dupes=self.dupes.ids),
             "total": len(ranked),
             "tookMs": round((time.perf_counter() - started) * 1000, 2),
             "cursor": None,
