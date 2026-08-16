@@ -6,19 +6,26 @@ import { startFileDrag } from "./tauri";
 import type { GridLayoutHandle } from "./useGridLayout";
 import type { Photo } from "./types";
 
-/** Movement past this many pixels means "drag", not "click". Below it a shaky
- *  hand still opens the lightbox. */
-const DRAG_SLOP = 5;
-/** Hold this long on a photo and it selects instead of opening. */
-const LONG_PRESS_MS = 400;
+/** Movement past this many pixels means "drag", not "click", and how long a
+ *  hold takes to select instead of opening. Both are settings now — a hand that
+ *  shakes needs a wider slop, and a slow click on a long delay is the failure
+ *  the delay exists to prevent. Read from the store at pointerdown, never
+ *  captured in a listener closure: the window listeners are bound once for the
+ *  life of the grid and would keep whatever the values were then. */
+const DRAG_SLOP_FALLBACK = 5;
+const LONG_PRESS_FALLBACK = 400;
 /** Auto-scroll band at the top and bottom edge of the viewport. */
 const EDGE = 48;
 const EDGE_SPEED = 18;
 
 /**
- * What a drag turned into, decided once at the moment the pointer passes
- * `DRAG_SLOP` and never revisited — a gesture that changed meaning halfway
- * through would select photos the hand had already left behind.
+ * What a drag turned into, decided at the moment the pointer passes
+ * `DRAG_SLOP`. Exactly one transition may follow it: a paint sweep becomes a
+ * range the moment Shift goes down, because pressing Shift mid-drag has one
+ * obvious meaning and doing nothing reads as broken. That conversion is
+ * one-way — releasing Shift keeps the range until the button comes up. Going
+ * back to painting would resume the sweep from wherever the range left the
+ * pointer, selecting a straight band the hand never crossed.
  */
 type Mode = "none" | "paint" | "range" | "dragOut";
 
@@ -80,6 +87,7 @@ function onSelectStart(e: Event){
  * | drag from an unselected photo | paint: select everything swept |
  * | Ctrl + drag | paint in reverse: deselect everything swept |
  * | Shift + press or drag | select the range from the anchor to here |
+ * | Shift *during* a drag | the sweep becomes a range from the press to here |
  * | drag from a *selected* photo | carry the selection: onto a collection, or out to the OS |
  *
  * They must be decided in one place. Split across the cell and the container,
@@ -103,6 +111,11 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
     /** Selection as it stood when a Shift drag began. A range must shrink as
      *  well as grow, so each move rebuilds base ∪ range rather than adding. */
     const base = useRef<number[]>([]);
+    /** Which photo a range measures from. A Shift+press uses the store's
+     *  anchor — the last photo the user acted on. A range that grows out of a
+     *  drag already in flight uses the photo the press started on, which is
+     *  the only end of it the hand ever chose. */
+    const rangeAnchor = useRef<number | null>(null);
     const dragIds = useRef<number[]>([]);
     const osDragStarted = useRef(false);
     const held = useRef(false);
@@ -111,6 +124,9 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
     const heldMode = useRef<"add" | "remove">("add");
     const timer = useRef<number | null>(null);
     const raf = useRef<number | null>(null);
+    /** Frozen at pointerdown, for the same reason the mode is: a setting that
+     *  changed mid-drag would move the threshold under the hand. */
+    const slop = useRef(DRAG_SLOP_FALLBACK);
 
     const layoutRef = useRef(grid.layout);
     layoutRef.current = grid.layout;
@@ -189,12 +205,17 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
             armed.current = true;
             mode.current = "none";
             held.current = false;
+            rangeAnchor.current = null;
             base.current = [...s.selectedIds];
+            // `??`, because a sidecar older than these settings answers
+            // /settings without them and the store keeps whatever it merged.
+            slop.current = s.settings.dragSlop ?? DRAG_SLOP_FALLBACK;
 
             if(photo !== null && e.shiftKey){
                 // Shift+click is a range on its own, before any movement — the
                 // drag that may follow only extends it.
                 mode.current = "range";
+                rangeAnchor.current = s.anchorId;
                 s.setSelection(unique([
                     ...base.current,
                     ...rangeIds(layoutRef.current.flat, s.anchorId, photo.id),
@@ -220,7 +241,7 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
                     const store = useStore.getState();
                     heldMode.current = store.selectedIds.has(photo.id) ? "remove" : "add";
                     store.toggleSelect(photo.id);
-                }, LONG_PRESS_MS);
+                }, s.settings.holdMs ?? LONG_PRESS_FALLBACK);
             }
         },
         [grid.mode, grid.scrollRef, swallowClick, toContent],
@@ -244,7 +265,11 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
                 mode.current = "paint";
                 paintMode.current = heldMode.current;
             }else if(e.shiftKey && photo !== null){
+                // Shift went down after the press but before the drag passed
+                // the slop, so the press itself was a plain one: the range runs
+                // from the photo under it, not from the store's old anchor.
                 mode.current = "range";
+                rangeAnchor.current = photo.id;
             }else if(e.ctrlKey || e.metaKey){
                 // Ctrl is checked before the drag-out branch on purpose: an
                 // erase sweep starts on a photo that is by definition selected,
@@ -292,7 +317,7 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
                 if(photo !== null){
                     s.setSelection(unique([
                         ...base.current,
-                        ...rangeIds(layoutRef.current.flat, s.anchorId, photo.id),
+                        ...rangeIds(layoutRef.current.flat, rangeAnchor.current, photo.id),
                     ]));
                 }
             }
@@ -336,11 +361,23 @@ export function useGridGesture(grid: GridLayoutHandle): GridGesture{
             }
             if(mode.current === "none"){
                 const d = Math.hypot(point.x - origin.current.x, point.y - origin.current.y);
-                if(d < DRAG_SLOP){
+                if(d < slop.current){
                     return;
                 }
                 begin(e);
                 last.current = origin.current;
+            }else if(
+                mode.current === "paint"
+                && paintMode.current === "add"
+                && e.shiftKey
+                && originPhoto.current !== null
+            ){
+                // Shift pressed with the button already down. The sweep so far
+                // is discarded — `apply` rebuilds the selection from the base
+                // it had at pointerdown — and everything from the photo the
+                // press started on to the pointer is selected instead.
+                mode.current = "range";
+                rangeAnchor.current = originPhoto.current.id;
             }
             e.preventDefault();
             if(mode.current === "dragOut"){

@@ -159,6 +159,7 @@ export function buildLayout<T extends Sized>(
     targetHeight: number,
     gap: number,
     containerWidth: number,
+    headerHeight: number = HEADER_HEIGHT,
 ): Layout<T>{
     const blocks: LayoutBlock<T>[] = [];
     const flat: T[] = [];
@@ -173,9 +174,9 @@ export function buildLayout<T extends Sized>(
                 key: `h${si}`,
                 label: section.label,
                 top,
-                height: HEADER_HEIGHT,
+                height: headerHeight,
             });
-            top += HEADER_HEIGHT;
+            top += headerHeight;
         }
 
         const rows = justifyRows(section.items, targetHeight, gap, containerWidth);

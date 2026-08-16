@@ -190,6 +190,35 @@ describe("grid gestures", () => {
         expect(narrow).toBeLessThan(wide);
     });
 
+    it("Shift pressed mid-drag ranges from where the press started", async () => {
+        await mountApp();
+        const flatIds = useStore.getState().results.map((p) => p.id);
+
+        // A plain sweep to the right first. This also moves the store's anchor
+        // to the last photo it crossed, which is what makes the assertion
+        // below meaningful: a range measured from *that* would keep them.
+        fireEvent.pointerDown(anyCell(), { button: 0, clientX: 500, clientY: 70 });
+        fireEvent.pointerMove(window, { clientX: 900, clientY: 70 });
+        const painted = [...useStore.getState().selectedIds];
+        expect(painted.length).toBeGreaterThan(1);
+        const rightmost = Math.max(...painted.map((id) => flatIds.indexOf(id)));
+
+        // Shift goes down with the button still held, and the sweep becomes a
+        // range from the press to the pointer.
+        fireEvent.pointerMove(window, { clientX: 40, clientY: 70, shiftKey: true });
+        fireEvent.pointerUp(window, { clientX: 40, clientY: 70 });
+
+        const ranged = [...useStore.getState().selectedIds]
+            .map((id) => flatIds.indexOf(id))
+            .sort((a, b) => a - b);
+        expect(ranged.length).toBeGreaterThan(1);
+        expect(ranged[ranged.length - 1]! - ranged[0]!).toBe(ranged.length - 1);
+        // The photos the sweep had already painted off to the right are gone:
+        // the range runs from the press, not from the store's anchor and not
+        // from wherever the sweep happened to stop.
+        expect(ranged[ranged.length - 1]!).toBeLessThan(rightmost);
+    });
+
     it("a hold that keeps moving flows straight into a sweep", async () => {
         await mountApp();
         const first = useStore.getState().results[0]!;
