@@ -153,6 +153,22 @@ export type ThemePref = "dark" | "light" | "system";
 export type ResolvedTheme = "dark" | "light";
 /** Index into GRID_ROW_HEIGHTS. */
 export type Density = 0 | 1 | 2;
+/** Percent. One of `UI_SCALES` — presets, not a slider, so every layout the
+ *  app can be in has been looked at. */
+export type UiScale = number;
+
+export interface EditorFont{
+    id: string;
+    label: string;
+    /** Written to `--font-ui`. The first family is the one being offered; the
+     *  rest are the fallback chain when it is not installed. */
+    stack: string;
+    /** Monospace fonts drive the `font-mono` utilities too — paths and
+     *  filenames must not fall back to a *different* mono than the UI. A
+     *  proportional choice leaves them on the system monospace. */
+    mono: boolean;
+    desc: string;
+}
 
 export interface Settings{
     /** The model **answering searches right now**. During a swap this is still
@@ -162,6 +178,51 @@ export interface Settings{
     ocrLangs: string[];
     theme: ThemePref;
     density: Density;
+    /** Id in `FONTS`. Nothing is bundled: the font has to be installed on the
+     *  machine, and the picker says so when it is not. */
+    fontId: string;
+    uiScale: UiScale;
+    reduceMotion: boolean;
+    highContrast: boolean;
+
+    // ---- colour ----------------------------------------------------------
+    /** Accent hue in OKLCH degrees, 0–360. Only the *hue* is a preference: the
+     *  lightness and chroma of `--accent` / `--accent-muted` / `--accent-text`
+     *  stay per-theme, which is what keeps a custom accent legible in light,
+     *  dark and high contrast without four sets of numbers to pick. */
+    accentHue: number;
+    /** Hue of the greys. The surfaces, the border and the text carry a trace of
+     *  chroma — 0.002–0.005 — and this is the direction it points in. */
+    tintHue: number;
+    /** How much of that trace to keep, as a percent. 100 is what the app
+     *  shipped with, 0 is a pure neutral grey, 300 is an openly tinted UI. */
+    tintStrength: number;
+
+    // ---- grid ------------------------------------------------------------
+    /** Frame drawn around a selected cell, px at 100% UI scale. Capped at the
+     *  grid gutter: wider than that and two adjacent selected cells merge into
+     *  one accent field with photos floating in it. */
+    selectionBorder: number;
+    /** Thumbnail corner radius, px at 100% UI scale. 0 is square. */
+    cellRadius: number;
+
+    // ---- gestures --------------------------------------------------------
+    /** How long a press on a photo has to last before it selects instead of
+     *  opening. */
+    holdMs: number;
+    /** Movement past this many pixels is a drag, not a click. */
+    dragSlop: number;
+
+    // ---- search ----------------------------------------------------------
+    /** Rows fetched per query. */
+    pageSize: number;
+    /** Idle time after the last keystroke before the query is sent. */
+    searchDebounceMs: number;
+    /** Balance between the two ranked legs of the hybrid search, 0–100. 50
+     *  weights them equally, which is exactly the unweighted RRF the sidecar
+     *  has always run; 100 is OCR text only, 0 is visual only. This weights
+     *  *ranks*, never scores — cosine and BM25 still share no scale. */
+    textWeight: number;
 }
 
 /** `GET/PUT /settings`. `pendingModelId` is the swap in flight, if any. */
@@ -193,11 +254,15 @@ export type SidecarEvent =
     | { type: "model-changed"; modelId: string }
     | { type: "error"; message: string };
 
-/** Which of the six grid states the main area is in. */
+/**
+ * Which of the five grid states the main area is in.
+ *
+ * There is no "selection" state: a selection changes the chrome, never what the
+ * grid lays out. See `gridMode` in store.ts for what that cost.
+ */
 export type GridMode =
     | "idle"
     | "results"
     | "loading"
     | "emptySearch"
-    | "emptyLibrary"
-    | "selection";
+    | "emptyLibrary";

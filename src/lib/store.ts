@@ -1,9 +1,21 @@
 import { create } from "zustand";
 import { api, isMockMode } from "./api";
 import {
+    DEFAULT_ACCENT_HUE,
+    DEFAULT_CELL_RADIUS,
+    DEFAULT_DRAG_SLOP,
+    DEFAULT_FONT_ID,
+    DEFAULT_HOLD_MS,
     DEFAULT_MODEL_ID,
     DEFAULT_OCR_ENGINE_ID,
     DEFAULT_OCR_LANGS,
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_SEARCH_DEBOUNCE_MS,
+    DEFAULT_SELECTION_BORDER,
+    DEFAULT_TEXT_WEIGHT,
+    DEFAULT_TINT_HUE,
+    DEFAULT_TINT_STRENGTH,
+    DEFAULT_UI_SCALE,
     modelById,
 } from "./catalog";
 import type {
@@ -24,10 +36,10 @@ import type {
     Settings,
     StorageUsage,
     ThemePref,
+    UiScale,
     WatchedFolder,
 } from "./types";
 
-const SEARCH_DEBOUNCE_MS = 220;
 const MOCK_INDEX_TICK_MS = 1400;
 
 export const SIDEBAR_MIN_W = 180;
@@ -226,6 +238,16 @@ interface Actions{
     toggleOcrLang(code: string): void;
     setTheme(t: ThemePref): void;
     resolveTheme(): void;
+    setFont(id: string): void;
+    setUiScale(scale: UiScale): void;
+    setReduceMotion(on: boolean): void;
+    setHighContrast(on: boolean): void;
+    /** Every preference whose whole job is "write it and persist it" — the
+     *  colours, the grid shape, the gesture timings, the search knobs. Model,
+     *  OCR, theme and density keep their own setters because each of them has
+     *  real work to do besides; the rest would be nine copies of two lines,
+     *  which is nine chances to persist one of them and forget the next. */
+    setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void;
 
     loadFolders(): Promise<void>;
     addFolder(): Promise<void>;
@@ -248,6 +270,11 @@ interface Actions{
 
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+/** Preference writes waiting to go to disk, and the timer that flushes them.
+ *  See `setSetting`: a slider drag is one PUT, not one per pixel. */
+let settingsTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingSettings: Partial<Settings> = {};
+const SETTINGS_FLUSH_MS = 250;
 /** Guards against an older in-flight search overwriting a newer one. */
 let searchSeq = 0;
 
@@ -365,6 +392,20 @@ export const useStore = create<State & Actions>((set, get) => ({
         ocrLangs: [...DEFAULT_OCR_LANGS],
         theme: "dark",
         density: 1,
+        fontId: DEFAULT_FONT_ID,
+        uiScale: DEFAULT_UI_SCALE,
+        reduceMotion: false,
+        highContrast: false,
+        accentHue: DEFAULT_ACCENT_HUE,
+        tintHue: DEFAULT_TINT_HUE,
+        tintStrength: DEFAULT_TINT_STRENGTH,
+        selectionBorder: DEFAULT_SELECTION_BORDER,
+        cellRadius: DEFAULT_CELL_RADIUS,
+        holdMs: DEFAULT_HOLD_MS,
+        dragSlop: DEFAULT_DRAG_SLOP,
+        pageSize: DEFAULT_PAGE_SIZE,
+        searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
+        textWeight: DEFAULT_TEXT_WEIGHT,
     },
     resolvedTheme: "dark",
     folders: [],
@@ -391,7 +432,10 @@ export const useStore = create<State & Actions>((set, get) => ({
             return;
         }
         set({ searching: true });
-        debounceTimer = setTimeout(() => void get().runSearch(), SEARCH_DEBOUNCE_MS);
+        debounceTimer = setTimeout(
+            () => void get().runSearch(),
+            get().settings.searchDebounceMs,
+        );
     },
 
     clearQuery(){
@@ -412,6 +456,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 view: s.activeCollection === null ? s.libraryView : null,
                 collection: s.activeCollection,
                 filters: s.filters,
+                limit: s.settings.pageSize,
             });
             if(seq !== searchSeq){
                 return;
@@ -998,7 +1043,13 @@ export const useStore = create<State & Actions>((set, get) => ({
         try{
             const s = await api.getSettings();
             const { pendingModelId: _p, pendingCoverage: cov, ...settings } = s;
-            set({ settings, density: settings.density });
+            // Merged over the defaults rather than replacing them: a
+            // config.toml written by an older build has no appearance keys, and
+            // `uiScale: undefined` reaches CSS as `calc(1px * undefined)`.
+            set((st) => ({
+                settings: { ...st.settings, ...settings },
+                density: settings.density ?? st.density,
+            }));
             get().resolveTheme();
             if(s.pendingModelId !== null){
                 // A swap the sidecar resumed on its own after a restart.
@@ -1052,6 +1103,51 @@ export const useStore = create<State & Actions>((set, get) => ({
         set((s) => ({ settings: { ...s.settings, theme: t } }));
         get().resolveTheme();
         void get().persistSettings({ theme: t });
+    },
+
+    setFont(id){
+        set((s) => ({ settings: { ...s.settings, fontId: id } }));
+        void get().persistSettings({ fontId: id });
+    },
+
+    setUiScale(scale){
+        set((s) => ({ settings: { ...s.settings, uiScale: scale } }));
+        void get().persistSettings({ uiScale: scale });
+    },
+
+    setReduceMotion(on){
+        set((s) => ({ settings: { ...s.settings, reduceMotion: on } }));
+        void get().persistSettings({ reduceMotion: on });
+    },
+
+    setHighContrast(on){
+        set((s) => ({ settings: { ...s.settings, highContrast: on } }));
+        void get().persistSettings({ highContrast: on });
+    },
+
+    setSetting(key, value){
+        // The store moves now — a slider has to preview live — and the write
+        // to disk is coalesced. A drag emits an input event per pixel, and
+        // every one of those would otherwise be a PUT that re-reads and
+        // rewrites config.toml, with FastAPI running them concurrently in its
+        // threadpool: a read-modify-write race against itself, a few hundred
+        // times per drag. Two settings written in one tick (a tint preset sets
+        // a hue and a strength) collapse into one PUT for the same reason.
+        set((s) => ({ settings: { ...s.settings, [key]: value } }));
+        pendingSettings = { ...pendingSettings, [key]: value };
+        clearTimeout(settingsTimer);
+        settingsTimer = setTimeout(() => {
+            const patch = pendingSettings;
+            pendingSettings = {};
+            void get().persistSettings(patch);
+            // The page size and the fusion weighting change what a query
+            // returns, so the results on screen are stale the moment either
+            // lands. Re-run once, at the end of the drag — a search per slider
+            // step would embed the query on the GPU thirty times.
+            if("pageSize" in patch || "textWeight" in patch){
+                void get().runSearch();
+            }
+        }, SETTINGS_FLUSH_MS);
     },
 
     resolveTheme(){
@@ -1183,7 +1279,17 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 }));
 
-/** Which of the six grid states the main area should render. */
+/**
+ * Which of the five grid states the main area should render.
+ *
+ * A selection is deliberately **not** one of them. It used to be, and nothing
+ * ever consumed it while three things silently broke on the first hold: the
+ * mode is a dependency of the layout, so selecting a photo rebuilt the sections
+ * (month headers gone, sticky label gone) and reset the scroll to the top; and
+ * during a search it made the header read "All photos" with the result count
+ * removed. Selection is chrome — the selection bar, the checkmarks — never
+ * layout.
+ */
 export function gridMode(s: State): GridMode{
     // Boot: show skeletons rather than guessing at an empty library.
     if(s.searching || !s.foldersLoaded){
@@ -1196,8 +1302,31 @@ export function gridMode(s: State): GridMode{
     if(isSearch && s.results.length === 0){
         return "emptySearch";
     }
-    if(s.selectedIds.size > 0){
-        return "selection";
-    }
     return isSearch ? "results" : "idle";
+}
+
+/**
+ * What the user asked for, as one comparable string — query, view, collection,
+ * similar-to and every filter.
+ *
+ * The grid resets its scroll when *this* changes, never when `results` changes
+ * identity. `runSearch` re-runs on a watcher `scan-complete`, on a model swap
+ * landing and after a collection edit, and each one hands back a fresh array
+ * for a query nobody retyped: keyed on the array, a background rescan yanked a
+ * user who was halfway down their library back to the top.
+ */
+export function searchKey(s: State): string{
+    const f = s.filters;
+    return [
+        s.query.trim(),
+        s.libraryView ?? "",
+        s.activeCollection ?? "",
+        s.similarTo?.id ?? "",
+        f.datePreset ?? "",
+        f.dims ?? "",
+        f.types.join("+"),
+        f.folders.join("+"),
+        // NUL between the fields, not a space: the query is free text and
+        // could otherwise spell the next field's value and collide with it.
+    ].join("\u0000");
 }

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "./api";
 import {
     SIDEBAR_DEFAULT_W,
     SIDEBAR_MAX_W,
@@ -118,6 +119,36 @@ describe("anchor", () => {
         useStore.getState().toggleSelect(42);
         useStore.getState().clearSelection();
         expect(useStore.getState().anchorId).toBeNull();
+    });
+});
+
+describe("setSetting", () => {
+    it("previews every step but writes the file once", async () => {
+        // A slider fires an input event per pixel of the drag. Persisting each
+        // one is a PUT that re-reads and rewrites config.toml, and the sidecar
+        // runs them concurrently — a read-modify-write race against itself.
+        const put = vi.spyOn(api, "putSettings");
+        for(let hue = 200; hue <= 260; hue += 2){
+            useStore.getState().setSetting("accentHue", hue);
+        }
+        expect(useStore.getState().settings.accentHue).toBe(260);
+        expect(put).not.toHaveBeenCalled();
+
+        await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+        expect(put.mock.calls[0]?.[0]).toEqual({ accentHue: 260 });
+        put.mockRestore();
+    });
+
+    it("collapses two settings written together into one write", async () => {
+        // A tint preset is a hue *and* a strength. Two PUTs built from two
+        // reads of the same file lose one of them.
+        const put = vi.spyOn(api, "putSettings");
+        useStore.getState().setSetting("tintHue", 70);
+        useStore.getState().setSetting("tintStrength", 200);
+
+        await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+        expect(put.mock.calls[0]?.[0]).toEqual({ tintHue: 70, tintStrength: 200 });
+        put.mockRestore();
     });
 });
 

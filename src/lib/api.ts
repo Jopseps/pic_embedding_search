@@ -13,7 +13,23 @@ import type {
     WatchedFolder,
 } from "./types";
 import { buildMockLibrary, type MockPhoto } from "./mockData";
-import { DEFAULT_MODEL_ID, DEFAULT_OCR_ENGINE_ID, DEFAULT_OCR_LANGS } from "./catalog";
+import {
+    DEFAULT_ACCENT_HUE,
+    DEFAULT_CELL_RADIUS,
+    DEFAULT_DRAG_SLOP,
+    DEFAULT_FONT_ID,
+    DEFAULT_HOLD_MS,
+    DEFAULT_MODEL_ID,
+    DEFAULT_OCR_ENGINE_ID,
+    DEFAULT_OCR_LANGS,
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_SEARCH_DEBOUNCE_MS,
+    DEFAULT_SELECTION_BORDER,
+    DEFAULT_TEXT_WEIGHT,
+    DEFAULT_TINT_HUE,
+    DEFAULT_TINT_STRENGTH,
+    DEFAULT_UI_SCALE,
+} from "./catalog";
 import { pickFolder } from "./tauri";
 
 /**
@@ -149,6 +165,20 @@ export class MockApi implements PhotoSearchApi{
         ocrLangs: [...DEFAULT_OCR_LANGS],
         theme: "dark",
         density: 1,
+        fontId: DEFAULT_FONT_ID,
+        uiScale: DEFAULT_UI_SCALE,
+        reduceMotion: false,
+        highContrast: false,
+        accentHue: DEFAULT_ACCENT_HUE,
+        tintHue: DEFAULT_TINT_HUE,
+        tintStrength: DEFAULT_TINT_STRENGTH,
+        selectionBorder: DEFAULT_SELECTION_BORDER,
+        cellRadius: DEFAULT_CELL_RADIUS,
+        holdMs: DEFAULT_HOLD_MS,
+        dragSlop: DEFAULT_DRAG_SLOP,
+        pageSize: DEFAULT_PAGE_SIZE,
+        searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
+        textWeight: DEFAULT_TEXT_WEIGHT,
     };
 
     async search(query: SearchQuery): Promise<SearchResponse>{
@@ -160,7 +190,7 @@ export class MockApi implements PhotoSearchApi{
             scoped = scoped.filter((it) => matches(it, q));
         }
 
-        const items = scoped.map((it, i) => {
+        const all = scoped.map((it, i) => {
             const photo = strip(it);
             if(q === ""){
                 return photo;
@@ -171,14 +201,23 @@ export class MockApi implements PhotoSearchApi{
 
         // Browsing is newest-first; search is relevance-ordered.
         if(q === ""){
-            items.sort((a, b) => (b.takenAt ?? "").localeCompare(a.takenAt ?? ""));
+            all.sort((a, b) => (b.takenAt ?? "").localeCompare(a.takenAt ?? ""));
         }
+
+        // Paged like the sidecar pages, rather than always handing back the
+        // whole fixture library: the page-size setting has to be visible in
+        // mock mode too, or it reads as broken in the build most UI work
+        // happens in.
+        const offset = Number(query.cursor ?? 0) || 0;
+        const limit = query.limit ?? DEFAULT_PAGE_SIZE;
+        const items = all.slice(offset, offset + limit);
+        const consumed = offset + items.length;
 
         return {
             items,
-            total: items.length,
+            total: all.length,
             tookMs: Math.round(performance.now() - started) + 8,
-            cursor: null,
+            cursor: consumed < all.length ? String(consumed) : null,
         };
     }
 
