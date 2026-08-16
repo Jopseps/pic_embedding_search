@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { useStore } from "./lib/store";
-import { modelById } from "./lib/catalog";
+import { FONTS, fontById, MONO_FALLBACK, modelById } from "./lib/catalog";
 import { useGridLayout } from "./lib/useGridLayout";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
@@ -13,6 +13,15 @@ export default function App(){
     const view = useStore((s) => s.view);
     const resolvedTheme = useStore((s) => s.resolvedTheme);
     const themePref = useStore((s) => s.settings.theme);
+    const fontId = useStore((s) => s.settings.fontId);
+    const uiScale = useStore((s) => s.settings.uiScale);
+    const highContrast = useStore((s) => s.settings.highContrast);
+    const reduceMotion = useStore((s) => s.settings.reduceMotion);
+    const accentHue = useStore((s) => s.settings.accentHue);
+    const tintHue = useStore((s) => s.settings.tintHue);
+    const tintStrength = useStore((s) => s.settings.tintStrength);
+    const selectionBorder = useStore((s) => s.settings.selectionBorder);
+    const cellRadius = useStore((s) => s.settings.cellRadius);
     const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
     const reindex = useStore((s) => s.reindex);
     const activeModelName = useStore((s) => modelById(s.settings.modelId)?.name ?? s.settings.modelId);
@@ -49,6 +58,39 @@ export default function App(){
     useEffect(() => {
         document.documentElement.setAttribute("data-theme", resolvedTheme);
     }, [resolvedTheme]);
+
+    // Appearance and accessibility ride on the root element: two custom
+    // properties every size and the font stack are written against, and two
+    // attributes the token blocks in tokens.css key off. Nothing here scales
+    // the document — `zoom` and `transform` would take the grid's own hit
+    // testing with them, which reads content coordinates from the layout.
+    useEffect(() => {
+        const root = document.documentElement;
+        const font = fontById(fontId) ?? FONTS[0]!;
+        root.style.setProperty("--font-ui", font.stack);
+        // Paths and filenames stay monospace whatever the UI font is, but they
+        // follow it when it is itself monospace — two different monos on one
+        // screen is what the old fixed `--font-mono` produced.
+        root.style.setProperty("--font-code", font.mono ? font.stack : MONO_FALLBACK);
+        root.style.setProperty("--ui-scale", String(uiScale / 100));
+        root.setAttribute("data-contrast", highContrast ? "high" : "normal");
+        // "system", not "full": the toggle off means follow the OS preference,
+        // which the media query in tokens.css keys on.
+        root.setAttribute("data-motion", reduceMotion ? "reduced" : "system");
+    }, [fontId, uiScale, highContrast, reduceMotion]);
+
+    // Colour and the grid's own shape, same idea: a handful of custom
+    // properties the token blocks and the cells are written against. Every
+    // theme, including both high-contrast ones, reads --accent-hue, so this is
+    // one write rather than a palette per theme.
+    useEffect(() => {
+        const root = document.documentElement;
+        root.style.setProperty("--accent-hue", String(accentHue));
+        root.style.setProperty("--tint-hue", String(tintHue));
+        root.style.setProperty("--tint-c", String(tintStrength / 100));
+        root.style.setProperty("--sel-border", `${selectionBorder}px`);
+        root.style.setProperty("--cell-radius", `${cellRadius}px`);
+    }, [accentHue, tintHue, tintStrength, selectionBorder, cellRadius]);
 
     useEffect(() => {
         resolveTheme();
@@ -303,7 +345,7 @@ export default function App(){
 
             {backendError !== null ? (
                 <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-danger-muted px-4 py-2">
-                    <span className="text-[12.5px] text-fg">
+                    <span className="text-[calc(12.5px*var(--ui-scale))] text-fg">
                         Cannot reach the indexing service — {backendError}
                     </span>
                     <button
@@ -312,7 +354,7 @@ export default function App(){
                             void loadFolders();
                             void runSearch();
                         }}
-                        className="cursor-pointer rounded-md border border-edge bg-raised px-3 py-1 text-[12px] text-fg hover:bg-hover"
+                        className="cursor-pointer rounded-md border border-edge bg-raised px-3 py-1 text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
                     >
                         Retry
                     </button>
@@ -323,14 +365,14 @@ export default function App(){
                 vector it had, so search answers normally for the whole swap. */}
             {reindex.active ? (
                 <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-raised px-4 py-2">
-                    <span className="text-[12.5px] text-fg-dim">
+                    <span className="text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
                         Re-indexing with {reindex.modelName} — {Math.round(reindex.progress)}%
                         {reindex.total > 0
                             ? ` (${reindex.current} / ${reindex.total})`
                             : ""}
                         . Still searching with {activeModelName}.
                     </span>
-                    <div className="h-1 max-w-[220px] flex-1 overflow-hidden rounded-sm bg-hover">
+                    <div className="h-1 max-w-[calc(220px*var(--ui-scale))] flex-1 overflow-hidden rounded-sm bg-hover">
                         <div
                             className="h-full bg-accent transition-[width]"
                             style={{ width: `${reindex.progress}%` }}
@@ -347,7 +389,7 @@ export default function App(){
                         type="button"
                         onClick={toggleSidebar}
                         aria-label="Expand sidebar"
-                        className="absolute top-2 left-1 z-[5] flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-[5px] border border-edge bg-raised text-[10px] text-fg-faint hover:text-fg"
+                        className="absolute top-2 left-1 z-[5] flex h-[calc(22px*var(--ui-scale))] w-[calc(22px*var(--ui-scale))] cursor-pointer items-center justify-center rounded-[calc(5px*var(--ui-scale))] border border-edge bg-raised text-[calc(10px*var(--ui-scale))] text-fg-faint hover:text-fg"
                     >
                         ▶
                     </button>
@@ -359,12 +401,12 @@ export default function App(){
             <Lightbox flat={grid.layout.flat} />
 
             {isDragging ? (
-                <div className="pointer-events-none fixed inset-0 z-[200] flex items-center justify-center border-[3px] border-dashed border-accent bg-accent-muted/90">
+                <div className="pointer-events-none fixed inset-0 z-[200] flex items-center justify-center border-[calc(3px*var(--ui-scale))] border-dashed border-accent bg-accent-muted/90">
                     <div className="text-center">
-                        <div className="mb-[6px] text-[17px] font-semibold text-fg">
+                        <div className="mb-[calc(6px*var(--ui-scale))] text-[calc(17px*var(--ui-scale))] font-semibold text-fg">
                             Drop to find similar photos
                         </div>
-                        <div className="text-[12.5px] text-fg-dim">
+                        <div className="text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
                             We'll search your library by visual similarity
                         </div>
                     </div>
@@ -375,14 +417,14 @@ export default function App(){
                 a element that follows the pointer needs a state write per move,
                 which is the one thing a drag cannot afford. */}
             {dragOut.active ? (
-                <div className="pointer-events-none absolute bottom-6 left-1/2 z-[250] -translate-x-1/2 rounded-xl border border-accent bg-raised px-4 py-[10px] text-[12.5px] text-fg shadow-[var(--shadow-bar)]">
+                <div className="pointer-events-none absolute bottom-6 left-1/2 z-[250] -translate-x-1/2 rounded-xl border border-accent bg-raised px-4 py-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg shadow-[var(--shadow-bar)]">
                     Carrying {dragOut.count} photo{dragOut.count === 1 ? "" : "s"} —
                     drop on a collection, or outside the window to export
                 </div>
             ) : null}
 
             {toast !== null ? (
-                <div className="absolute right-6 bottom-6 z-[300] rounded-lg border border-edge bg-raised px-4 py-[10px] text-[12.5px] text-fg shadow-[var(--shadow-pop)]">
+                <div className="absolute right-6 bottom-6 z-[300] rounded-lg border border-edge bg-raised px-4 py-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg shadow-[var(--shadow-pop)]">
                     {toast}
                 </div>
             ) : null}

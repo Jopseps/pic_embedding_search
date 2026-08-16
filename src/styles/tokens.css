@@ -6,19 +6,60 @@
    differ, so every component references tokens and never a raw color.
    --------------------------------------------------------------------------- */
 
+:root {
+    /* Written by App from `settings.uiScale`. Every hardcoded px in the app is
+       multiplied by it — the sizes here are arbitrary px, not rem, so
+       `html { font-size }` would move nothing. The grid solver takes the same
+       factor in JS (useGridLayout), because its row and header heights are
+       layout constants rather than CSS. */
+    --ui-scale: 1;
+    --font-ui: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    --font-code: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    /* Colour, also written by App from settings. Declared here and not only in
+       the theme blocks below, because the first paint happens before that
+       effect runs and `oklch(68% 0.15 )` is not a colour. */
+    --accent-hue: 255;
+    --tint-hue: 250;
+    /* Multiplier on the chroma the greys carry, not a chroma itself: each
+       surface has its own trace (0.002-0.005) and they have to stay in
+       proportion, or the panels separate from the canvas at high strength. */
+    --tint-c: 1;
+    /* Grid look. Both are px at 100% scale — every use multiplies by
+       --ui-scale like the hardcoded sizes do. */
+    --sel-border: 3px;
+    --cell-radius: 6px;
+    /* Tailwind's own spacing base, redefined. Every numeric spacing utility
+       (`px-5`, `gap-3`, `h-7`) emits `calc(var(--spacing) * N)`, so the whole
+       standard scale follows the setting from here — the `calc()` rewrite in
+       the components only reaches the arbitrary `[12px]` values. The two sets
+       are disjoint, so nothing is scaled twice. Declared after
+       `@import "tailwindcss"`, which is what makes it win. */
+    --spacing: calc(0.25rem * var(--ui-scale));
+}
+
+/* The hue of every grey and every accent is a variable, and the chroma of the
+   greys is a calc() *inside* the colour function. That needs an engine with
+   CSS Color 4 plus math in colour components — WebKitGTK 2.40+, which is what
+   Tauri loads on Linux, and every target Lightning CSS is emitting oklch for
+   here. Writing the plain values as a fallback declaration above each one does
+   not help: the minifier drops the shadowed declaration, so the fallback exists
+   in dev and not in the build that ships, which is the wrong way round.
+
+   --danger keeps its own hue on purpose: red is semantic. A delete button that
+   follows the accent is a delete button nobody sees. */
 :root,
 [data-theme="dark"] {
-    --surface-canvas: oklch(16% 0.002 250);
-    --surface-panel: oklch(19% 0.003 250);
-    --surface-raised: oklch(23% 0.004 250);
-    --surface-hover: oklch(28% 0.005 250);
-    --border: oklch(31% 0.005 250);
-    --text-primary: oklch(93% 0.002 250);
-    --text-secondary: oklch(70% 0.003 250);
-    --text-tertiary: oklch(50% 0.004 250);
-    --accent: oklch(68% 0.15 255);
-    --accent-muted: oklch(30% 0.06 255);
-    --accent-text: oklch(85% 0.08 255);
+    --surface-canvas: oklch(16% calc(0.002 * var(--tint-c)) var(--tint-hue));
+    --surface-panel: oklch(19% calc(0.003 * var(--tint-c)) var(--tint-hue));
+    --surface-raised: oklch(23% calc(0.004 * var(--tint-c)) var(--tint-hue));
+    --surface-hover: oklch(28% calc(0.005 * var(--tint-c)) var(--tint-hue));
+    --border: oklch(31% calc(0.005 * var(--tint-c)) var(--tint-hue));
+    --text-primary: oklch(93% calc(0.002 * var(--tint-c)) var(--tint-hue));
+    --text-secondary: oklch(70% calc(0.003 * var(--tint-c)) var(--tint-hue));
+    --text-tertiary: oklch(50% calc(0.004 * var(--tint-c)) var(--tint-hue));
+    --accent: oklch(68% 0.15 var(--accent-hue));
+    --accent-muted: oklch(30% 0.06 var(--accent-hue));
+    --accent-text: oklch(85% 0.08 var(--accent-hue));
     --danger: oklch(63% 0.19 25);
     --danger-muted: oklch(30% 0.09 25);
     --shadow-pop: 0 12px 32px rgb(0 0 0 / 0.4);
@@ -26,21 +67,62 @@
 }
 
 [data-theme="light"] {
-    --surface-canvas: oklch(97% 0.002 250);
-    --surface-panel: oklch(99% 0.002 250);
-    --surface-raised: oklch(94% 0.003 250);
-    --surface-hover: oklch(90% 0.005 250);
-    --border: oklch(85% 0.005 250);
-    --text-primary: oklch(22% 0.004 250);
-    --text-secondary: oklch(42% 0.004 250);
-    --text-tertiary: oklch(56% 0.004 250);
-    --accent: oklch(55% 0.16 255);
-    --accent-muted: oklch(90% 0.05 255);
-    --accent-text: oklch(45% 0.14 255);
+    --surface-canvas: oklch(97% calc(0.002 * var(--tint-c)) var(--tint-hue));
+    --surface-panel: oklch(99% calc(0.002 * var(--tint-c)) var(--tint-hue));
+    --surface-raised: oklch(94% calc(0.003 * var(--tint-c)) var(--tint-hue));
+    --surface-hover: oklch(90% calc(0.005 * var(--tint-c)) var(--tint-hue));
+    --border: oklch(85% calc(0.005 * var(--tint-c)) var(--tint-hue));
+    --text-primary: oklch(22% calc(0.004 * var(--tint-c)) var(--tint-hue));
+    --text-secondary: oklch(42% calc(0.004 * var(--tint-c)) var(--tint-hue));
+    --text-tertiary: oklch(56% calc(0.004 * var(--tint-c)) var(--tint-hue));
+    --accent: oklch(55% 0.16 var(--accent-hue));
+    --accent-muted: oklch(90% 0.05 var(--accent-hue));
+    --accent-text: oklch(45% 0.14 var(--accent-hue));
     --danger: oklch(55% 0.19 25);
     --danger-muted: oklch(92% 0.07 25);
     --shadow-pop: 0 12px 32px rgb(0 0 0 / 0.14);
     --shadow-bar: 0 14px 36px rgb(0 0 0 / 0.16);
+}
+
+/* High contrast layers on top of whichever theme is showing rather than being
+   a third theme: someone who needs more contrast needs it in daylight too.
+   Only the tokens that carry contrast move — borders become visible instead of
+   implied, dim text stops being dim, and the accent stops being a mid tone.
+
+   The surface tint is dropped here on purpose — high contrast means the greys
+   carry nothing, hue included — but the accent still follows the setting, or
+   choosing one silently stops working for exactly the users who most need to
+   tell one control from another. */
+[data-contrast="high"] {
+    --surface-canvas: oklch(10% 0 0);
+    --surface-panel: oklch(13% 0 0);
+    --surface-raised: oklch(17% 0 0);
+    --surface-hover: oklch(26% 0 0);
+    --border: oklch(62% 0 0);
+    --text-primary: oklch(99% 0 0);
+    --text-secondary: oklch(90% 0 0);
+    --text-tertiary: oklch(78% 0 0);
+    --accent: oklch(80% 0.18 var(--accent-hue));
+    --accent-muted: oklch(35% 0.11 var(--accent-hue));
+    --accent-text: oklch(93% 0.09 var(--accent-hue));
+    --danger: oklch(72% 0.21 25);
+    --danger-muted: oklch(34% 0.13 25);
+}
+
+[data-theme="light"][data-contrast="high"] {
+    --surface-canvas: oklch(100% 0 0);
+    --surface-panel: oklch(100% 0 0);
+    --surface-raised: oklch(96% 0 0);
+    --surface-hover: oklch(89% 0 0);
+    --border: oklch(45% 0 0);
+    --text-primary: oklch(12% 0 0);
+    --text-secondary: oklch(28% 0 0);
+    --text-tertiary: oklch(38% 0 0);
+    --accent: oklch(42% 0.19 var(--accent-hue));
+    --accent-muted: oklch(88% 0.07 var(--accent-hue));
+    --accent-text: oklch(32% 0.16 var(--accent-hue));
+    --danger: oklch(44% 0.21 25);
+    --danger-muted: oklch(90% 0.09 25);
 }
 
 /* `inline` keeps the var() reference in the generated utility rather than
@@ -60,7 +142,7 @@
     --color-danger: var(--danger);
     --color-danger-muted: var(--danger-muted);
 
-    --font-mono: ui-monospace, Menlo, Consolas, monospace;
+    --font-mono: var(--font-code);
 }
 
 @keyframes shimmer {
@@ -81,10 +163,45 @@ body,
 
 body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    font-family: var(--font-ui);
     background: var(--surface-canvas);
     color: var(--text-primary);
     overscroll-behavior: none;
+}
+
+/* Reduce motion, either because the user asked in Settings or because the OS
+   already says so. `data-motion` is `reduced` when the setting is on and
+   `system` when it is off — off means "follow the OS", not "override it", so
+   the media query below still applies. */
+@media (prefers-reduced-motion: reduce) {
+    :root[data-motion="system"] *,
+    :root[data-motion="system"] *::before,
+    :root[data-motion="system"] *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+[data-motion="reduced"] *,
+[data-motion="reduced"] *::before,
+[data-motion="reduced"] *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+}
+
+/* Keyboard focus has to be visible: the grid's arrow-key navigation moves a
+   focus that was drawn with a 1px border nobody could find. `:focus-visible`
+   only, so a pointer click does not ring every button it touches. */
+/* No `border-radius` here: it would apply to the *element*, reshaping every
+   rounded control the moment it takes focus. An outline already follows the
+   element's own corners. */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 * {

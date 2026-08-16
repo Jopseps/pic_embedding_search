@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { act } from "react";
 import App from "./App";
 import { useStore } from "./lib/store";
@@ -85,7 +85,9 @@ describe("App", () => {
         await mountApp();
         const total = useStore.getState().results.length;
         const rendered = screen.getAllByRole("button", { name: /^Select$/ }).length;
-        expect(total).toBeGreaterThan(300);
+        // One page, not the whole fixture library: `pageSize` is a setting and
+        // the mock adapter pages like the sidecar does.
+        expect(total).toBe(useStore.getState().settings.pageSize);
         expect(rendered).toBeLessThan(total / 2);
     });
 
@@ -343,12 +345,108 @@ describe("App", () => {
         await act(async () => {
             useStore.getState().setView("settings");
         });
+        // Settings shows one section at a time now, so each catalog is behind
+        // its own nav entry rather than one long scroll.
+        await act(async () => {
+            fireEvent.click(screen.getByText("Search model"));
+        });
         expect(screen.getByText("SigLIP 2 so400m")).toBeTruthy();
+        expect(screen.queryByText("CLIP ViT-B/32")).toBeNull();
+
+        await act(async () => {
+            fireEvent.click(screen.getByText("Text in images"));
+        });
         expect(screen.getByText("RapidOCR")).toBeTruthy();
         expect(screen.getByText("Turkish")).toBeTruthy();
-        // The design draft offered these; neither is valid for this app.
+        // The design draft offered this; it does not exist on Linux.
         expect(screen.queryByText("Apple Vision")).toBeNull();
-        expect(screen.queryByText("CLIP ViT-B/32")).toBeNull();
+    });
+
+    it("filters the settings nav and shows every section that matches", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setView("settings");
+        });
+        const filter = screen.getByPlaceholderText("Filter settings…");
+        await act(async () => {
+            fireEvent.change(filter, { target: { value: "contrast" } });
+        });
+        // Accessibility owns the word; nothing from the default Folders section
+        // is on screen any more.
+        expect(screen.getByText("High contrast")).toBeTruthy();
+        expect(screen.queryByText("Watched folders")).toBeNull();
+    });
+
+    it("renders the colour, gesture and search settings and applies what they change", async () => {
+        // These three sections only mount when their nav item is active or the
+        // filter matches them, so without this they are typechecked and never
+        // once rendered.
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setView("settings");
+        });
+        const filter = screen.getByPlaceholderText("Filter settings…");
+
+        await act(async () => {
+            fireEvent.change(filter, { target: { value: "accent" } });
+        });
+        const hue = screen.getByLabelText("Accent hue") as HTMLInputElement;
+        expect(screen.getByLabelText("Teal")).toBeTruthy();
+        await act(async () => {
+            fireEvent.click(screen.getByLabelText("Teal"));
+        });
+        expect(useStore.getState().settings.accentHue).toBe(195);
+        expect(hue.value).toBe("195");
+
+        await act(async () => {
+            fireEvent.change(filter, { target: { value: "hold" } });
+        });
+        await act(async () => {
+            fireEvent.change(
+                screen.getByLabelText("Drag threshold"), { target: { value: "9" } },
+            );
+        });
+        expect(useStore.getState().settings.dragSlop).toBe(9);
+
+        await act(async () => {
+            fireEvent.change(filter, { target: { value: "page size" } });
+        });
+        await act(async () => {
+            fireEvent.change(
+                screen.getByLabelText("Text versus visual weighting"),
+                { target: { value: "80" } },
+            );
+        });
+        expect(useStore.getState().settings.textWeight).toBe(80);
+    });
+
+    it("scales the whole UI, grid included, from the accessibility setting", async () => {
+        await mountApp();
+        const before = useStore.getState().settings.uiScale;
+        expect(document.documentElement.style.getPropertyValue("--ui-scale"))
+            .toBe(String(before / 100));
+        await act(async () => {
+            useStore.getState().setUiScale(150);
+        });
+        expect(document.documentElement.style.getPropertyValue("--ui-scale")).toBe("1.5");
+    });
+
+    it("puts the colour settings on the root element, where every theme reads them", async () => {
+        await mountApp();
+        const root = document.documentElement;
+        expect(root.style.getPropertyValue("--accent-hue")).toBe("255");
+
+        await act(async () => {
+            useStore.getState().setSetting("accentHue", 145);
+            useStore.getState().setSetting("tintStrength", 0);
+            useStore.getState().setSetting("selectionBorder", 2);
+        });
+        // A hue and a multiplier, not a colour: the theme blocks in tokens.css
+        // keep their own lightness and chroma, so one write covers dark, light
+        // and both high-contrast variants.
+        expect(root.style.getPropertyValue("--accent-hue")).toBe("145");
+        expect(root.style.getPropertyValue("--tint-c")).toBe("0");
+        expect(root.style.getPropertyValue("--sel-border")).toBe("2px");
     });
 
     it("says which model is still answering while a model change re-indexes", async () => {
