@@ -8,6 +8,7 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 - **Text inside screenshots** — an OCR pass makes printed words searchable, fused with visual similarity
 - **English and Turkish** — multilingual model and `tur+eng` OCR by default
 - **Find visually similar** — from any photo, or by dropping an image onto the window
+- **Swappable models** — change the embedding model and search keeps working while the library re-embeds
 - **Filters, collections, saved searches** — a saved search restores its filters, not just its words
 - **Near-duplicate detection** — perceptual hashing, so two photos of the same thing group and two screenshots of the same app do not
 
@@ -15,11 +16,11 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 
 > **There are no binary releases.** This is a v0.1 you run from source, and it needs `uv`, Node and Rust on your machine.
 >
-> Semantic search over your own folders works today, so does text search inside screenshots, and watched folders stay up to date on their own — drop an image in and it is in the grid a couple of seconds later. Collections, saved searches, filters and near-duplicate detection all work against your real library. **The one thing left is switching embedding models from Settings**, which will re-embed everything.
+> Semantic search over your own folders works today, so does text search inside screenshots, and watched folders stay up to date on their own — drop an image in and it is in the grid a couple of seconds later. Collections, saved searches, filters and near-duplicate detection all work against your real library, and you can switch embedding models from Settings — the library re-embeds in the background while the old model keeps answering searches.
 >
 > OCR uses Tesseract, which must be installed (`pacman -S tesseract tesseract-data-eng`). **Turkish also needs `tesseract-data-tur`**; without it the engine falls back to English and says so in the log.
 >
-> `PLAN.md` has the ordered next steps; `ARCHITECTURE.md` has the design.
+> `PLAN.md` records what each build step decided and why; `ARCHITECTURE.md` has the design. The remaining gap is packaging, not features.
 
 ## Run it
 
