@@ -13,9 +13,7 @@ __pycache__/
 *.log
 
 # Markdown is untracked by default — scratch notes, plans and design briefs stay
-# local. The four docs below are the project's actual documentation.
+# local. README is the only doc that ships; CLAUDE.md, ARCHITECTURE.md and
+# PLAN.md are local-only.
 *.md
 !README.md
-!CLAUDE.md
-!ARCHITECTURE.md
-!PLAN.md
