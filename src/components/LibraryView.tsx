@@ -13,7 +13,7 @@ const ZOOM_DOTS = [6, 9, 12];
 
 export function LibraryView(props: { grid: GridLayoutHandle }){
     const { grid } = props;
-    const { layout, mode, scrollRef, scrollTop, viewportHeight } = grid;
+    const { layout, mode, attachScroll, scrollTop, viewportHeight } = grid;
     const gesture = useGridGesture(grid);
 
     const density = useStore((s) => s.density);
@@ -92,11 +92,11 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
 
     return (
         <div className="relative flex min-w-0 flex-1 flex-col">
-            <div className="flex flex-shrink-0 items-center justify-between px-5 pt-[14px] pb-[6px]">
+            <div className="flex flex-shrink-0 items-center justify-between px-5 pt-[calc(14px*var(--ui-scale))] pb-[calc(6px*var(--ui-scale))]">
                 <div>
-                    <div className="text-[15px] font-semibold">{title}</div>
+                    <div className="text-[calc(15px*var(--ui-scale))] font-semibold">{title}</div>
                     {mode === "results" ? (
-                        <div className="mt-[2px] text-[12px] tabular-nums text-fg-faint">
+                        <div className="mt-[calc(2px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] tabular-nums text-fg-faint">
                             {fmtCount(total)} result{total === 1 ? "" : "s"} · {tookMs} ms
                         </div>
                     ) : null}
@@ -129,9 +129,9 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
             </div>
 
             <div
-                ref={scrollRef}
+                ref={attachScroll}
                 onPointerDown={gesture.onPointerDown}
-                className="relative flex-1 overflow-y-auto pt-2 pb-[90px]"
+                className="relative flex-1 overflow-y-auto pt-2 pb-[calc(90px*var(--ui-scale))]"
                 style={{
                     paddingLeft: GRID_PAD_X,
                     paddingRight: GRID_PAD_X,
@@ -141,7 +141,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                 }}
             >
                 {stickyLabel !== null ? (
-                    <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[10px] pb-2 text-[12.5px] font-semibold text-fg-dim">
+                    <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[calc(10px*var(--ui-scale))] pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim">
                         {stickyLabel}
                     </div>
                 ) : null}
@@ -169,7 +169,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                                 return (
                                     <div
                                         key={block.key}
-                                        className="absolute right-0 left-0 flex items-end pb-2 text-[12.5px] font-semibold text-fg-dim"
+                                        className="absolute right-0 left-0 flex items-end pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim"
                                         style={{ top: block.top, height: block.height }}
                                     >
                                         {block.label}
@@ -264,15 +264,15 @@ const Cell = memo(function Cell(props: {
 
 function EmptyLibrary(props: { onAddFolder: () => void }){
     return (
-        <div className="flex min-h-[400px] flex-col items-center justify-center gap-[14px] py-24 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-[14px] border-[1.5px] border-dashed border-edge text-[22px] text-fg-faint">
+        <div className="flex min-h-[calc(400px*var(--ui-scale))] flex-col items-center justify-center gap-[calc(14px*var(--ui-scale))] py-24 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-[calc(14px*var(--ui-scale))] border-[calc(1.5px*var(--ui-scale))] border-dashed border-edge text-[calc(22px*var(--ui-scale))] text-fg-faint">
                 +
             </div>
-            <div className="text-[15px] font-semibold">No folders yet</div>
-            <div className="max-w-[320px] text-[13px] leading-[1.5] text-fg-dim">
+            <div className="text-[calc(15px*var(--ui-scale))] font-semibold">No folders yet</div>
+            <div className="max-w-[calc(320px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] leading-[1.5] text-fg-dim">
                 Add a photo or screenshot folder to start indexing. Everything stays on this machine.
             </div>
-            <Button variant="primary" onClick={props.onAddFolder} className="mt-[6px]">
+            <Button variant="primary" onClick={props.onAddFolder} className="mt-[calc(6px*var(--ui-scale))]">
                 Add a folder
             </Button>
         </div>
@@ -281,15 +281,15 @@ function EmptyLibrary(props: { onAddFolder: () => void }){
 
 function EmptySearch(props: { query: string; similar: boolean; onClear: () => void }){
     return (
-        <div className="flex min-h-[400px] flex-col items-center justify-center gap-[10px] py-24 text-center">
-            <div className="text-[26px] text-fg-faint">⌕</div>
-            <div className="text-[15px] font-semibold">
+        <div className="flex min-h-[calc(400px*var(--ui-scale))] flex-col items-center justify-center gap-[calc(10px*var(--ui-scale))] py-24 text-center">
+            <div className="text-[calc(26px*var(--ui-scale))] text-fg-faint">⌕</div>
+            <div className="text-[calc(15px*var(--ui-scale))] font-semibold">
                 {props.similar ? "No visually similar images" : `No results for "${props.query}"`}
             </div>
-            <div className="text-[13px] text-fg-dim">
+            <div className="text-[calc(13px*var(--ui-scale))] text-fg-dim">
                 Try a broader term, or check another folder / filter.
             </div>
-            <Button onClick={props.onClear} className="mt-[6px]">
+            <Button onClick={props.onClear} className="mt-[calc(6px*var(--ui-scale))]">
                 Clear search
             </Button>
         </div>
@@ -308,13 +308,13 @@ function CollectionMenu(){
     const cancel = useStore((s) => s.cancelAddCollection);
 
     return (
-        <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-lg border border-edge bg-raised p-1 shadow-[var(--shadow-bar)]">
+        <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[calc(180px*var(--ui-scale))] rounded-lg border border-edge bg-raised p-1 shadow-[var(--shadow-bar)]">
             {collections.map((c) => (
                 <button
                     key={c.id}
                     type="button"
                     onClick={() => void add(c.id)}
-                    className="w-full cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap rounded px-2 py-[6px] text-left text-[13px] text-fg-dim hover:bg-hover hover:text-fg"
+                    className="w-full cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap rounded px-2 py-[calc(6px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
                 >
                     {c.name}
                 </button>
@@ -334,13 +334,13 @@ function CollectionMenu(){
                         }
                     }}
                     placeholder="Collection name"
-                    className="w-full rounded border border-accent bg-raised px-2 py-[5px] text-[13px] text-fg outline-none"
+                    className="w-full rounded border border-accent bg-raised px-2 py-[calc(5px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg outline-none"
                 />
             ) : (
                 <button
                     type="button"
                     onClick={start}
-                    className="w-full cursor-pointer rounded px-2 py-[6px] text-left text-[13px] text-fg-faint hover:bg-hover hover:text-fg-dim"
+                    className="w-full cursor-pointer rounded px-2 py-[calc(6px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
                 >
                     + New collection
                 </button>
@@ -362,8 +362,8 @@ function SelectionBar(){
     }
 
     return (
-        <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 items-center gap-[10px] rounded-xl border border-edge bg-raised py-2 pr-[10px] pl-4 shadow-[var(--shadow-bar)]">
-            <span className="whitespace-nowrap text-[12.5px] text-fg-dim">{count} selected</span>
+        <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 items-center gap-[calc(10px*var(--ui-scale))] rounded-xl border border-edge bg-raised py-2 pr-[calc(10px*var(--ui-scale))] pl-4 shadow-[var(--shadow-bar)]">
+            <span className="whitespace-nowrap text-[calc(12.5px*var(--ui-scale))] text-fg-dim">{count} selected</span>
             <div className="h-5 w-px bg-edge" />
             <div className="relative">
                 <Button variant="subtle" onClick={toggleMenu}>
@@ -377,7 +377,7 @@ function SelectionBar(){
                 type="button"
                 onClick={clear}
                 aria-label="Clear selection"
-                className="cursor-pointer px-1 text-[14px] text-fg-faint hover:text-fg"
+                className="cursor-pointer px-1 text-[calc(14px*var(--ui-scale))] text-fg-faint hover:text-fg"
             >
                 ✕
             </button>

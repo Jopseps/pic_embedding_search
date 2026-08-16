@@ -55,7 +55,7 @@ afterEach(() => {
 
 /** The mock adapter has no file URLs, so the stage renders its dimension
  *  placeholder — whose parent is the stage the listener hangs off. */
-async function openStage(){
+async function open(){
     render(<App />);
     await waitFor(() => expect(useStore.getState().results.length).toBeGreaterThan(0));
     const photo = useStore.getState().results[0]!;
@@ -64,7 +64,20 @@ async function openStage(){
     });
     const labels = screen.getAllByText(`${photo.width}×${photo.height}`);
     // The lightbox mounts after the grid, so its copy is the last one.
-    return labels[labels.length - 1]!.closest("div")!.parentElement!;
+    const picture = labels[labels.length - 1]!.closest("div")!;
+    return { picture, stage: picture.parentElement! };
+}
+
+async function openStage(){
+    return (await open()).stage;
+}
+
+/** A press and its release. The close handler needs both ends — a bare click
+ *  leaves the press unrecorded and nothing happens, for the wrong reason. */
+function press(el: Element, at: { clientX: number; clientY: number }, to = at){
+    fireEvent.pointerDown(el, { button: 0, ...at });
+    fireEvent.pointerUp(el, to);
+    fireEvent.click(el, to);
 }
 
 describe("Lightbox zoom", () => {
@@ -113,5 +126,76 @@ describe("Lightbox zoom", () => {
         stubPictureBox();
         fireEvent.wheel(stage, { deltaY: -100, clientX: 600, clientY: 350 });
         expect(await screen.findByText(/115% · reset/)).toBeTruthy();
+    });
+
+    /** WebKitGTK — the webview Tauri uses on Linux — reports deltaMode 1 with a
+     *  deltaY of 1–3 per notch where Chrome reports ~100 pixels. Scaling by the
+     *  raw number makes a notch there worth a fiftieth of the same notch here,
+     *  which is the whole reason line mode is treated as discrete. */
+    it("treats one line-mode notch as a full step", async () => {
+        const stage = await openStage();
+        stubPictureBox();
+        fireEvent.wheel(stage, { deltaY: -1, deltaMode: 1, clientX: 600, clientY: 350 });
+        expect(await screen.findByText(/115% · reset/)).toBeTruthy();
+    });
+
+    /** A trackpad streams dozens of tiny deltas a second. A flat step per event
+     *  ran the scale to MAX_SCALE in half a swipe — twenty of these used to
+     *  land on 800%. */
+    it("does not slam to the top on a trackpad swipe", async () => {
+        const stage = await openStage();
+        stubPictureBox();
+        for(let i = 0; i < 20; i++){
+            fireEvent.wheel(stage, { deltaY: -4, clientX: 600, clientY: 350 });
+        }
+        expect(await screen.findByText(/112% · reset/)).toBeTruthy();
+    });
+
+    it("zooms and resets from the keyboard", async () => {
+        await openStage();
+        fireEvent.keyDown(window, { key: "+" });
+        expect(await screen.findByText(/140% · reset/)).toBeTruthy();
+        fireEvent.keyDown(window, { key: "0" });
+        expect(screen.queryByText(/reset/)).toBeNull();
+    });
+});
+
+describe("Lightbox backdrop", () => {
+    it("closes when the backdrop is clicked", async () => {
+        const stage = await openStage();
+        press(stage, { clientX: 60, clientY: 60 });
+        expect(useStore.getState().lightboxIndex).toBeNull();
+    });
+
+    it("stays open when the picture is clicked", async () => {
+        const { picture } = await open();
+        press(picture, { clientX: 600, clientY: 350 });
+        expect(useStore.getState().lightboxIndex).toBe(0);
+    });
+
+    it("stays open when a control is clicked", async () => {
+        await open();
+        press(screen.getByLabelText("Next"), { clientX: 900, clientY: 350 });
+        expect(useStore.getState().lightboxIndex).toBe(1);
+    });
+
+    /** A pan that started on the backdrop is a drag, not a click — releasing it
+     *  must not take the photo away. */
+    it("stays open when the press travelled", async () => {
+        const stage = await openStage();
+        press(stage, { clientX: 100, clientY: 100 }, { clientX: 160, clientY: 100 });
+        expect(useStore.getState().lightboxIndex).toBe(0);
+    });
+
+    /** In fullscreen the backdrop is nearly the whole screen, so this drops one
+     *  rung down the Esc ladder rather than losing the photo outright. */
+    it("leaves fullscreen instead of closing", async () => {
+        const stage = await openStage();
+        await act(async () => {
+            useStore.getState().toggleLightboxFullscreen();
+        });
+        press(stage, { clientX: 60, clientY: 60 });
+        expect(useStore.getState().lightboxFullscreen).toBe(false);
+        expect(useStore.getState().lightboxIndex).toBe(0);
     });
 });
