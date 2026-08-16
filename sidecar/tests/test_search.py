@@ -28,6 +28,7 @@ from picsearch.search import (
     candidate_ids,
     fts_match_query,
     fts_search,
+    leg_weights,
     rrf_merge,
 )
 from picsearch.server import TOKEN_HEADER, AppState, create_app
@@ -139,6 +140,44 @@ def test_rrf_merge():
     assert [i for i, _ in merged] == [10, 30, 20, 40]
     for image_id, score in merged:
         assert score == pytest.approx(expected[image_id])
+
+
+def test_balanced_weighting_is_the_unweighted_fusion():
+    """The default has to be bit-for-bit what it was before weights existed —
+    every score in the API response is otherwise renumbered by a setting nobody
+    touched."""
+    assert leg_weights(50) == (1.0, 1.0)
+    lists = [[10, 20, 30], [30, 10, 40]]
+    assert rrf_merge(lists, weights=leg_weights(50)) == rrf_merge(lists)
+
+
+def test_weighting_moves_a_text_hit_past_a_visual_one():
+    visual = [10, 20]
+    text = [20, 10]
+    # Balanced, 10 wins on id after a tie. Leaning on text, 20's rank-1 there
+    # outweighs 10's rank-1 in the visual leg.
+    assert [i for i, _ in rrf_merge([visual, text], weights=leg_weights(50))] == [10, 20]
+    assert [i for i, _ in rrf_merge([visual, text], weights=leg_weights(80))] == [20, 10]
+    assert [i for i, _ in rrf_merge([visual, text], weights=leg_weights(20))] == [10, 20]
+
+
+def test_leg_weights_clamp_a_hand_edited_config():
+    # config.toml is read back as-is, so the value can be anything.
+    assert leg_weights(-40) == leg_weights(0)
+    assert leg_weights(400) == leg_weights(100)
+    assert leg_weights(100) == (0.0, 2.0)
+    assert leg_weights(0) == (2.0, 0.0)
+
+
+def test_a_silenced_leg_contributes_nothing_at_all():
+    """Weight 0 skips the list rather than scoring it at zero. Multiplying
+    through put every candidate of the silenced leg in the result at score 0,
+    sorted by id after the real hits — the far end of the slider answered with
+    the whole library."""
+    visual = [10, 20, 30]
+    text = [40]
+    assert [i for i, _ in rrf_merge([visual, text], weights=leg_weights(100))] == [40]
+    assert [i for i, _ in rrf_merge([visual, text], weights=leg_weights(0))] == [10, 20, 30]
 
 
 def test_rrf_ties_break_on_id_for_a_stable_order():
@@ -563,6 +602,22 @@ def test_settings_round_trip_over_http(client):
     assert updated["theme"] == "light"
     assert updated["density"] == 2
     assert client.get("/settings").json()["theme"] == "light"
+
+
+def test_appearance_settings_survive_a_restart(client):
+    """The sidecar never reads these — config.toml is simply the only thing
+    that outlives the window, and an interface scale the user has to set again
+    on every launch is not an accessibility setting."""
+    updated = client.put("/settings", json={
+        "fontId": "fira-code", "uiScale": 150, "reduceMotion": True, "highContrast": True,
+    }).json()
+    assert updated["uiScale"] == 150
+    assert updated["fontId"] == "fira-code"
+
+    reread = client.get("/settings").json()
+    assert reread["reduceMotion"] is True
+    assert reread["highContrast"] is True
+    assert reread["uiScale"] == 150
 
 
 def test_settings_rejects_an_unknown_model(client):

@@ -457,6 +457,15 @@ def create_app(state: AppState) -> FastAPI:
 
     # -- search ------------------------------------------------------------
 
+    def _int_setting(key: str, fallback: int) -> int:
+        """A hand-edited config.toml can put anything in any key, and `load()`
+        copies values through without checking them. Search degrades to the
+        default rather than answering 500 to `textWeight = "fifty"`."""
+        try:
+            return int(state.settings.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
     @app.get("/search", dependencies=[guard])
     def search(
         q: str = "",
@@ -473,6 +482,9 @@ def create_app(state: AppState) -> FastAPI:
             q=q, view=view, collection=collection, date=date, dims=dims,
             folders=list(folder), types=list(type),
             limit=max(1, min(limit, 1000)), cursor=cursor,
+            # Read per request, not captured at startup: `PUT /settings` writes
+            # it live and the next query has to answer with it.
+            text_weight=_int_setting("textWeight", 50),
         )
         return state.searcher.search(params)
 

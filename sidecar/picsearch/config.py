@@ -27,6 +27,36 @@ DEFAULTS: dict[str, Any] = {
     "ocrLangs": ["en", "tr"],
     "theme": "dark",
     "density": 1,
+    # Appearance and accessibility. The sidecar never reads these — they are
+    # here because config.toml is the only thing that survives a restart, and a
+    # scale the user has to set again on every launch is not an accessibility
+    # setting. `fontId` names a font that has to be installed; nothing is
+    # bundled and nothing is fetched.
+    "fontId": "jetbrains-mono",
+    "uiScale": 100,
+    "reduceMotion": False,
+    "highContrast": False,
+    # Colour. A hue in OKLCH degrees for the accent, and a hue plus a strength
+    # percent for the trace of chroma the greys carry. The sidecar never reads
+    # these either — same reason as above, config.toml is what survives a
+    # restart. `tintStrength` 100 is what the app shipped with, 0 is neutral.
+    "accentHue": 255,
+    "tintHue": 250,
+    "tintStrength": 100,
+    # Grid look, px at 100% UI scale.
+    "selectionBorder": 3,
+    "cellRadius": 6,
+    # Gestures: how long a press has to last to select, and how far a pointer
+    # may drift and still count as a click.
+    "holdMs": 400,
+    "dragSlop": 5,
+    # Search. `pageSize` and `searchDebounceMs` belong to the frontend;
+    # `textWeight` is read here, by `Searcher.search`, and is the one setting in
+    # this file the sidecar acts on. 50 weights the two ranked legs of the
+    # hybrid search equally, which is exactly the unweighted RRF.
+    "pageSize": 200,
+    "searchDebounceMs": 220,
+    "textWeight": 50,
 }
 
 ALLOWED = set(DEFAULTS)

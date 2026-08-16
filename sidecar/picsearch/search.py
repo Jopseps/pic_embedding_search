@@ -169,6 +169,9 @@ class SearchParams:
     types: list[str] = field(default_factory=list)
     limit: int = DEFAULT_LIMIT
     cursor: str | None = None
+    # Balance between the two ranked legs, 0-100 (`textWeight` in config.toml).
+    # 50 is equal weighting; 100 is OCR text only, 0 is visual only.
+    text_weight: int = 50
 
     @property
     def offset(self) -> int:
@@ -360,18 +363,46 @@ def fts_search(
 # Fusion
 # ---------------------------------------------------------------------------
 
-def rrf_merge(ranked_lists: Sequence[Sequence[int]], k: int = RRF_K) -> list[tuple[int, float]]:
+def rrf_merge(
+    ranked_lists: Sequence[Sequence[int]],
+    k: int = RRF_K,
+    weights: Sequence[float] | None = None,
+) -> list[tuple[int, float]]:
     """Reciprocal Rank Fusion over ranked id lists.
 
-    `score(id) = Σ 1/(k + rank)` with rank starting at 1. Ids absent from a list
-    contribute nothing from it. This is deliberately score-free: the inputs are
-    cosine (0.20-0.35) and BM25 (0-20), which share no scale.
+    `score(id) = Σ w_i/(k + rank)` with rank starting at 1. Ids absent from a
+    list contribute nothing from it. This is deliberately score-free: the inputs
+    are cosine (0.20-0.35) and BM25 (0-20), which share no scale.
+
+    `weights` scales a whole *leg*, never an individual score, so the invariant
+    holds — a weight of 1.4 says "a rank in this list is worth 1.4 of a rank in
+    that one", which is a statement about ranks. Omitted (or all ones) it is the
+    plain unweighted fusion, and `Searcher` passes weights that average to 1 so
+    the default is bit-for-bit what it always was.
     """
     scores: dict[int, float] = {}
-    for ranked in ranked_lists:
+    for i, ranked in enumerate(ranked_lists):
+        weight = 1.0 if weights is None else float(weights[i])
+        if(weight == 0.0):
+            # Skipped, not multiplied by zero. A leg at weight 0 still *has*
+            # candidates, and adding 0.0 for each puts every one of them in the
+            # result at score 0 — at the far end of the slider the whole
+            # candidate set came back in id order, described as matches.
+            continue
         for rank, image_id in enumerate(ranked, start=1):
-            scores[image_id] = scores.get(image_id, 0.0) + 1.0 / (k + rank)
+            scores[image_id] = scores.get(image_id, 0.0) + weight / (k + rank)
     return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def leg_weights(text_weight: int) -> tuple[float, float]:
+    """`(visual, text)` leg weights for a 0-100 balance setting.
+
+    They sum to 2, not to 1, so the balanced setting is `(1.0, 1.0)` — the
+    plain unweighted fusion, identical scores and identical order. Halving both
+    would rank the same but renumber every score in the API response.
+    """
+    w = min(100, max(0, int(text_weight))) / 100.0
+    return (2.0 * (1.0 - w), 2.0 * w)
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +528,10 @@ class Searcher:
             # visual match no matter what their raw scores look like.
             vector_ranked = self._vector_search(query, candidates, backend)
             text_ranked, snippets = fts_search(self.store, query, candidates)
-            ranked = rrf_merge([[i for i, _ in vector_ranked], text_ranked])
+            ranked = rrf_merge(
+                [[i for i, _ in vector_ranked], text_ranked],
+                weights=leg_weights(params.text_weight),
+            )
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
