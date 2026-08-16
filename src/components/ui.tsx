@@ -13,7 +13,7 @@ export function Chip(props: {
             onClick={onClick}
             aria-pressed={active}
             className={
-                "cursor-pointer rounded-xl border px-[9px] py-[4px] text-[11.5px] transition-colors " +
+                "cursor-pointer rounded-xl border px-[calc(9px*var(--ui-scale))] py-[calc(4px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] transition-colors " +
                 (active
                     ? "border-accent bg-accent-muted text-accent-text"
                     : "border-edge bg-raised text-fg-dim hover:bg-hover")
@@ -37,7 +37,7 @@ export function CheckRow(props: {
             onClick={onToggle}
             role="checkbox"
             aria-checked={checked}
-            className="flex w-full cursor-pointer items-center gap-[7px] py-1 text-left text-[12.5px] text-fg-dim hover:text-fg"
+            className="flex w-full cursor-pointer items-center gap-[calc(7px*var(--ui-scale))] py-1 text-left text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:text-fg"
         >
             <Box checked={checked} />
             <span
@@ -56,7 +56,7 @@ export function Box(props: { checked: boolean }){
     return (
         <span
             className={
-                "flex h-[14px] w-[14px] flex-shrink-0 items-center justify-center rounded-[3px] border-[1.5px] border-edge text-[10px] text-white " +
+                "flex h-[calc(14px*var(--ui-scale))] w-[calc(14px*var(--ui-scale))] flex-shrink-0 items-center justify-center rounded-[calc(3px*var(--ui-scale))] border-[calc(1.5px*var(--ui-scale))] border-edge text-[calc(10px*var(--ui-scale))] text-white " +
                 (props.checked ? "bg-accent" : "bg-transparent")
             }
         >
@@ -69,44 +69,96 @@ export function Radio(props: { selected: boolean }){
     return (
         <span
             className={
-                "flex h-[15px] w-[15px] flex-shrink-0 items-center justify-center rounded-full border-[1.5px] " +
+                "flex h-[calc(15px*var(--ui-scale))] w-[calc(15px*var(--ui-scale))] flex-shrink-0 items-center justify-center rounded-full border-[calc(1.5px*var(--ui-scale))] " +
                 (props.selected ? "border-accent" : "border-edge")
             }
         >
-            {props.selected ? <span className="h-[7px] w-[7px] rounded-full bg-accent" /> : null}
+            {props.selected ? <span className="h-[calc(7px*var(--ui-scale))] w-[calc(7px*var(--ui-scale))] rounded-full bg-accent" /> : null}
         </span>
     );
 }
 
-export function Toggle(props: { on: boolean; onClick: () => void; label: string }){
+export function Toggle(props: {
+    on: boolean;
+    onClick: () => void;
+    label: string;
+    /** For switches whose name is already on the row next to them: the visible
+     *  label would be a duplicate, but the switch still needs a name. */
+    ariaLabel?: string;
+}){
     return (
         <button
             type="button"
             onClick={props.onClick}
             role="switch"
             aria-checked={props.on}
-            className="flex flex-shrink-0 cursor-pointer items-center gap-[6px]"
+            aria-label={props.ariaLabel}
+            className="flex flex-shrink-0 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))]"
         >
-            <span className="text-[11.5px] text-fg-dim">{props.label}</span>
+            <span className="text-[calc(11.5px*var(--ui-scale))] text-fg-dim">{props.label}</span>
             <span
                 className={
-                    "relative inline-block h-[17px] w-[30px] rounded-full transition-colors " +
+                    "relative inline-block h-[calc(17px*var(--ui-scale))] w-[calc(30px*var(--ui-scale))] rounded-full transition-colors " +
                     (props.on ? "bg-accent" : "bg-hover")
                 }
             >
                 <span
-                    className="absolute top-[2px] h-[13px] w-[13px] rounded-full bg-white transition-[left]"
-                    style={{ left: props.on ? 15 : 2 }}
+                    className="absolute top-[calc(2px*var(--ui-scale))] h-[calc(13px*var(--ui-scale))] w-[calc(13px*var(--ui-scale))] rounded-full bg-white transition-[left]"
+                    style={{
+                        left: props.on
+                            ? "calc(15px*var(--ui-scale))"
+                            : "calc(2px*var(--ui-scale))",
+                    }}
                 />
             </span>
         </button>
     );
 }
 
+/**
+ * A range input, themed. Native rather than a custom track: it is the only
+ * control here that is dragged, and a div-based one loses keyboard stepping,
+ * the OS's own pointer capture and every accessibility affordance that comes
+ * free with `<input type="range">`.
+ *
+ * `accent-color` is one line and paints both the thumb and the filled track in
+ * both engines, which is why there is no CSS for either.
+ */
+export function Slider(props: {
+    value: number;
+    min: number;
+    max: number;
+    step?: number;
+    label: string;
+    /** Shown at the right — the value with its unit, already formatted. */
+    readout: string;
+    onChange: (value: number) => void;
+}){
+    const { value, min, max, step = 1, label, readout, onChange } = props;
+    return (
+        <div className="flex items-center gap-[calc(10px*var(--ui-scale))]">
+            <input
+                type="range"
+                aria-label={label}
+                value={value}
+                min={min}
+                max={max}
+                step={step}
+                onChange={(e) => onChange(Number(e.target.value))}
+                style={{ accentColor: "var(--accent)" }}
+                className="h-[calc(18px*var(--ui-scale))] min-w-0 flex-1 cursor-pointer"
+            />
+            <span className="w-[calc(58px*var(--ui-scale))] flex-shrink-0 text-right font-mono text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
+                {readout}
+            </span>
+        </div>
+    );
+}
+
 export function SectionLabel(props: { children: ReactNode; action?: ReactNode }){
     return (
-        <div className="flex items-center justify-between px-[6px] pt-4 pb-2">
-            <span className="text-[11px] font-semibold tracking-[0.06em] text-fg-faint">
+        <div className="flex items-center justify-between px-[calc(6px*var(--ui-scale))] pt-4 pb-2">
+            <span className="text-[calc(11px*var(--ui-scale))] font-semibold tracking-[0.06em] text-fg-faint">
                 {props.children}
             </span>
             {props.action}
@@ -121,12 +173,12 @@ export function Button(props: {
     className?: string;
 }){
     const { variant = "ghost", className = "" } = props;
-    const base = "cursor-pointer rounded-lg text-[12.5px] transition-colors whitespace-nowrap";
+    const base = "cursor-pointer rounded-lg text-[calc(12.5px*var(--ui-scale))] transition-colors whitespace-nowrap";
     const styles: Record<string, string> = {
-        primary: "border-none bg-accent px-[18px] py-[9px] font-semibold text-white hover:opacity-90",
-        ghost: "border border-edge bg-raised px-[14px] py-[8px] text-fg hover:bg-hover",
-        subtle: "border-none bg-hover px-[12px] py-[7px] text-fg hover:opacity-80",
-        danger: "border-none bg-danger-muted px-[12px] py-[7px] text-danger hover:opacity-80",
+        primary: "border-none bg-accent px-[calc(18px*var(--ui-scale))] py-[calc(9px*var(--ui-scale))] font-semibold text-white hover:opacity-90",
+        ghost: "border border-edge bg-raised px-[calc(14px*var(--ui-scale))] py-[calc(8px*var(--ui-scale))] text-fg hover:bg-hover",
+        subtle: "border-none bg-hover px-[calc(12px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-fg hover:opacity-80",
+        danger: "border-none bg-danger-muted px-[calc(12px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-danger hover:opacity-80",
     };
     return (
         <button type="button" onClick={props.onClick} className={`${base} ${styles[variant]} ${className}`}>

@@ -72,7 +72,7 @@ export const Sidebar = memo(function Sidebar(){
             style={{ width: collapsed ? 0 : width }}
         >
             <div
-                className="h-full overflow-y-auto px-[10px] pt-[14px] pb-14"
+                className="h-full overflow-y-auto px-[calc(10px*var(--ui-scale))] pt-[calc(14px*var(--ui-scale))] pb-14"
                 // Pinned to the target width so the collapse animation slides the
                 // panel out instead of reflowing every row down to nothing.
                 style={{ width }}
@@ -97,7 +97,7 @@ export const Sidebar = memo(function Sidebar(){
                     onPointerCancel={endDrag}
                     onDoubleClick={() => setWidth(SIDEBAR_DEFAULT_W)}
                     className={
-                        "absolute top-0 right-0 z-[6] h-full w-[6px] cursor-col-resize "
+                        "absolute top-0 right-0 z-[6] h-full w-[calc(6px*var(--ui-scale))] cursor-col-resize "
                         + (dragging ? "bg-accent/40" : "hover:bg-accent/30")
                     }
                 />
@@ -118,7 +118,7 @@ function NavRow(props: {
             type="button"
             onClick={onClick}
             className={
-                "mb-px flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-[7px] text-left text-[13px] transition-colors " +
+                "mb-px flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] transition-colors " +
                 (active ? "bg-accent-muted text-accent-text" : "text-fg-dim hover:bg-hover")
             }
         >
@@ -126,7 +126,7 @@ function NavRow(props: {
             {count !== undefined ? (
                 <span
                     className={
-                        "rounded-[9px] px-[7px] py-px text-[11px] tabular-nums " +
+                        "rounded-[calc(9px*var(--ui-scale))] px-[calc(7px*var(--ui-scale))] py-px text-[calc(11px*var(--ui-scale))] tabular-nums " +
                         (active ? "text-accent-text" : "bg-hover text-fg-faint")
                     }
                 >
@@ -149,15 +149,15 @@ function LibrarySection(){
 
     return (
         <>
-            <div className="flex items-center justify-between px-[6px] pb-[10px]">
-                <span className="text-[11px] font-semibold tracking-[0.06em] text-fg-faint">
+            <div className="flex items-center justify-between px-[calc(6px*var(--ui-scale))] pb-[calc(10px*var(--ui-scale))]">
+                <span className="text-[calc(11px*var(--ui-scale))] font-semibold tracking-[0.06em] text-fg-faint">
                     LIBRARY
                 </span>
                 <button
                     type="button"
                     onClick={toggleSidebar}
                     aria-label="Collapse sidebar"
-                    className="cursor-pointer text-[12px] text-fg-faint hover:text-fg"
+                    className="cursor-pointer text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
                 >
                     ◀
                 </button>
@@ -224,11 +224,11 @@ function CollectionsSection(){
                     <button
                         type="button"
                         onClick={() => setActive(c.id)}
-                        className="flex flex-1 cursor-pointer items-center justify-between gap-2 overflow-hidden px-2 py-[7px] text-left text-[13px]"
+                        className="flex flex-1 cursor-pointer items-center justify-between gap-2 overflow-hidden px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))]"
                     >
                         <span className="overflow-hidden text-ellipsis whitespace-nowrap">{c.name}</span>
                         {counts[c.id] !== undefined && counts[c.id]! > 0 ? (
-                            <span className="shrink-0 text-[11px] tabular-nums text-fg-faint">
+                            <span className="shrink-0 text-[calc(11px*var(--ui-scale))] tabular-nums text-fg-faint">
                                 {fmtCount(counts[c.id]!)}
                             </span>
                         ) : null}
@@ -241,10 +241,10 @@ function CollectionsSection(){
                         onClick={() => void remove(c.id)}
                         onBlur={cancelDelete}
                         className={
-                            "mr-1 cursor-pointer rounded px-[6px] py-[2px] text-[11px] hover:bg-hover " +
+                            "mr-1 cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-[calc(11px*var(--ui-scale))] hover:bg-hover " +
                             (pendingDelete === c.id
                                 ? "block text-danger"
-                                : "hidden text-[13px] text-fg-faint hover:text-fg group-hover:block")
+                                : "hidden text-[calc(13px*var(--ui-scale))] text-fg-faint hover:text-fg group-hover:block")
                         }
                     >
                         {pendingDelete === c.id ? "Delete?" : "×"}
@@ -265,13 +265,13 @@ function CollectionsSection(){
                         }
                     }}
                     placeholder="Collection name"
-                    className="mt-px w-full rounded-md border border-accent bg-raised px-2 py-[6px] text-[13px] text-fg outline-none"
+                    className="mt-px w-full rounded-md border border-accent bg-raised px-2 py-[calc(6px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg outline-none"
                 />
             ) : (
                 <button
                     type="button"
                     onClick={start}
-                    className="w-full cursor-pointer rounded-md px-2 py-[7px] text-left text-[13px] text-fg-faint hover:bg-hover hover:text-fg-dim"
+                    className="w-full cursor-pointer rounded-md px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
                 >
                     + New collection
                 </button>
@@ -301,16 +301,16 @@ function SavedSearchesSection(){
                         // the filters and view it was saved with.
                         onClick={() => run(s)}
                         title={s.query}
-                        className="flex flex-1 cursor-pointer items-center gap-[6px] overflow-hidden px-2 py-[7px] text-left text-[13px]"
+                        className="flex flex-1 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] overflow-hidden px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))]"
                     >
-                        <span className="text-[11px] text-fg-faint">⌕</span>
+                        <span className="text-[calc(11px*var(--ui-scale))] text-fg-faint">⌕</span>
                         <span className="overflow-hidden text-ellipsis whitespace-nowrap">{s.query}</span>
                     </button>
                     <button
                         type="button"
                         title="Delete saved search"
                         onClick={() => void remove(s.id)}
-                        className="mr-1 hidden cursor-pointer rounded px-[6px] py-[2px] text-[13px] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
+                        className="mr-1 hidden cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
                     >
                         ×
                     </button>
@@ -331,12 +331,12 @@ function FilterGroup(props: {
             <button
                 type="button"
                 onClick={props.onToggle}
-                className="flex w-full cursor-pointer items-center justify-between px-2 py-[6px] text-[13px] text-fg-dim hover:text-fg"
+                className="flex w-full cursor-pointer items-center justify-between px-2 py-[calc(6px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-dim hover:text-fg"
             >
                 <span>{props.title}</span>
-                <span className="text-[10px] text-fg-faint">{props.open ? "▾" : "▸"}</span>
+                <span className="text-[calc(10px*var(--ui-scale))] text-fg-faint">{props.open ? "▾" : "▸"}</span>
             </button>
-            {props.open ? <div className="px-2 pt-1 pb-[10px]">{props.children}</div> : null}
+            {props.open ? <div className="px-2 pt-1 pb-[calc(10px*var(--ui-scale))]">{props.children}</div> : null}
         </div>
     );
 }
@@ -366,7 +366,7 @@ function FiltersSection(){
                         <button
                             type="button"
                             onClick={clearAll}
-                            className="cursor-pointer text-[11px] text-accent-text hover:underline"
+                            className="cursor-pointer text-[calc(11px*var(--ui-scale))] text-accent-text hover:underline"
                         >
                             Clear all ({activeCount})
                         </button>
@@ -377,7 +377,7 @@ function FiltersSection(){
             </SectionLabel>
 
             <FilterGroup title="Date taken" open={open.date} onToggle={() => toggleSection("date")}>
-                <div className="flex flex-wrap gap-[6px]">
+                <div className="flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
                     {DATE_PRESETS.map((d) => (
                         <Chip
                             key={d.key}
@@ -391,7 +391,7 @@ function FiltersSection(){
 
             <FilterGroup title="Source folder" open={open.folder} onToggle={() => toggleSection("folder")}>
                 {folders.length === 0 ? (
-                    <div className="text-[12px] text-fg-faint">No folders watched yet.</div>
+                    <div className="text-[calc(12px*var(--ui-scale))] text-fg-faint">No folders watched yet.</div>
                 ) : (
                     folders.map((f) => (
                         <CheckRow
@@ -406,7 +406,7 @@ function FiltersSection(){
             </FilterGroup>
 
             <FilterGroup title="File type" open={open.type} onToggle={() => toggleSection("type")}>
-                <div className="flex gap-[6px]">
+                <div className="flex gap-[calc(6px*var(--ui-scale))]">
                     {TYPES.map((t) => (
                         <Chip
                             key={t}
@@ -419,7 +419,7 @@ function FiltersSection(){
             </FilterGroup>
 
             <FilterGroup title="Dimensions" open={open.dims} onToggle={() => toggleSection("dims")}>
-                <div className="flex gap-[6px]">
+                <div className="flex gap-[calc(6px*var(--ui-scale))]">
                     {DIMS.map((d) => (
                         <Chip
                             key={d.key}

@@ -30,9 +30,9 @@ export const TopBar = memo(function TopBar(){
     }, []);
 
     return (
-        <div className="flex h-[56px] flex-shrink-0 items-center gap-[14px] border-b border-edge bg-panel px-4">
-            <div className="flex h-[34px] w-[280px] max-w-[44vw] flex-shrink-0 items-center gap-2 rounded-lg border border-edge bg-raised px-[10px]">
-                <span className="text-[14px] text-fg-faint">⌕</span>
+        <div className="flex h-[calc(56px*var(--ui-scale))] flex-shrink-0 items-center gap-[calc(14px*var(--ui-scale))] border-b border-edge bg-panel px-4">
+            <div className="flex h-[calc(34px*var(--ui-scale))] w-[calc(280px*var(--ui-scale))] max-w-[44vw] flex-shrink-0 items-center gap-2 rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))]">
+                <span className="text-[calc(14px*var(--ui-scale))] text-fg-faint">⌕</span>
                 <input
                     ref={inputRef}
                     value={query}
@@ -42,11 +42,11 @@ export const TopBar = memo(function TopBar(){
                             ? "Search your photos — re-indexing in the background…"
                             : "Search your photos and screenshots…"
                     }
-                    className="min-w-0 flex-1 border-none bg-transparent text-[13px] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
+                    className="min-w-0 flex-1 border-none bg-transparent text-[calc(13px*var(--ui-scale))] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
                 />
                 {searching ? (
                     <span
-                        className="h-[9px] w-[9px] flex-shrink-0 rounded-full border-[1.5px] border-edge border-t-accent"
+                        className="h-[calc(9px*var(--ui-scale))] w-[calc(9px*var(--ui-scale))] flex-shrink-0 rounded-full border-[calc(1.5px*var(--ui-scale))] border-edge border-t-accent"
                         style={{ animation: "spin 0.7s linear infinite" }}
                     />
                 ) : null}
@@ -54,7 +54,7 @@ export const TopBar = memo(function TopBar(){
                     <button
                         type="button"
                         onClick={clearQuery}
-                        className="cursor-pointer p-[2px] text-[13px] text-fg-faint hover:text-fg"
+                        className="cursor-pointer p-[calc(2px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-faint hover:text-fg"
                         aria-label="Clear search"
                     >
                         ✕
@@ -70,7 +70,7 @@ export const TopBar = memo(function TopBar(){
                     onClick={() => void saveSearch()}
                     title="Save this search, with its filters"
                     aria-label="Save search"
-                    className="h-[30px] flex-shrink-0 cursor-pointer rounded-lg border border-edge bg-raised px-[10px] text-[12.5px] text-fg-dim hover:bg-hover hover:text-fg"
+                    className="h-[calc(30px*var(--ui-scale))] flex-shrink-0 cursor-pointer rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
                 >
                     ☆ Save
                 </button>
@@ -84,7 +84,7 @@ export const TopBar = memo(function TopBar(){
                 type="button"
                 onClick={() => setView("settings")}
                 aria-label="Settings"
-                className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-[7px] border border-edge bg-raised text-[15px] text-fg-dim hover:bg-hover"
+                className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-raised text-[calc(15px*var(--ui-scale))] text-fg-dim hover:bg-hover"
             >
                 ⚙
             </button>
@@ -106,10 +106,10 @@ function IndexingIndicator(){
             <button
                 type="button"
                 onClick={toggle}
-                className="flex cursor-pointer items-center gap-[7px] rounded-[7px] bg-raised px-[10px] py-[6px] hover:bg-hover"
+                className="flex cursor-pointer items-center gap-[calc(7px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] bg-raised px-[calc(10px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] hover:bg-hover"
             >
                 {complete ? (
-                    <span className="h-[7px] w-[7px] rounded-full bg-fg-faint" />
+                    <span className="h-[calc(7px*var(--ui-scale))] w-[calc(7px*var(--ui-scale))] rounded-full bg-fg-faint" />
                 ) : (
                     <svg width="16" height="16" viewBox="0 0 16 16" className="flex-shrink-0">
                         <circle cx="8" cy="8" r="6" fill="none" stroke="var(--border)" strokeWidth="2" />
@@ -127,7 +127,7 @@ function IndexingIndicator(){
                         />
                     </svg>
                 )}
-                <span className="whitespace-nowrap text-[11.5px] tabular-nums text-fg-dim">
+                <span className="whitespace-nowrap text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
                     {complete
                         ? "Up to date"
                         : `Indexing ${fmtCount(indexing.current)} / ${fmtCount(indexing.total)}`}
@@ -135,22 +135,22 @@ function IndexingIndicator(){
             </button>
 
             {open ? (
-                <div className="absolute top-[42px] right-0 z-40 w-[260px] rounded-[10px] border border-edge bg-raised p-[14px] shadow-[var(--shadow-pop)]">
-                    <div className="mb-2 text-[12px] text-fg-faint">CURRENT FILE</div>
-                    <div className="mb-3 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[11.5px] text-fg">
+                <div className="absolute top-[calc(42px*var(--ui-scale))] right-0 z-40 w-[calc(260px*var(--ui-scale))] rounded-[calc(10px*var(--ui-scale))] border border-edge bg-raised p-[calc(14px*var(--ui-scale))] shadow-[var(--shadow-pop)]">
+                    <div className="mb-2 text-[calc(12px*var(--ui-scale))] text-fg-faint">CURRENT FILE</div>
+                    <div className="mb-3 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[calc(11.5px*var(--ui-scale))] text-fg">
                         {indexing.currentFile}
                     </div>
-                    <div className="mb-[10px] h-[5px] overflow-hidden rounded-[3px] bg-hover">
+                    <div className="mb-[calc(10px*var(--ui-scale))] h-[calc(5px*var(--ui-scale))] overflow-hidden rounded-[calc(3px*var(--ui-scale))] bg-hover">
                         <div className="h-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
                     </div>
-                    <div className="mb-[14px] flex justify-between text-[11.5px] text-fg-dim">
+                    <div className="mb-[calc(14px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] text-fg-dim">
                         <span>{indexing.rate} img/s</span>
                         <span>ETA {fmtEta(indexing.etaSec)}</span>
                     </div>
                     <button
                         type="button"
                         onClick={togglePause}
-                        className="w-full cursor-pointer rounded-[7px] border border-edge bg-hover p-2 text-[12.5px] text-fg hover:opacity-80"
+                        className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
                     >
                         {indexing.paused ? "Resume indexing" : "Pause indexing"}
                     </button>
