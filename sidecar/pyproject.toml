@@ -12,7 +12,6 @@ dependencies = [
     "numpy>=2.1",
     "pillow>=11.0",
     "pillow-heif>=0.21",
-    "torch>=2.5",
     "transformers>=4.49",
     "sentencepiece>=0.2",
     "protobuf>=5.28",
@@ -29,12 +28,24 @@ ocr = [
     "rapidocr-onnxruntime>=1.4",
 ]
 
+# torch lives in two mutually exclusive groups rather than in `dependencies`,
+# because which build a machine wants depends on its GPU and one lockfile has
+# to serve both. The packaged app picks one on first run (`--group cu130` when
+# `nvidia-smi` answers, `--group cpu` otherwise) with `--no-default-groups`;
+# a plain `uv sync` in a checkout takes `default-groups` and stays on CUDA, so
+# the dev workflow did not change.
 [dependency-groups]
 dev = [
     "pytest>=8.3",
     "httpx>=0.28",
     "ruff>=0.9",
 ]
+cpu = ["torch>=2.5"]
+cu130 = ["torch>=2.5"]
+
+[tool.uv]
+default-groups = ["dev", "cu130"]
+conflicts = [[{ group = "cpu" }, { group = "cu130" }]]
 
 [build-system]
 requires = ["hatchling"]
@@ -43,14 +54,24 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["picsearch"]
 
-# CUDA wheels. Falls back to CPU torch automatically on machines without them.
+# CUDA wheels on Linux and Windows. Everywhere else — and in the `cpu` group —
+# torch comes from its CPU index: the PyPI Linux wheel drags in ~3 GB of CUDA
+# libraries that a machine without an NVIDIA card would download for nothing.
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torch = [
+    { index = "pytorch-cu130", group = "cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
 
 # `ruff check` only. DO NOT add `ruff format` or a [tool.ruff.format] section:
 # the mandated style in CLAUDE.md writes `if(cond):`, and ruff's formatter
