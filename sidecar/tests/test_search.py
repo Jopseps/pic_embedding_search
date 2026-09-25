@@ -10,6 +10,7 @@ across two languages.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -329,7 +330,8 @@ def test_folder_filter_escapes_like_wildcards(app_state, library):
 
     ids = candidate_ids(app_state.store, SearchParams(folders=[str(odd)]))
     assert len(ids) == 1
-    assert app_state.store.image_by_id(next(iter(ids)))["path"].endswith("a_b/one.jpg")
+    found = app_state.store.image_by_id(next(iter(ids)))["path"]
+    assert found.endswith(os.path.join("a_b", "one.jpg"))
 
 
 def test_candidate_ids_by_type(app_state):

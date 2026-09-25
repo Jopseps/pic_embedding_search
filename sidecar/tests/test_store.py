@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -215,10 +217,11 @@ def test_watched_folder_crud(store: Store):
 
 
 def test_folder_count_matches_indexed_images(store: Store):
-    make_image(store, path="/home/u/Pictures/a.jpg")
-    make_image(store, path="/home/u/Pictures/sub/b.jpg")
-    make_image(store, path="/home/u/Downloads/c.jpg")
-    assert store.folder_count("/home/u/Pictures") == 2
+    # str(Path): stored paths use the platform's separator.
+    make_image(store, path=str(Path("/home/u/Pictures/a.jpg")))
+    make_image(store, path=str(Path("/home/u/Pictures/sub/b.jpg")))
+    make_image(store, path=str(Path("/home/u/Downloads/c.jpg")))
+    assert store.folder_count(str(Path("/home/u/Pictures"))) == 2
 
 
 def test_settings_round_trip(store: Store):
