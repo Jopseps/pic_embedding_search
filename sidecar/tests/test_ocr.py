@@ -191,3 +191,27 @@ def test_install_hint_names_a_real_command_on_this_os(monkeypatch):
     assert system.tesseract_install_hint(["eng", "tur"]) == (
         "sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-tur"
     )
+
+
+def test_install_hint_says_nothing_when_tesseract_has_the_languages(monkeypatch):
+    from picsearch import ocr, system
+
+    monkeypatch.setattr(system, "find_tesseract", lambda binary="tesseract": "/bin/tesseract")
+    monkeypatch.setattr(ocr, "tesseract_langs", lambda binary: frozenset({"eng", "tur"}))
+    assert ocr.install_hint("tesseract", ["en", "tr"]) is None
+    # Another engine is an opt-in extra; its users installed it on purpose.
+    assert ocr.install_hint("rapidocr", ["en"]) is None
+
+
+def test_install_hint_names_the_missing_piece(monkeypatch):
+    from picsearch import ocr, system
+
+    monkeypatch.setattr(system, "_linux_family", lambda: "arch")
+    monkeypatch.setattr(system, "WINDOWS", False)
+    monkeypatch.setattr(system, "find_tesseract", lambda binary="tesseract": "/bin/tesseract")
+    monkeypatch.setattr(ocr, "tesseract_langs", lambda binary: frozenset({"eng"}))
+    assert ocr.install_hint("tesseract", ["en", "tr"]).endswith("sudo pacman -S tesseract-data-tur")
+
+    monkeypatch.setattr(system, "find_tesseract", lambda binary="tesseract": None)
+    hint = ocr.install_hint(None, ["en"])
+    assert "not installed" in hint and hint.endswith("sudo pacman -S tesseract tesseract-data-eng")

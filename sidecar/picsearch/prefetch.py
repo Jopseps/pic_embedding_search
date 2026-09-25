@@ -8,6 +8,7 @@ model once, which is exactly what the sidecar will do later.
 Talks to the Rust shell over stdout, one line at a time:
 
     PROGRESS <done_bytes> <total_bytes>     total is 0 when unknown
+    NOTE <text>                             something the user should read
     <anything else>                         a log line for the setup screen
 
 Weights go to the standard HuggingFace cache, shared with every other tool.
@@ -21,7 +22,7 @@ import sys
 import threading
 import time
 
-from . import config, embed, paths
+from . import config, embed, ocr, paths
 from .doctor import hf_cache_dir, weights_dir
 
 log = logging.getLogger(__name__)
@@ -104,10 +105,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
-    model_id = args.model or str(config.load().get("modelId") or embed.DEFAULT_MODEL_ID)
+    settings = config.load()
+    model_id = args.model or str(settings.get("modelId") or embed.DEFAULT_MODEL_ID)
     start = time.monotonic()
     fetch(model_id)
     say(f"model check took {time.monotonic() - start:.0f}s")
+
+    # Not part of the install — tesseract is a system package — but setup is
+    # the one screen every new user reads, so this is where to say it.
+    hint = ocr.install_hint(settings.get("ocrEngineId"), settings.get("ocrLangs"))
+    if(hint is not None):
+        say(f"NOTE {hint}")
     return 0
 
 

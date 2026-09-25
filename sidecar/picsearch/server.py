@@ -432,6 +432,18 @@ def create_app(state: AppState) -> FastAPI:
             "uptimeSec": round(time.time() - state.started, 1),
         }
 
+    @app.get("/ocr", dependencies=[guard])
+    def ocr_status() -> dict:
+        """The live engine, plus what to install when the configured one is
+        missing something. Settings shows `hint` verbatim."""
+        return {
+            "engine": None if state.ocr is None else state.ocr.id,
+            "langs": None if state.ocr is None else state.ocr.langs_key,
+            "hint": ocr.install_hint(
+                state.settings.get("ocrEngineId"), state.settings.get("ocrLangs")
+            ),
+        }
+
     @app.get("/counts", dependencies=[guard])
     def counts() -> dict:
         """Sidebar counts, over the whole library rather than the current page.

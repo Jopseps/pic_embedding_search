@@ -283,6 +283,34 @@ def build(engine_id: str, langs: Sequence[str] | None = None) -> OcrEngine:
     return cls(langs)
 
 
+def install_hint(engine_id: str | None, langs: Sequence[str] | None = None) -> str | None:
+    """What the user has to install for the configured OCR to work fully.
+
+    None when nothing is missing. Only tesseract gets a hint: it is the
+    default, and the other engines are opt-in extras whose users installed
+    them on purpose.
+    """
+    if((engine_id or DEFAULT_ENGINE_ID) != "tesseract"):
+        return None
+    wanted = [
+        TesseractEngine.LANG_MAP[code] for code in canonical_langs(langs)
+        if code in TesseractEngine.LANG_MAP
+    ]
+    binary = system.find_tesseract()
+    if(binary is None):
+        return (
+            "Tesseract is not installed, so text inside screenshots is not searchable."
+            " Install it with: " + system.tesseract_install_hint(wanted)
+        )
+    missing = [code for code in wanted if code not in tesseract_langs(binary)]
+    if(missing):
+        return (
+            f"Tesseract has no {'+'.join(missing)} language data."
+            " Add it with: " + system.tesseract_langs_hint(missing)
+        )
+    return None
+
+
 def resolve(engine_id: str | None, langs: Sequence[str] | None = None) -> OcrEngine | None:
     """Best-effort construction, for startup.
 
