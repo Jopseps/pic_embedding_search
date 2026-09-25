@@ -8,8 +8,11 @@
  * `picsearch-uv` because Tauri drops sidecars next to the main executable —
  * `/usr/bin` for a .deb — and a bare `uv` would collide with the distro's own.
  *
- * Linux gets the musl build: it is static, so one binary runs on every glibc
- * an AppImage might land on.
+ * Linux gets the *glibc* build, not the static musl one. linuxdeploy runs
+ * patchelf --set-rpath over everything in an AppImage's usr/bin, and a patched
+ * static-pie binary segfaults on its first instruction — the AppImage's first
+ * launch died with SIGSEGV from uv. The glibc build takes the patch like any
+ * dynamic binary and needs only GLIBC_2.17, older than anything Tauri runs on.
  *
  *   node scripts/fetch-uv.mjs                 # for this machine
  *   node scripts/fetch-uv.mjs <rust triple>   # for a cross target
@@ -25,8 +28,8 @@ const UV_VERSION = "0.11.19";
 
 // Rust target triple (what Tauri names the file after) -> uv release asset.
 const ASSETS = {
-    "x86_64-unknown-linux-gnu": "uv-x86_64-unknown-linux-musl.tar.gz",
-    "aarch64-unknown-linux-gnu": "uv-aarch64-unknown-linux-musl.tar.gz",
+    "x86_64-unknown-linux-gnu": "uv-x86_64-unknown-linux-gnu.tar.gz",
+    "aarch64-unknown-linux-gnu": "uv-aarch64-unknown-linux-gnu.tar.gz",
     "x86_64-pc-windows-msvc": "uv-x86_64-pc-windows-msvc.zip",
     "aarch64-pc-windows-msvc": "uv-aarch64-pc-windows-msvc.zip",
     "x86_64-apple-darwin": "uv-x86_64-apple-darwin.tar.gz",
@@ -71,7 +74,7 @@ async function main(){
     const out = join(outDir, `picsearch-uv-${triple}${exe}`);
     const stamp = `${out}.version`;
 
-    if(existsSync(out) && existsSync(stamp) && readStamp(stamp) === UV_VERSION){
+    if(existsSync(out) && existsSync(stamp) && readStamp(stamp) === `${UV_VERSION} ${asset}`){
         console.log(`uv ${UV_VERSION} already at ${out}`);
         return;
     }
@@ -100,7 +103,7 @@ async function main(){
         mkdirSync(outDir, { recursive: true });
         copyFileSync(binary, out);
         chmodSync(out, 0o755);
-        writeFileSync(stamp, UV_VERSION);
+        writeFileSync(stamp, `${UV_VERSION} ${asset}`);
         console.log(`uv ${UV_VERSION} -> ${out}`);
     }finally{
         rmSync(work, { recursive: true, force: true });
