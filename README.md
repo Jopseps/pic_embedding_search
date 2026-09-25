@@ -1,4 +1,4 @@
-# Photo Search
+# PicSearch
 
 Local semantic search over your own photos and screenshots. Point it at folders, and it makes them searchable by what is *in* them — type `table`, `dark code editor`, or `masa` and get the matching images back.
 
@@ -12,17 +12,44 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 - **Filters, collections, saved searches** — a saved search restores its filters, not just its words
 - **Near-duplicate detection** — perceptual hashing, so two photos of the same thing group and two screenshots of the same app do not
 
-## Status: early, and not yet packaged
+## Install
 
-> **There are no binary releases.** This is a v0.1 you run from source, and it needs `uv`, Node and Rust on your machine.
->
-> Semantic search over your own folders works today, so does text search inside screenshots, and watched folders stay up to date on their own — drop an image in and it is in the grid a couple of seconds later. Collections, saved searches, filters and near-duplicate detection all work against your real library, and you can switch embedding models from Settings — the library re-embeds in the background while the old model keeps answering searches.
->
-> OCR uses Tesseract, which must be installed (`pacman -S tesseract tesseract-data-eng`). **Turkish also needs `tesseract-data-tur`**; without it the engine falls back to English and says so in the log.
->
-> `PLAN.md` records what each build step decided and why; `ARCHITECTURE.md` has the design. The remaining gap is packaging, not features.
+Grab the file for your system from the [latest release](https://github.com/Jopseps/pic_embedding_search/releases/latest).
 
-## Run it
+| System | File | How |
+|---|---|---|
+| Arch | `PKGBUILD` | put it in an empty folder, run `makepkg -si` |
+| Debian / Ubuntu | `PicSearch_*_amd64.deb` | `sudo apt install ./PicSearch_*_amd64.deb` |
+| Any Linux | `PicSearch_*_amd64.AppImage` | `chmod +x` it and double-click |
+| Windows 10/11 | `PicSearch_*_x64-setup.exe` | run it — see *Unsigned* below |
+
+**The first launch sets itself up.** The packages are small (~25 MB) because they carry the Python source, not PyTorch. On first start PicSearch downloads Python, PyTorch and the search model into your user folder, showing progress as it goes:
+
+- with an NVIDIA GPU (driver 580+): CUDA PyTorch, about 3 GB plus 1.5 GB of model weights
+- without one: CPU PyTorch, a few hundred MB plus the weights — indexing is roughly 20× slower
+
+After that it starts in a second and never touches the network again. If setup ever breaks, the error screen has a **Reinstall environment** button; the environment lives in `~/.local/share/pic-search/runtime` (Windows: `%LOCALAPPDATA%\pic-search\runtime`) and deleting it is always safe.
+
+**Text inside screenshots needs Tesseract**, which is a system program. The Arch and Debian packages pull it in; elsewhere install it yourself — Settings → *Text in images* tells you the exact command when it is missing:
+
+- Arch: `sudo pacman -S tesseract tesseract-data-eng tesseract-data-tur`
+- Debian/Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-tur`
+- Windows: `winget install UB-Mannheim.TesseractOCR` and tick *Turkish* in the installer
+
+Without it everything else works; screenshots are just not searchable by their words.
+
+**Unsigned.** Neither package is code-signed. Windows SmartScreen says "Windows protected your PC" — click *More info → Run anyway*. macOS is not packaged yet.
+
+## Build it yourself
+
+```bash
+npm install
+npm run package          # fetches a pinned uv, then tauri build
+```
+
+On Arch this builds the `.deb` only; `packaging/arch/PKGBUILD` repackages it (`PICSEARCH_DEB=<path to .deb> makepkg -si`). AppImages are built by CI on Ubuntu 22.04 — one built on a rolling distro links against a glibc too new for everyone else. Pushing a `v*` tag builds every package and attaches them to a draft release (`.github/workflows/release.yml`).
+
+## Run it from source
 
 ```bash
 npm install
@@ -56,10 +83,10 @@ Every request carries the token, the desktop app's included. There is no flag th
 
 ## Requirements
 
-- Linux (Windows/macOS should work but are untested)
+- Linux or Windows 10/11 (x86-64). macOS is not packaged yet.
 - An NVIDIA GPU is strongly recommended — CPU inference is roughly 20× slower
-- `uv`, Node 22+, Rust stable
-- ~3 GB of disk for model weights on first run
+- ~5 GB of disk for the environment and model weights (~2 GB without a GPU)
+- From source: `uv`, Node 22+, Rust stable
 
 ## How it works
 
