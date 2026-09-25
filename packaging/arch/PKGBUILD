@@ -1,0 +1,37 @@
+# Repackages the release .deb for Arch. CI fills in pkgver and the checksum
+# and attaches the result to the GitHub Release; this copy is the template.
+#
+# From a release:     download PKGBUILD into an empty folder, `makepkg -si`
+# From this checkout: npm run package, then in this folder
+#                     PICSEARCH_DEB=../../src-tauri/target/release/bundle/deb/PicSearch_0.1.0_amd64.deb makepkg -si
+
+pkgname=picsearch-bin
+pkgver=0.1.0
+pkgrel=1
+_deb_sha256='SKIP'
+pkgdesc="Local semantic photo and screenshot search (SigLIP 2 + Tesseract, fully offline)"
+arch=('x86_64')
+url="https://github.com/Jopseps/pic_embedding_search"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'tesseract' 'tesseract-data-eng')
+optdepends=(
+    'tesseract-data-tur: read Turkish text in screenshots'
+    'nvidia-utils: GPU indexing (the first launch installs CUDA PyTorch when nvidia-smi answers)'
+)
+provides=('picsearch')
+conflicts=('picsearch')
+# The package ships the Python source and its own uv; torch is installed per
+# user, on first launch, into ~/.local/share/pic-search/runtime.
+options=('!strip' '!debug')
+
+if [[ -n "$PICSEARCH_DEB" ]]; then
+    source=("PicSearch_${pkgver}_amd64.deb::file://$(realpath "$PICSEARCH_DEB")")
+    sha256sums=('SKIP')
+else
+    source=("PicSearch_${pkgver}_amd64.deb::${url}/releases/download/v${pkgver}/PicSearch_${pkgver}_amd64.deb")
+    sha256sums=("$_deb_sha256")
+fi
+
+package(){
+    bsdtar -xf data.tar.* -C "$pkgdir"
+}
