@@ -177,5 +177,17 @@ def test_tesseract_returns_empty_text_for_a_blank_image():
 
 
 def test_tesseract_says_what_to_install_when_the_binary_is_missing():
-    with pytest.raises(OcrUnavailable, match="not on PATH"):
+    with pytest.raises(OcrUnavailable, match="not installed"):
         TesseractEngine(["en"], binary="tesseract-that-does-not-exist")
+
+
+def test_install_hint_names_a_real_command_on_this_os(monkeypatch):
+    from picsearch import system
+
+    monkeypatch.setattr(system, "WINDOWS", True)
+    assert system.tesseract_install_hint().startswith("winget install UB-Mannheim.TesseractOCR")
+    monkeypatch.setattr(system, "WINDOWS", False)
+    monkeypatch.setattr(system, "_linux_family", lambda: "debian")
+    assert system.tesseract_install_hint(["eng", "tur"]) == (
+        "sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-tur"
+    )

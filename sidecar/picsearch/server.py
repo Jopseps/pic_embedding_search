@@ -48,7 +48,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from . import config, ocr, paths
+from . import config, ocr, paths, system
 from .embed import Embedder, spec_for
 from .index import Indexer
 from .search import DEFAULT_LIMIT, Searcher, SearchParams, VectorIndex, hydrate
@@ -800,16 +800,6 @@ def _spawn(argv: list[str]) -> bool:
 # Parent watchdog
 # ---------------------------------------------------------------------------
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) -> None:
     """Exit hard when the process we belong to disappears.
 
@@ -830,7 +820,7 @@ def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) 
     def watch() -> None:
         while(True):
             time.sleep(interval)
-            if(not _pid_alive(target)):
+            if(not system.pid_alive(target)):
                 log.warning("watched process %s is gone; exiting", target)
                 os._exit(0)
             if(watch_reparent and os.getppid() != target):

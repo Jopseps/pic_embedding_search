@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 import subprocess
 from collections.abc import Sequence
 from functools import lru_cache
@@ -41,6 +40,8 @@ from io import BytesIO
 from typing import Protocol
 
 from PIL import Image
+
+from . import system
 
 log = logging.getLogger(__name__)
 
@@ -135,10 +136,10 @@ class TesseractEngine:
         binary: str = "tesseract",
         timeout: float = 60.0,
     ):
-        found = shutil.which(binary)
+        found = system.find_tesseract(binary)
         if(found is None):
             raise OcrUnavailable(
-                "tesseract is not on PATH — install it (Arch: pacman -S tesseract)"
+                "tesseract is not installed — " + system.tesseract_install_hint()
             )
         self.binary = found
         self.timeout = timeout
@@ -149,9 +150,10 @@ class TesseractEngine:
         missing = [code for code in wanted if code not in installed]
         if(missing):
             log.warning(
-                "tesseract has no language data for %s — install tesseract-data-%s;"
+                "tesseract has no language data for %s — %s;"
                 " OCR runs with %s until then",
-                "+".join(missing), missing[0], "+".join(usable) or "nothing",
+                "+".join(missing), system.tesseract_langs_hint(missing),
+                "+".join(usable) or "nothing",
             )
         if(not usable):
             if("eng" in installed):

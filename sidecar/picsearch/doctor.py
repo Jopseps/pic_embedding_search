@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, embed, ocr, paths
+from . import config, embed, ocr, paths, system
 from .store import Store
 
 GOOD = "good"
@@ -207,7 +207,7 @@ def check_model(r: Report, settings: dict) -> None:
             f"cache: {hf_cache_dir()}",
         )
     else:
-        r.line(GOOD, "weights", f"cached, {human(paths.dir_size_bytes(cached))}")
+        r.line(GOOD, "weights", f"cached, {human(paths.dir_size_bytes(cached / "blobs"))}")
 
 
 def check_ocr(r: Report, settings: dict) -> ocr.OcrEngine | None:
@@ -216,15 +216,15 @@ def check_ocr(r: Report, settings: dict) -> ocr.OcrEngine | None:
     requested = ocr.canonical_langs(settings.get("ocrLangs"))
     lang_map = ocr.TesseractEngine.LANG_MAP
 
-    binary = shutil.which("tesseract")
+    binary = system.find_tesseract()
     if(binary is None):
         r.line(
-            BAD, "tesseract", "not on PATH — screenshots will not be searchable by their text",
-            "sudo pacman -S tesseract tesseract-data-eng",
+            BAD, "tesseract", "not installed — screenshots will not be searchable by their text",
+            system.tesseract_install_hint(),
         )
     else:
         installed = ocr.tesseract_langs(binary)
-        version = version_of("tesseract") or "installed"
+        version = version_of(binary) or "installed"
         r.line(GOOD, "tesseract", f"{version} — {len(installed)} language(s) installed")
 
         unknown = [code for code in requested if code not in lang_map]
@@ -235,10 +235,9 @@ def check_ocr(r: Report, settings: dict) -> ocr.OcrEngine | None:
             )
         missing = [lang_map[c] for c in requested if c in lang_map and lang_map[c] not in installed]
         if(missing):
-            packages = " ".join("tesseract-data-" + code for code in missing)
             r.line(
                 WARN, "langs", f"requested {'+'.join(missing)}, no data installed",
-                f"sudo pacman -S {packages}",
+                system.tesseract_langs_hint(missing),
             )
             r.note("the next rescan re-reads every screenshot on its own once it is installed")
 
