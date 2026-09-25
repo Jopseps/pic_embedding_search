@@ -146,9 +146,18 @@ impl Drop for Sidecar{
 /// subsystem app on Windows, so every console child would otherwise get a
 /// black window of its own for as long as it runs — uv for the whole install,
 /// Python for the whole session.
+///
+/// It also scrubs what an AppImage's `AppRun` exports into our environment:
+/// `PYTHONHOME` and `PYTHONPATH` pointing into the mount (so uv's managed
+/// CPython cannot find its own standard library and dies on
+/// `No module named 'encodings'`), and an `LD_LIBRARY_PATH` that would make
+/// Python and torch load the webview's bundled libraries instead of their own.
 pub fn hidden(program: impl AsRef<std::ffi::OsStr>) -> Command{
-    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
+    cmd.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
+    if std::env::var_os("APPIMAGE").is_some(){
+        cmd.env_remove("LD_LIBRARY_PATH");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -86,8 +86,13 @@ async function main(){
     try{
         const archive = join(work, asset);
         writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
-        // bsdtar ships with Windows 10+ and reads zip as well as tar.gz.
-        execFileSync("tar", ["-xf", archive, "-C", work], { stdio: "inherit" });
+        // bsdtar ships with Windows 10+ and reads zip as well as tar.gz. Named
+        // by full path there: on CI runners Git's GNU tar comes first on PATH,
+        // cannot read zip, and takes `C:\…` for a remote host.
+        const tar = process.platform === "win32"
+            ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe")
+            : "tar";
+        execFileSync(tar, ["-xf", archive, "-C", work], { stdio: "inherit" });
         const binary = findFile(work, `uv${exe}`);
         if(binary === null){
             throw new Error(`uv${exe} not found inside ${asset}`);

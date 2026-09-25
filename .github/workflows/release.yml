@@ -47,8 +47,15 @@ jobs:
         with:
           version: "0.11.19"
 
+      - name: Tesseract
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-tur
+
       # CPU torch: the runners have no GPU, and the cu130 wheels are 3 GB.
+      # UV_NO_SYNC: a stray `uv run` would re-sync the default groups, cu130.
       - name: Sidecar tests
+        env:
+          UV_NO_SYNC: "1"
         working-directory: sidecar
         run: |
           uv sync --frozen --no-default-groups --group dev --group cpu
