@@ -10,6 +10,7 @@ whole ingest design exists to make a rescan free.
 
 from __future__ import annotations
 
+import os
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -195,8 +196,8 @@ def test_screenshot_heuristic(indexer: Indexer, store: Store, library):
         r["path"]
         for r in store.conn().execute("SELECT path FROM images WHERE is_screenshot=1")
     }
-    assert len([p for p in shots if "/sub/" in p]) == 5          # 1920x1080
-    assert any("Screenshots/odd.png" in p for p in shots)        # folder name
+    assert len([p for p in shots if f"{os.sep}sub{os.sep}" in p]) == 5    # 1920x1080
+    assert any(f"Screenshots{os.sep}odd.png" in p for p in shots)          # folder name
     assert not any("photo_" in p for p in shots)
 
 

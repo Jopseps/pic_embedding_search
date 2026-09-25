@@ -318,7 +318,9 @@ def test_a_move_onto_an_existing_row_replaces_it(watched):
     watcher.flush()
     a_id = store.image_by_path(str(root / "a.jpg"))["id"]
 
-    (root / "a.jpg").rename(root / "b.jpg")
+    # replace(), not rename(): the POSIX rename-over that a save-by-replace
+    # does. rename() refuses an existing target on Windows.
+    (root / "a.jpg").replace(root / "b.jpg")
     watcher.moved(root / "a.jpg", root / "b.jpg")
     watcher.flush()
 

@@ -190,6 +190,22 @@ def run_orphan_check(tmp_path, indirect: bool):
             parent.kill()
 
 
+# Both drive the kill through POSIX: SIGKILL, and a bash intermediary standing
+# in for uv. The Windows half of the watchdog is `system.pid_alive`, tested
+# directly below on every platform.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL and bash")
+
+
+def test_pid_alive_tells_a_live_process_from_a_finished_one():
+    from picsearch import system
+
+    assert system.pid_alive(os.getpid())
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert not system.pid_alive(proc.pid)
+
+
+@posix_only
 def test_the_sidecar_dies_with_its_parent(tmp_path):
     """`pkill -9` on the shell must not leave a process holding VRAM.
 
@@ -199,6 +215,7 @@ def test_the_sidecar_dies_with_its_parent(tmp_path):
     run_orphan_check(tmp_path, indirect=False)
 
 
+@posix_only
 def test_the_sidecar_dies_with_the_pid_it_was_told_to_watch(tmp_path):
     """The real spawn goes through `uv`, so the sidecar's own parent is not the
     process whose death matters — hence `--parent-pid`. Watching that pid's
