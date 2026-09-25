@@ -1,5 +1,5 @@
 [package]
-name = "pic-search"
+name = "picsearch"
 version = "0.1.0"
 description = "Local semantic photo and screenshot search"
 edition = "2021"

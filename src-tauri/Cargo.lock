@@ -2267,7 +2267,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pic-search"
+name = "picsearch"
 version = "0.1.0"
 dependencies = [
  "serde",
