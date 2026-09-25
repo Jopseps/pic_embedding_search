@@ -9,6 +9,7 @@ import type {
     Settings,
     SettingsResponse,
     SidecarEvent,
+    OcrStatus,
     StorageUsage,
     WatchedFolder,
 } from "./types";
@@ -63,6 +64,7 @@ export interface PhotoSearchApi{
     saveSearch(query: SearchQuery): Promise<SavedSearch>;
     deleteSavedSearch(id: string): Promise<void>;
     storage(): Promise<StorageUsage>;
+    ocrStatus(): Promise<OcrStatus>;
     clearThumbnailCache(): Promise<void>;
     revealInFiles(ids: number[]): Promise<void>;
     openExternally(id: number): Promise<void>;
@@ -359,6 +361,10 @@ export class MockApi implements PhotoSearchApi{
         return { thumbnailCacheGb: this.cacheGb, indexGb: 0.34 };
     }
 
+    async ocrStatus(): Promise<OcrStatus>{
+        return { engine: this.settings.ocrEngineId, langs: "eng+tur", hint: null };
+    }
+
     async clearThumbnailCache(): Promise<void>{
         this.cacheGb = 0;
     }
@@ -553,6 +559,10 @@ export class HttpApi implements PhotoSearchApi{
 
     storage(): Promise<StorageUsage>{
         return this.req<StorageUsage>("/storage");
+    }
+
+    ocrStatus(): Promise<OcrStatus>{
+        return this.req<OcrStatus>("/ocr");
     }
 
     async clearThumbnailCache(): Promise<void>{

@@ -132,6 +132,14 @@ export interface StorageUsage{
     indexGb: number;
 }
 
+/** What OCR is actually running, and what to install when that is less than
+ *  what Settings asked for. `hint` is shown verbatim. */
+export interface OcrStatus{
+    engine: string | null;
+    langs: string | null;
+    hint: string | null;
+}
+
 export interface Collection{
     id: string;
     name: string;

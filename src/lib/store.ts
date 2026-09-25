@@ -34,6 +34,7 @@ import type {
     ResolvedTheme,
     SavedSearch,
     Settings,
+    OcrStatus,
     StorageUsage,
     ThemePref,
     UiScale,
@@ -158,6 +159,8 @@ interface State{
      *  a sidecar that is not up yet just shows skeletons forever. */
     backendError: string | null;
     storage: StorageUsage;
+    /** Null until Settings asks. Carries the install hint for tesseract. */
+    ocrStatus: OcrStatus | null;
     clearCacheConfirm: boolean;
 
     isDraggingFile: boolean;
@@ -254,6 +257,7 @@ interface Actions{
     removeFolder(path: string): Promise<void>;
     toggleRecursive(path: string): Promise<void>;
     loadStorage(): Promise<void>;
+    loadOcrStatus(): Promise<void>;
     clearCache(): Promise<void>;
     cancelClearCache(): void;
 
@@ -412,6 +416,7 @@ export const useStore = create<State & Actions>((set, get) => ({
     foldersLoaded: false,
     backendError: null,
     storage: { thumbnailCacheGb: 0, indexGb: 0 },
+    ocrStatus: null,
     clearCacheConfirm: false,
 
     isDraggingFile: false,
@@ -1085,7 +1090,9 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     setOcrEngine(id){
         set((s) => ({ settings: { ...s.settings, ocrEngineId: id } }));
-        void get().persistSettings({ ocrEngineId: id });
+        // After the PUT lands, not alongside it: the sidecar re-resolves the
+        // engine while handling it, and the hint is about the new one.
+        void get().persistSettings({ ocrEngineId: id }).then(() => get().loadOcrStatus());
     },
 
     toggleOcrLang(code){
@@ -1096,7 +1103,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 : [...s.settings.ocrLangs, code];
             return { settings: { ...s.settings, ocrLangs: langs } };
         });
-        void get().persistSettings({ ocrLangs: get().settings.ocrLangs });
+        void get().persistSettings({ ocrLangs: get().settings.ocrLangs }).then(() => get().loadOcrStatus());
     },
 
     setTheme(t){
@@ -1199,6 +1206,14 @@ export const useStore = create<State & Actions>((set, get) => ({
             set({ storage: await api.storage() });
         }catch(err){
             set({ backendError: describeError(err) });
+        }
+    },
+
+    async loadOcrStatus(){
+        try{
+            set({ ocrStatus: await api.ocrStatus() });
+        }catch{
+            // Advisory only. Settings simply shows no hint.
         }
     },
 

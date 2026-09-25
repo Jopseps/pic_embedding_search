@@ -335,12 +335,23 @@ function OcrSection(){
     const langs = useStore((s) => s.settings.ocrLangs);
     const setEngine = useStore((s) => s.setOcrEngine);
     const toggleLang = useStore((s) => s.toggleOcrLang);
+    const hint = useStore((s) => s.ocrStatus?.hint ?? null);
+    const loadOcrStatus = useStore((s) => s.loadOcrStatus);
+
+    useEffect(() => {
+        void loadOcrStatus();
+    }, [loadOcrStatus]);
 
     return (
         <Group
             title="OCR engine and languages"
             hint="Extracts text from screenshots so words printed inside them become searchable."
         >
+            {hint !== null ? (
+                <div className="mb-[calc(12px*var(--ui-scale))] rounded-lg border border-edge bg-raised px-3 py-[calc(9px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim" data-selectable>
+                    {hint}
+                </div>
+            ) : null}
             {OCR_ENGINES.map((e) => {
                 const selected = e.id === engineId;
                 return (
