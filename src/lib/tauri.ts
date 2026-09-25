@@ -12,17 +12,39 @@ export function isTauri(): boolean{
     return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/**
- * Asks the Rust shell for the sidecar's `{port, token}`. Returns null outside
- * the desktop app; throws only if the shell answered with an error, which means
- * the sidecar failed to start and the caller should fall back to mock data.
- */
-export async function sidecarHandshake(): Promise<SidecarHandshake | null>{
-    if(!isTauri()){
-        return null;
-    }
-    const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<SidecarHandshake>("sidecar_handshake");
+/** Where the Rust shell is in bringing the sidecar up. Mirrors `backend.rs`. */
+export type BackendPhase =
+    | { phase: "checking" }
+    | { phase: "installing"; step: string; done: number; total: number }
+    | { phase: "starting" }
+    | { phase: "ready"; handshake: SidecarHandshake }
+    | { phase: "failed"; message: string };
+
+export type BackendStatus = BackendPhase & {
+    /** This launch ran the first-run install, or an update of it. */
+    installed: boolean;
+    notes: string[];
+    log: string[];
+};
+
+async function invoke<T>(cmd: string): Promise<T>{
+    const core = await import("@tauri-apps/api/core");
+    return await core.invoke<T>(cmd);
+}
+
+/** Polled by the boot screen until the phase is `ready` or `failed`. */
+export function backendStatus(): Promise<BackendStatus>{
+    return invoke<BackendStatus>("backend_status");
+}
+
+/** Boots again after a failure. A no-op while one is running. */
+export function backendRetry(): Promise<void>{
+    return invoke<void>("backend_retry");
+}
+
+/** Deletes the managed Python environment and installs it from scratch. */
+export function backendReset(): Promise<void>{
+    return invoke<void>("backend_reset");
 }
 
 /**
