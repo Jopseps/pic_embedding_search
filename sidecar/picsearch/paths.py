@@ -47,6 +47,17 @@ def cache_dir() -> Path:
     return _resolve(ENV_CACHE_DIR, user_cache_dir(APP_NAME))
 
 
+def subtree_prefix(path: str | Path) -> str:
+    """`path` with one trailing separator: what every stored path under it
+    starts with.
+
+    The platform's separator, not `/`: stored paths are `str(Path(...))`, so on
+    Windows they read `C:\\Users\\…`, and a `/`-joined prefix silently matches
+    nothing — no pruning, no folder filter, no directory rename.
+    """
+    return str(path).rstrip("/" + os.sep) + os.sep
+
+
 def db_path() -> Path:
     return data_dir() / "index.db"
 

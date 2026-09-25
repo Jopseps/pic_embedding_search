@@ -42,7 +42,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import imaging
+from . import imaging, paths
 from .index import Indexer, indexable_under, walk_images
 from .store import Store
 
@@ -245,7 +245,7 @@ class FolderWatcher:
 
     def remove_dir(self, path: Path | str) -> None:
         """A directory went away. Some backends report only this, not its files."""
-        prefix = str(Path(path)).rstrip("/") + "/"
+        prefix = paths.subtree_prefix(Path(path))
         rows = self.store.conn().execute(
             "SELECT path FROM images WHERE path LIKE ?", (prefix + "%",)
         ).fetchall()
@@ -258,7 +258,7 @@ class FolderWatcher:
 
     def move_dir(self, src: Path | str, dest: Path | str) -> None:
         """A directory was renamed: repoint every row under it, then walk."""
-        prefix = str(Path(src)).rstrip("/") + "/"
+        prefix = paths.subtree_prefix(Path(src))
         rows = self.store.conn().execute(
             "SELECT path FROM images WHERE path LIKE ?", (prefix + "%",)
         ).fetchall()

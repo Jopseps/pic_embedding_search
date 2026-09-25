@@ -27,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from . import paths
 from .paths import db_path
 
 SCHEMA_VERSION = 1
@@ -496,8 +497,9 @@ class Store:
             c.commit()
 
     def folder_count(self, path: str) -> int:
+        prefix = paths.subtree_prefix(path)
         return int(self.conn().execute(
-            "SELECT count(*) AS n FROM images WHERE path LIKE ?", (path.rstrip("/") + "/%",)
+            "SELECT count(*) AS n FROM images WHERE path LIKE ?", (prefix + "%",)
         ).fetchone()["n"])
 
     # -- collections --------------------------------------------------------

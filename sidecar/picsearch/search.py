@@ -22,6 +22,7 @@ Design notes that are decisions, not accidents:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -33,6 +34,7 @@ from typing import Any
 
 import numpy as np
 
+from . import paths
 from .dupes import DupeIndex
 from .store import Store
 
@@ -183,9 +185,11 @@ class SearchParams:
             return 0
 
 
-# SQLite has no dirname(); rtrim(path, replace(path,'/','')) strips the basename
-# by trimming every trailing character that is not a slash.
-DIRNAME_SQL = "rtrim(rtrim(images.path, replace(images.path, '/', '')), '/')"
+# SQLite has no dirname(); rtrim(path, replace(path,sep,'')) strips the basename
+# by trimming every trailing character that is not a separator. The platform's
+# separator: stored paths are `str(Path)`, backslashes on Windows. (A backslash
+# is literal inside an SQL string, so no escaping is needed here.)
+DIRNAME_SQL = f"rtrim(rtrim(images.path, replace(images.path, '{os.sep}', '')), '{os.sep}')"
 
 
 def _like_subtree(folder: str) -> str:
@@ -195,12 +199,12 @@ def _like_subtree(folder: str) -> str:
     act as wildcards.
     """
     escaped = (
-        folder.rstrip("/")
+        paths.subtree_prefix(folder)
         .replace("\\", "\\\\")
         .replace("%", "\\%")
         .replace("_", "\\_")
     )
-    return escaped + "/%"
+    return escaped + "%"
 
 
 def build_filter_sql(params: SearchParams) -> tuple[str, list]:
@@ -224,7 +228,7 @@ def build_filter_sql(params: SearchParams) -> tuple[str, list]:
         parts = []
         for folder in params.folders:
             parts.append(f"({DIRNAME_SQL} = ? OR images.path LIKE ? ESCAPE '\\')")
-            args.extend([folder.rstrip("/"), _like_subtree(folder)])
+            args.extend([paths.subtree_prefix(folder)[:-1], _like_subtree(folder)])
         clauses.append("(" + " OR ".join(parts) + ")")
 
     days = DATE_PRESET_DAYS.get(params.date or "")

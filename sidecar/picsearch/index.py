@@ -648,7 +648,7 @@ class Indexer:
             p = row["path"]
             if(p in seen):
                 continue
-            if(not any(p == r or p.startswith(r.rstrip("/") + "/") for r in roots)):
+            if(not any(p == r or p.startswith(paths.subtree_prefix(r)) for r in roots)):
                 continue
             if(not Path(p).exists()):
                 gone.append(int(row["id"]))
