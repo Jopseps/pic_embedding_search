@@ -2,6 +2,8 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+# Fetched by scripts/fetch-uv.mjs, per target triple. Never committed.
+src-tauri/binaries/
 
 # Python sidecar
 sidecar/.venv/

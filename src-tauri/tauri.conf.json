@@ -1,6 +1,6 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
-    "productName": "Photo Search",
+    "productName": "PicSearch",
     "version": "0.1.0",
     "identifier": "dev.picsearch.app",
     "build": {
@@ -12,7 +12,7 @@
     "app": {
         "windows": [
             {
-                "title": "Photo Search",
+                "title": "PicSearch",
                 "width": 1440,
                 "height": 900,
                 "minWidth": 1100,
@@ -28,7 +28,43 @@
     },
     "bundle": {
         "active": true,
-        "targets": ["deb", "appimage"],
-        "icon": ["icons/icon.png"]
-    }
+        "targets": [
+            "deb",
+            "appimage",
+            "nsis"
+        ],
+        "category": "Photography",
+        "shortDescription": "Local semantic photo and screenshot search",
+        "longDescription": "Search your photos and screenshots with natural language, in English and Turkish. Everything runs on your machine: SigLIP 2 embeddings on the GPU, Tesseract OCR, no cloud.",
+        "publisher": "Jopseps",
+        "homepage": "https://github.com/Jopseps/pic_embedding_search",
+        "license": "MIT",
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.png",
+            "icons/icon.ico"
+        ],
+        "linux": {
+            "deb": {
+                "depends": [
+                    "tesseract-ocr",
+                    "tesseract-ocr-eng"
+                ],
+                "recommends": [
+                    "tesseract-ocr-tur"
+                ]
+            },
+            "appimage": {
+                "bundleMediaFramework": false
+            }
+        },
+        "windows": {
+            "nsis": {
+                "installMode": "currentUser"
+            }
+        }
+    },
+    "mainBinaryName": "picsearch"
 }

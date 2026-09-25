@@ -1,0 +1,13 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "bundle": {
+        "externalBin": [
+            "binaries/picsearch-uv"
+        ],
+        "resources": {
+            "../sidecar/picsearch/*.py": "sidecar/picsearch/",
+            "../sidecar/pyproject.toml": "sidecar/pyproject.toml",
+            "../sidecar/uv.lock": "sidecar/uv.lock"
+        }
+    }
+}
