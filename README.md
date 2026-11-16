@@ -10,6 +10,7 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 - **Find visually similar** — from any photo, or by dropping an image onto the window
 - **Swappable models** — change the embedding model and search keeps working while the library re-embeds
 - **Filters, collections, saved searches** — a saved search restores its filters, not just its words
+- **Stays in sync** — watched folders update live; deleting in the app moves the file to the system trash
 - **Near-duplicate detection** — perceptual hashing, so two photos of the same thing group and two screenshots of the same app do not
 
 ## Install
@@ -107,7 +108,9 @@ Storage follows the XDG spec — index and thumbnails in `~/.local/share/pic-sea
 
 ## Contributing
 
-Read `CLAUDE.md` first. Two things routinely surprise people:
+Before opening a pull request, run the checks: `npm run typecheck && npm test`, `cd sidecar && uv run pytest && uv run ruff check .`, `cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test`.
+
+Three things routinely surprise people:
 
 - **The brace style is deliberate** (`if(cond){` / `}else{`). There is no Prettier and there must not be — it cannot express this and will silently rewrite every file.
 - **Embeddings are keyed by `(image_id, model_id)`.** Switching models does not delete the old vectors, which is what makes switching back instant.
@@ -115,4 +118,4 @@ Read `CLAUDE.md` first. Two things routinely surprise people:
 
 ## License
 
-MIT
+[MIT](LICENSE)
