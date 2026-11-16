@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-from . import config, embed, ocr, paths
+from . import config, embed, ocr, paths, system
 from .doctor import hf_cache_dir, weights_dir
 
 log = logging.getLogger(__name__)
@@ -102,7 +102,11 @@ def fetch(model_id: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="download the active model's weights")
     parser.add_argument("--model", default=None, help="defaults to modelId in config.toml")
+    parser.add_argument("--parent-pid", type=int, default=None, help="exit with this process")
     args = parser.parse_args(argv)
+    if(args.parent_pid is not None):
+        # An app killed mid-download must not leave this one fetching 1.5 GB.
+        system.start_parent_watchdog(args.parent_pid)
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
     settings = config.load()

@@ -15,12 +15,17 @@ Kept in one module so the rest of the sidecar never branches on
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 
 WINDOWS = sys.platform == "win32"
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +66,36 @@ def _pid_alive_windows(pid: int) -> bool:
         return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(handle)
+
+
+def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) -> None:
+    """Exit hard when the process we belong to disappears.
+
+    Rust also kills the child on window-destroy and on panic, but the happy
+    path alone is not enough: this is what survives `pkill -9` on Tauri, and an
+    orphan holding VRAM is the failure this whole design guards against.
+
+    `--parent-pid` exists because Tauri spawns us through `uv`, so our direct
+    parent is not the process whose death matters. Watching *liveness of a pid*
+    rather than comparing `getppid()` is what makes that case work — an earlier
+    version compared ppid and killed the sidecar the instant it started, since
+    `uv`'s pid never equals Tauri's.
+    """
+    target = parent_pid if parent_pid is not None else os.getppid()
+    # Reparenting is only meaningful when we are watching our own parent.
+    watch_reparent = parent_pid is None
+
+    def watch() -> None:
+        while(True):
+            time.sleep(interval)
+            if(not pid_alive(target)):
+                log.warning("watched process %s is gone; exiting", target)
+                os._exit(0)
+            if(watch_reparent and os.getppid() != target):
+                log.warning("reparented away from %s; exiting", target)
+                os._exit(0)
+
+    threading.Thread(target=watch, name="picsearch-parent-watchdog", daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
