@@ -110,7 +110,7 @@ fn dev_plan() -> Result<Plan, String>{
 fn dev_launch(dir: PathBuf) -> Launch{
     Launch{
         program: PathBuf::from("uv"),
-        args: ["run", "python", "-m", "picsearch.server"].map(String::from).to_vec(),
+        args: ["run", "python", "-m", "picsearch.server", "--scan-on-start"].map(String::from).to_vec(),
         cwd: dir,
         envs: Vec::new(),
     }
@@ -147,7 +147,7 @@ impl Runtime{
     fn launch(&self) -> Launch{
         Launch{
             program: self.python(),
-            args: ["-m", "picsearch.server"].map(String::from).to_vec(),
+            args: ["-m", "picsearch.server", "--scan-on-start"].map(String::from).to_vec(),
             cwd: self.source.clone(),
             // ~/.local/lib/python3.x/site-packages must not leak into a venv
             // whose whole point is that it is exactly the lockfile.

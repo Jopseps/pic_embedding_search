@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "fetch-uv": "node scripts/fetch-uv.mjs",
     "package": "node scripts/package.mjs",
+    "fastbuild": "bash scripts/fastbuild.sh",
     "doctor": "cd sidecar && uv run python -m picsearch.doctor"
   },
   "dependencies": {
