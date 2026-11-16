@@ -16,6 +16,7 @@ dependencies = [
     "sentencepiece>=0.2",
     "protobuf>=5.28",
     "watchdog>=6.0",
+    "send2trash>=1.8",
 ]
 
 # The default OCR engine is tesseract, which is a system binary and needs no
@@ -85,6 +86,11 @@ target-version = "py313"
 select = ["E", "F", "I", "B"]
 # E271/E275: `if(cond):` reads as a keyword missing whitespace to ruff.
 ignore = ["E271", "E275", "B008"]
+
+# test_v1_features.py reuses test_search's fixtures by importing them, which is
+# what F811 reads as a redefinition.
+[tool.ruff.lint.per-file-ignores]
+"tests/test_v1_features.py" = ["F811"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

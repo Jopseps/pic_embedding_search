@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from picsearch import system
 from picsearch.index import Indexer
 from picsearch.search import (
     Searcher,
@@ -634,12 +635,14 @@ def test_settings_rejects_an_unknown_model(client):
     assert client.get("/settings").json()["modelId"] == MODEL
 
 
-def test_deleting_images_drops_rows_and_vectors(client, app_state):
+def test_deleting_images_drops_rows_and_vectors(client, app_state, monkeypatch):
+    # The route moves the file to the real trash; here it only has to unlink.
+    monkeypatch.setattr(system, "move_to_trash", lambda path: Path(path).unlink())
     items = client.get("/search", params={"q": ""}).json()["items"]
     victim = items[0]["id"]
 
     res = client.request("DELETE", "/images", json={"ids": [victim]})
-    assert res.json() == {"removed": 1}
+    assert res.json() == {"removed": 1, "failed": []}
     assert app_state.vectors.size == 9
     assert victim not in [i["id"] for i in client.get("/search", params={"q": ""}).json()["items"]]
 

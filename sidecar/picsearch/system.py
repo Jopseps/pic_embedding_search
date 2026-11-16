@@ -99,6 +99,22 @@ def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) 
 
 
 # ---------------------------------------------------------------------------
+# Trash
+# ---------------------------------------------------------------------------
+
+def move_to_trash(path: Path) -> None:
+    """Move one file to the OS trash. Raises when it cannot.
+
+    The only place the sidecar deletes a user's file, and it never falls back to
+    a permanent delete: a caller that gets an exception reports the file as not
+    moved. One function so tests can replace it.
+    """
+    from send2trash import send2trash
+
+    send2trash(str(path))
+
+
+# ---------------------------------------------------------------------------
 # Tesseract
 # ---------------------------------------------------------------------------
 

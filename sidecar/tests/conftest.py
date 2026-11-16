@@ -26,3 +26,15 @@ def store(xdg_tmp):
     s = Store()
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_trash(monkeypatch):
+    """No test may reach the user's trash. A test that needs the move to work
+    replaces `system.move_to_trash` itself."""
+    from picsearch import system
+
+    def refuse(path):
+        raise AssertionError(f"a test tried to trash {path} for real")
+
+    monkeypatch.setattr(system, "move_to_trash", refuse)

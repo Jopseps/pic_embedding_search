@@ -7,11 +7,13 @@ those wrong and the UI silently shows the wrong photos rather than erroring.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from test_search import COLORS, MODEL, ColorEmbedder, make_image
 
+from picsearch import system
 from picsearch.search import SearchParams
 from picsearch.server import TOKEN_HEADER, AppState, create_app
 
@@ -134,7 +136,8 @@ def test_deleting_a_collection_leaves_the_images(client):
     assert all(i["collections"] == [] for i in client.get("/search").json()["items"])
 
 
-def test_deleting_an_image_drops_its_membership(client):
+def test_deleting_an_image_drops_its_membership(client, monkeypatch):
+    monkeypatch.setattr(system, "move_to_trash", lambda path: Path(path).unlink())
     coll = client.post("/collections", json={"name": "Refs"}).json()
     picked = ids_of(client)[:2]
     client.post(f"/collections/{coll['id']}/items", json={"ids": picked})
