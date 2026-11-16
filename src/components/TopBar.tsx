@@ -2,7 +2,6 @@ import { memo, useEffect, useRef, useState } from "react";
 import { activeSort, useStore } from "../lib/store";
 import { SORT_OPTIONS } from "../lib/catalog";
 import { fmtCount, fmtEta } from "../lib/format";
-import { isMockMode } from "../lib/api";
 
 const RING_CIRCUMFERENCE = 37.7;
 
@@ -229,7 +228,9 @@ function IndexingIndicator(){
                     </svg>
                 )}
                 <span className="whitespace-nowrap text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
-                    {complete
+                    {indexing.paused
+                        ? "Indexing paused"
+                        : complete
                         ? "Up to date"
                         : `Indexing ${fmtCount(indexing.current)} / ${fmtCount(indexing.total)}`}
                 </span>
@@ -248,18 +249,13 @@ function IndexingIndicator(){
                         <span>{indexing.rate} img/s</span>
                         <span>ETA {fmtEta(indexing.etaSec)}</span>
                     </div>
-                    {/* The sidecar has no pause route yet: outside mock mode
-                        this would flip a label until the next event and
-                        change nothing. */}
-                    {isMockMode ? (
-                        <button
-                            type="button"
-                            onClick={togglePause}
-                            className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
-                        >
-                            {indexing.paused ? "Resume indexing" : "Pause indexing"}
-                        </button>
-                    ) : null}
+                    <button
+                        type="button"
+                        onClick={() => void togglePause()}
+                        className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
+                    >
+                        {indexing.paused ? "Resume indexing" : "Pause indexing"}
+                    </button>
                 </div>
             ) : null}
         </div>

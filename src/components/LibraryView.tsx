@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { activeSort, searchKey, sectionsByDate, useStore } from "../lib/store";
+import { activeSort, EXTERNAL_ID, searchKey, sectionsByDate, useStore } from "../lib/store";
 import { GRID_GAP, SORT_OPTIONS } from "../lib/catalog";
 import { visibleRange } from "../lib/grid";
 import { buildMarks } from "../lib/timeline";
@@ -43,7 +43,10 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const isSearch = mode === "results" || mode === "emptySearch";
     const title = useMemo(() => {
         if(isSearch){
-            return similarTo !== null ? "Visually similar" : "Search results";
+            if(similarTo === null){
+                return "Search results";
+            }
+            return similarTo.id === EXTERNAL_ID ? `Similar to ${similarTo.filename}` : "Visually similar";
         }
         if(activeCollection !== null){
             return collections.find((c) => c.id === activeCollection)?.name ?? "Collection";
@@ -496,7 +499,7 @@ function SelectionBar(){
     const menuOpen = useStore((s) => s.collectionMenuOpen);
     const toggleMenu = useStore((s) => s.toggleCollectionMenu);
     const reveal = useStore((s) => s.revealSelected);
-    const del = useStore((s) => s.deleteSelected);
+    const del = useStore((s) => s.requestDelete);
 
     if(count === 0){
         return null;
@@ -513,7 +516,7 @@ function SelectionBar(){
                 {menuOpen ? <CollectionMenu /> : null}
             </div>
             <Button variant="subtle" onClick={() => void reveal()}>Reveal in files</Button>
-            <Button variant="danger" onClick={() => void del()}>Delete</Button>
+            <Button variant="danger" onClick={del}>Move to trash</Button>
             <button
                 type="button"
                 onClick={clear}

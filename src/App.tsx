@@ -7,6 +7,8 @@ import { Sidebar } from "./components/Sidebar";
 import { LibraryView } from "./components/LibraryView";
 import { SettingsView } from "./components/SettingsView";
 import { Lightbox } from "./components/Lightbox";
+import { TrashDialog } from "./components/TrashDialog";
+import { listenFileDrop } from "./lib/tauri";
 
 export default function App(){
     const grid = useGridLayout();
@@ -41,7 +43,6 @@ export default function App(){
     const startEventStream = useStore((s) => s.startEventStream);
     const toggleSidebar = useStore((s) => s.toggleSidebar);
     const setDragging = useStore((s) => s.setDragging);
-    const showToast = useStore((s) => s.showToast);
 
     // ---- boot -------------------------------------------------------------
     useEffect(() => {
@@ -186,6 +187,15 @@ export default function App(){
                 return;
             }
 
+            if(s.deleteConfirm){
+                // The dialog owns the keyboard: Esc is Cancel, and nothing
+                // underneath (selection, lightbox, grid focus) may react.
+                if(e.key === "Escape"){
+                    s.cancelDelete();
+                }
+                return;
+            }
+
             if(e.key === "Escape"){
                 if(s.view === "settings" && s.lightboxIndex === null){
                     // Settings has nothing to clear; a stale query or selection
@@ -322,7 +332,31 @@ export default function App(){
         };
     }, []);
 
-    // ---- drag & drop ------------------------------------------------------
+    // ---- file drop from the OS --------------------------------------------
+    // The desktop shell delivers the drop (with real paths) through Tauri, and
+    // HTML5 drop events do not fire there; the handlers further down serve the
+    // browser dev server. Own-drag filtering lives in `listenFileDrop`.
+    useEffect(() => {
+        let off: (() => void) | null = null;
+        let dead = false;
+        void listenFileDrop({
+            enter: () => setDragging(true),
+            leave: () => setDragging(false),
+            drop: (paths) => void useStore.getState().dropFiles(paths),
+        }).then((unlisten) => {
+            if(dead){
+                unlisten();
+            }else{
+                off = unlisten;
+            }
+        });
+        return () => {
+            dead = true;
+            off?.();
+        };
+    }, [setDragging]);
+
+    // ---- drag & drop (browser) --------------------------------------------
     // A depth counter is required: dragenter/dragleave fire per descendant, so a
     // naive boolean flickers as the pointer crosses child elements.
     const dragDepth = useCallback(() => {
@@ -352,11 +386,10 @@ export default function App(){
         const w = dragDepth();
         w.__dragDepth = 0;
         setDragging(false);
-        const file = e.dataTransfer.files[0];
-        if(file === undefined){
-            return;
-        }
-        showToast(`Searching for images similar to ${file.name}…`);
+        // A browser hands over no path, only a name; the mock adapter is the only
+        // one that can be asked with that.
+        const names = [...e.dataTransfer.files].map((f) => f.name);
+        void useStore.getState().dropFiles(names);
     }
 
     return (
@@ -425,6 +458,7 @@ export default function App(){
             </div>
 
             <Lightbox flat={grid.layout.flat} />
+            <TrashDialog />
 
             {isDragging ? (
                 <div className="pointer-events-none fixed inset-0 z-[200] flex items-center justify-center border-[calc(3px*var(--ui-scale))] border-dashed border-accent bg-accent-muted/90">

@@ -185,12 +185,15 @@ function FoldersSection(){
     const folders = useStore((s) => s.folders);
     const toggleRecursive = useStore((s) => s.toggleRecursive);
     const removeFolder = useStore((s) => s.removeFolder);
+    const confirming = useStore((s) => s.removeFolderConfirm);
+    const requestRemove = useStore((s) => s.requestRemoveFolder);
+    const cancelRemove = useStore((s) => s.cancelRemoveFolder);
     const addFolder = useStore((s) => s.addFolder);
 
     return (
         <Group
             title="Watched folders"
-            hint="Folders indexed for search. Screenshots are detected automatically and get an OCR pass."
+            hint="Folders indexed for search. Screenshots are detected automatically and get an OCR pass. Removing a folder takes its photos out of the library; the files on disk are never touched."
         >
             {folders.map((f) => (
                 <div key={f.path} className="flex items-center gap-[calc(10px*var(--ui-scale))] border-b border-edge py-[calc(10px*var(--ui-scale))]">
@@ -202,19 +205,45 @@ function FoldersSection(){
                             {fmtCount(f.count)} images
                         </div>
                     </div>
-                    <Toggle
-                        label="Recursive"
-                        on={f.recursive}
-                        onClick={() => void toggleRecursive(f.path)}
-                    />
-                    <button
-                        type="button"
-                        onClick={() => void removeFolder(f.path)}
-                        aria-label={`Stop watching ${f.path}`}
-                        className="flex-shrink-0 cursor-pointer px-1 py-[calc(2px*var(--ui-scale))] text-[calc(14px*var(--ui-scale))] text-fg-faint hover:text-danger"
-                    >
-                        ✕
-                    </button>
+                    {confirming === f.path ? (
+                        <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2">
+                            <span className="max-w-[calc(260px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim">
+                                Remove {fmtCount(f.count)} images from the library? The files stay on disk.
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => void removeFolder(f.path)}
+                                className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-white hover:opacity-90"
+                            >
+                                Remove
+                            </button>
+                            <button
+                                type="button"
+                                autoFocus
+                                onClick={cancelRemove}
+                                className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <Toggle
+                                label="Recursive"
+                                on={f.recursive}
+                                onClick={() => void toggleRecursive(f.path)}
+                            />
+                            <button
+                                type="button"
+                                onClick={() => requestRemove(f.path)}
+                                aria-label={`Stop watching ${f.path}`}
+                                title="Stop watching and remove its photos from the library (files stay on disk)"
+                                className="flex-shrink-0 cursor-pointer px-1 py-[calc(2px*var(--ui-scale))] text-[calc(14px*var(--ui-scale))] text-fg-faint hover:text-danger"
+                            >
+                                ✕
+                            </button>
+                        </>
+                    )}
                 </div>
             ))}
             <Button onClick={() => void addFolder()} className="mt-3">+ Add folder</Button>

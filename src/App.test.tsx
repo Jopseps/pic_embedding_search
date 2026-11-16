@@ -618,4 +618,91 @@ describe("App", () => {
         expect(useStore.getState().addingCollection).toBe(false);
         expect(useStore.getState().query).toBe("masa");
     });
+
+    it("asks before moving to the trash: Cancel is focused, Esc cancels, nothing is deleted", async () => {
+        await mountApp();
+        // The top bar grabs focus for the search box 60 ms after launch.
+        await act(async () => {
+            await new Promise((r) => setTimeout(r, 100));
+        });
+        const del = vi.spyOn(api, "deletePhotos").mockResolvedValue({ removed: 2, failed: [] });
+        const ids = useStore.getState().results.slice(0, 2).map((p) => p.id);
+        await act(async () => {
+            useStore.setState({ selectedIds: new Set(ids) });
+        });
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "Move to trash" }));
+        });
+        const dialog = screen.getByRole("alertdialog");
+        expect(within(dialog).getByText("Move 2 photos to the trash?")).toBeTruthy();
+        expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+
+        fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+        expect(screen.queryByRole("alertdialog")).toBeNull();
+        // Esc was Cancel only: it did not also clear the selection underneath.
+        expect(useStore.getState().selectedIds.size).toBe(2);
+        expect(del).not.toHaveBeenCalled();
+    });
+
+    it("the confirm button moves the selection to the trash", async () => {
+        await mountApp();
+        const del = vi.spyOn(api, "deletePhotos").mockResolvedValue({ removed: 1, failed: [] });
+        const id = useStore.getState().results[0]!.id;
+        await act(async () => {
+            useStore.setState({ selectedIds: new Set([id]), deleteConfirm: true });
+        });
+        const dialog = screen.getByRole("alertdialog");
+        expect(within(dialog).getByText("Move 1 photo to the trash?")).toBeTruthy();
+        await act(async () => {
+            fireEvent.click(within(dialog).getByRole("button", { name: "Move to trash" }));
+        });
+        expect(del).toHaveBeenCalledWith([id]);
+        expect(screen.queryByRole("alertdialog")).toBeNull();
+    });
+
+    it("shows the pause button in the real app too, and it calls the api", async () => {
+        await mountApp();
+        const pause = vi.spyOn(api, "setIndexingPaused").mockResolvedValue();
+        await act(async () => {
+            fireEvent.click(screen.getByText(/Indexing \d/));
+        });
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "Pause indexing" }));
+        });
+        expect(pause).toHaveBeenCalledWith(true);
+        expect(screen.getByText("Indexing paused")).toBeTruthy();
+    });
+
+    it("a browser file drop runs find-similar and shows the file's name", async () => {
+        await mountApp();
+        const root = document.querySelector("div.h-screen")!;
+        const file = new File(["x"], "cat.jpg", { type: "image/jpeg" });
+        await act(async () => {
+            fireEvent.dragEnter(root, { dataTransfer: { files: [file] } });
+        });
+        expect(screen.getByText("Drop to find similar photos")).toBeTruthy();
+        await act(async () => {
+            fireEvent.drop(root, { dataTransfer: { files: [file] } });
+        });
+        await waitFor(() => expect(useStore.getState().similarTo?.filename).toBe("cat.jpg"));
+        expect(screen.queryByText("Drop to find similar photos")).toBeNull();
+        expect(await screen.findByText("Similar to cat.jpg")).toBeTruthy();
+    });
+
+    it("removing a watched folder asks first and says the files stay on disk", async () => {
+        await mountApp();
+        const remove = vi.spyOn(api, "removeFolder").mockResolvedValue();
+        await act(async () => {
+            useStore.getState().setView("settings");
+        });
+        await act(async () => {
+            fireEvent.click(screen.getAllByLabelText(/^Stop watching /)[0]!);
+        });
+        expect(remove).not.toHaveBeenCalled();
+        expect(screen.getByText(/images from the library\? The files stay on disk/)).toBeTruthy();
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+        });
+        expect(remove).toHaveBeenCalledTimes(1);
+    });
 });
