@@ -420,3 +420,104 @@ def test_a_result_is_stamped_with_the_engine_that_produced_it(store: Store, libr
     assert (row["langs"], row["text"]) == ("eng", "old engine")
     # And it is still stale under the new engine, so the backfill picks it up.
     assert shot in store.images_missing_ocr("fake", "eng+tur")
+
+
+# -- a scan that fails, and rows it leaves behind -----------------------------
+
+def test_a_failed_scan_gives_the_ingest_slot_back(indexer: Indexer, library):
+    """An exception out of the GPU batch used to leave `status.running` set, so
+    every later scan, watcher flush and model swap reported "busy" for good."""
+    def boom(images, batch_size=32):
+        raise RuntimeError("CUDA out of memory")
+
+    indexer.embedder.embed_pil = boom
+    with pytest.raises(RuntimeError):
+        indexer.scan([(library, True)])
+    assert indexer.status.running is False
+    assert indexer._claim() is True
+
+
+def test_scan_embeds_rows_that_were_written_but_never_embedded(
+    indexer: Indexer, store: Store, library
+):
+    """kill -9 between the row write and the batch flush: the fast path skips
+    the file for ever, so only the scan's own backfill can notice."""
+    indexer.scan([(library, True)])
+    model = indexer.embedder.model_id
+    store.conn().execute("DELETE FROM embeddings WHERE image_id <= 5")
+    store.conn().commit()
+    assert len(store.images_missing_embedding(model)) == 5
+
+    seen = []
+    indexer.on_vector = lambda image_id, vec: seen.append(image_id)
+    report = indexer.scan([(library, True)])
+    assert report.embedded == 5
+    assert store.images_missing_embedding(model) == []
+    assert sorted(seen) == [1, 2, 3, 4, 5]    # the live index hears about them too
+
+    assert indexer.scan([(library, True)]).embedded == 0
+
+
+# -- pruning ------------------------------------------------------------------
+
+def test_a_missing_root_prunes_nothing(indexer: Indexer, store: Store, library):
+    """An unmounted drive walks as empty. Reading that as "everything deleted"
+    dropped every row, its collections and its vectors."""
+    indexer.scan([(library, True)])
+    moved = library.parent / "elsewhere"
+    library.rename(moved)
+    report = indexer.scan([(library, True)])
+    assert report.removed == 0
+    assert store.image_count() == 20
+
+
+def test_a_symlinked_root_still_prunes(indexer: Indexer, store: Store, library):
+    """Stored paths come from the unresolved walk; comparing them to a resolved
+    root matched nothing, so nothing under a symlinked folder was ever pruned."""
+    link = library.parent / "link"
+    link.symlink_to(library, target_is_directory=True)
+    indexer.scan([(link, True)])
+    (library / "photo_00.jpg").unlink()
+    assert indexer.scan([(link, True)]).removed == 1
+
+
+# -- thumbnails ---------------------------------------------------------------
+
+def test_a_rescan_rewrites_a_purged_thumbnail_cache(indexer: Indexer, store: Store, library):
+    """Thumbnails exist only from ingest. After "clear thumbnail cache" the grid
+    stayed blank for ever, because the fast path skipped every unchanged file."""
+    import shutil
+
+    indexer.scan([(library, True)])
+    shutil.rmtree(paths.thumbs_dir())
+    before = indexer.embedder.embedded
+
+    report = indexer.scan([(library, True)])
+    assert report.ingested == 0
+    assert indexer.embedder.embedded == before          # still no GPU
+    for row in store.conn().execute("SELECT sha256 FROM images"):
+        for size in imaging.THUMB_SIZES:
+            assert paths.thumb_path(row["sha256"], size).exists()
+
+
+# -- the OCR backfill and the ingest slot ---------------------------------------
+
+def test_the_ocr_backfill_waits_for_a_watcher_batch(indexer: Indexer):
+    """A watcher batch holds the slot on its own thread (`status.running`, no
+    `_thread`). The backfill checked only the thread and ran on top of it."""
+    indexer.status.running = True
+    assert indexer.start_ocr_backfill() is False
+
+
+def test_a_rescan_asked_for_while_busy_runs_later(indexer: Indexer, store: Store, library):
+    """Adding a folder calls `start_rescan`; with the watcher mid-batch that was
+    refused and forgotten, so the folder was never scanned."""
+    store.add_folder(str(library), recursive=True)
+    indexer.status.running = True
+    assert indexer.start_rescan() is False
+    assert indexer.rescan_if_pending() is False          # still busy
+    indexer.status.running = False
+    assert indexer.rescan_if_pending() is True
+    indexer.join(30)
+    assert store.image_count() == 20
+    assert indexer.rescan_if_pending() is False          # asked for once, ran once

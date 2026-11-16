@@ -245,9 +245,9 @@ class FolderWatcher:
 
     def remove_dir(self, path: Path | str) -> None:
         """A directory went away. Some backends report only this, not its files."""
-        prefix = paths.subtree_prefix(Path(path))
         rows = self.store.conn().execute(
-            "SELECT path FROM images WHERE path LIKE ?", (prefix + "%",)
+            "SELECT path FROM images WHERE path LIKE ? ESCAPE '\\'",
+            (paths.like_subtree(Path(path)),),
         ).fetchall()
         if(not rows):
             return
@@ -258,9 +258,9 @@ class FolderWatcher:
 
     def move_dir(self, src: Path | str, dest: Path | str) -> None:
         """A directory was renamed: repoint every row under it, then walk."""
-        prefix = paths.subtree_prefix(Path(src))
         rows = self.store.conn().execute(
-            "SELECT path FROM images WHERE path LIKE ?", (prefix + "%",)
+            "SELECT path FROM images WHERE path LIKE ? ESCAPE '\\'",
+            (paths.like_subtree(Path(src)),),
         ).fetchall()
         with self._lock:
             for row in rows:
@@ -332,6 +332,10 @@ class FolderWatcher:
             self._stop.wait(TICK_SEC)
             if(self._stop.is_set()):
                 break
+            try:
+                self.indexer.rescan_if_pending()
+            except Exception:  # pragma: no cover - a watcher must not die
+                log.exception("pending rescan failed to start")
             if(not self.due()):
                 continue
             try:
@@ -354,6 +358,14 @@ class _Handler(FileSystemEventHandler):
 
     def __init__(self, watcher: FolderWatcher):
         self.watcher = watcher
+
+    def dispatch(self, event) -> None:
+        # watchdog's dispatch thread does not survive an exception: one bad event
+        # would stop all watching while `FolderWatcher.running` still says True.
+        try:
+            super().dispatch(event)
+        except Exception:
+            log.exception("watch event failed: %s", event)
 
     def on_created(self, event) -> None:
         if(event.is_directory):

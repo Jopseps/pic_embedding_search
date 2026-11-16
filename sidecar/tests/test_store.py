@@ -233,3 +233,10 @@ def test_settings_round_trip(store: Store):
     store.set_json_setting("ocr_langs", ["en", "tr"])
     assert store.get_json_setting("ocr_langs") == ["en", "tr"]
     assert store.get_json_setting("nope", default=42) == 42
+
+
+def test_folder_count_does_not_treat_underscore_as_a_wildcard(store: Store):
+    make_image(store, "/pics/my_pics/a.png")
+    make_image(store, "/pics/my_pics/c.png", sha256="cd" * 32)
+    make_image(store, "/pics/myXpics/b.png", sha256="ef" * 32)
+    assert store.folder_count("/pics/my_pics") == 2

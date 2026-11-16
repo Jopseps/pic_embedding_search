@@ -478,3 +478,36 @@ def test_a_watched_deletion_updates_the_duplicate_index(watched):
     watcher.remove(root / "b.jpg")
     watcher.flush()
     assert index.ids == frozenset()
+
+
+# -- directory events and LIKE wildcards ----------------------------------------
+
+def test_a_directory_rename_does_not_touch_a_sibling_with_a_wildcard_lookalike(watched):
+    """`_` is a LIKE wildcard: renaming `my_pics` also matched `myXpics`, and the
+    `relative_to` on a row that was not under it raised ValueError inside
+    watchdog's dispatch thread — which ended all live watching."""
+    watcher, root, store, _indexer, _embedder = watched
+    for sub in ("my_pics", "myXpics"):
+        store.upsert_image(
+            path=str(root / sub / "a.png"), mtime=1.0, size_bytes=1, width=1, height=1,
+            mime="image/png", phash=1, sha256="a" * 64, taken_at=None, is_screenshot=False,
+        )
+    watcher.move_dir(root / "my_pics", root / "renamed")
+    assert watcher._moves == [(str(root / "my_pics" / "a.png"), str(root / "renamed" / "a.png"))]
+
+    watcher.remove_dir(root / "my_pics")
+    assert watcher._forget == {str(root / "my_pics" / "a.png")}
+
+
+def test_a_failing_event_handler_does_not_end_the_dispatch_thread(watched):
+    from watchdog.events import FileCreatedEvent
+
+    from picsearch.watch import _Handler
+
+    watcher, root, *_ = watched
+
+    def boom(_path):
+        raise ValueError("bug in the intake")
+
+    watcher.touch = boom
+    _Handler(watcher).dispatch(FileCreatedEvent(str(root / "a.png")))    # must not raise

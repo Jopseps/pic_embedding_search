@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -151,6 +151,7 @@ class Store:
         self._local = threading.local()
         self._write_lock = threading.RLock()
         self._pixel_epoch = 0
+        self._on_delete: list[Callable[[Sequence[int]], None]] = []
         self._migrate(self.conn())
 
     # -- pixel epoch --------------------------------------------------------
@@ -300,17 +301,31 @@ class Store:
             self._pixel_epoch += 1
             return image_id
 
+    def add_delete_listener(self, fn: Callable[[Sequence[int]], None]) -> None:
+        """Call `fn(ids)` after rows are gone, so the in-memory vector index can
+        follow. A vector left behind outlives its row: search ranks it, `hydrate`
+        drops it, and the page comes back short."""
+        self._on_delete.append(fn)
+
+    def _deleted(self, ids: Sequence[int]) -> None:
+        for fn in self._on_delete:
+            fn(ids)
+
     def delete_images(self, ids: Sequence[int]) -> int:
         if(not ids):
             return 0
         with self._write_lock:
             c = self.conn()
-            marks = ",".join("?" * len(ids))
-            cur = c.execute(f"DELETE FROM images WHERE id IN ({marks})", tuple(ids))
+            cur = c.execute(
+                "DELETE FROM images WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps([int(i) for i in ids]),),
+            )
             c.commit()
             if(cur.rowcount):
                 self._pixel_epoch += 1
-            return cur.rowcount
+        if(cur.rowcount):
+            self._deleted(ids)
+        return cur.rowcount
 
     def move_image(self, old_path: str, new_path: str) -> int | None:
         """Repoint a row at a renamed file. Returns the image id, or None.
@@ -340,9 +355,12 @@ class Store:
             # Landing on an existing row would violate UNIQUE(path). Whatever
             # was at the destination has just been overwritten on disk, so its
             # row is stale — drop it and let the cascade take its rows with it.
-            displaced = c.execute(
-                "DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id)
-            ).rowcount
+            gone = [
+                int(r["id"]) for r in c.execute(
+                    "SELECT id FROM images WHERE path=? AND id!=?", (new_path, image_id)
+                )
+            ]
+            c.execute("DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id))
             c.execute(
                 "UPDATE images SET path=?, name_key=?, taken_at=?, date_source=? WHERE id=?",
                 (new_path, dates.name_key(Path(new_path).name), taken_at, date_source, image_id),
@@ -350,9 +368,11 @@ class Store:
             c.commit()
             # The rename itself changes no pixels and must not invalidate the
             # dupe index. Overwriting a *different* image does — that row is gone.
-            if(displaced):
+            if(gone):
                 self._pixel_epoch += 1
-            return image_id
+        if(gone):
+            self._deleted(gone)
+        return image_id
 
     def image_count(self) -> int:
         return int(self.conn().execute("SELECT count(*) AS n FROM images").fetchone()["n"])
@@ -570,9 +590,9 @@ class Store:
             c.commit()
 
     def folder_count(self, path: str) -> int:
-        prefix = paths.subtree_prefix(path)
         return int(self.conn().execute(
-            "SELECT count(*) AS n FROM images WHERE path LIKE ?", (prefix + "%",)
+            "SELECT count(*) AS n FROM images WHERE path LIKE ? ESCAPE '\\'",
+            (paths.like_subtree(path),),
         ).fetchone()["n"])
 
     # -- collections --------------------------------------------------------
@@ -659,10 +679,10 @@ class Store:
             return 0
         with self._write_lock:
             c = self.conn()
-            marks = ",".join("?" * len(image_ids))
             cur = c.execute(
-                f"DELETE FROM collection_items WHERE collection_id=? AND image_id IN ({marks})",
-                (collection_id, *[int(i) for i in image_ids]),
+                "DELETE FROM collection_items WHERE collection_id=?"
+                " AND image_id IN (SELECT value FROM json_each(?))",
+                (collection_id, json.dumps([int(i) for i in image_ids])),
             )
             c.commit()
             return cur.rowcount

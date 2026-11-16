@@ -170,6 +170,7 @@ class Indexer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._pause = threading.Event()
+        self._rescan_pending = False
 
     # -- events -------------------------------------------------------------
 
@@ -205,7 +206,11 @@ class Indexer:
         """Kick off a scan in the background. False if one is already running."""
         with self._lock:
             if(self.running or self.status.running):
+                # Remembered, not dropped: a folder added while the watcher was
+                # mid-batch was otherwise never scanned. `rescan_if_pending` runs it.
+                self._rescan_pending = True
                 return False
+            self._rescan_pending = False
             self._stop.clear()
             targets = folders if folders is not None else self._enabled_folders()
             self._thread = threading.Thread(
@@ -213,6 +218,10 @@ class Indexer:
             )
             self._thread.start()
             return True
+
+    def rescan_if_pending(self) -> bool:
+        """Start the scan that `start_rescan` had to turn away, once the slot is free."""
+        return self._rescan_pending and self.start_rescan()
 
     def stop(self) -> None:
         self._stop.set()
@@ -265,19 +274,29 @@ class Indexer:
 
         self.status = IndexStatus(total=len(candidates), running=True)
         self._emit("index", self.status.as_wire())
-        self._ingest_many(candidates, report)
+        # `running` must come down however this ends: an exception out of the GPU
+        # batch left it set, and every later scan, watcher flush and swap
+        # then reported "busy" until the sidecar was restarted.
+        try:
+            self._ingest_many(candidates, report)
 
-        if(prune and not self._stop.is_set()):
-            report.removed = self._prune_missing(targets, seen)
+            if(prune and not self._stop.is_set()):
+                report.removed = self._prune_missing(targets, seen)
 
-        # Screenshots indexed before OCR existed — or before the engine or its
-        # languages changed — are read here. A rescan is already an explicit
-        # user action, and unchanged files cost nothing above.
-        if(not self._stop.is_set()):
-            report.ocred += self.ocr_missing()
+            # A row is written before its batch is embedded, so a crash between
+            # the two leaves a row the fast path skips forever. This is the only
+            # place that notices. It is one query when nothing is missing.
+            if(not self._stop.is_set()):
+                report.embedded += self.embed_missing(emit=False)
 
-        self.status.running = False
-        self.status.current_file = ""
+            # Screenshots indexed before OCR existed — or before the engine or its
+            # languages changed — are read here. A rescan is already an explicit
+            # user action, and unchanged files cost nothing above.
+            if(not self._stop.is_set()):
+                report.ocred += self.ocr_missing()
+        finally:
+            self.status.running = False
+            self.status.current_file = ""
         self._emit("index", self.status.as_wire())
         self._emit("scan-complete", self._complete_payload(report))
         return report
@@ -363,7 +382,9 @@ class Indexer:
         """Returns the work left for the batches, or None when the file is unchanged."""
         st = path.stat()
         if(self.store.is_unchanged(str(path), st.st_mtime, st.st_size)):
-            # The fast path. No decode, no hashing, and above all no GPU.
+            # The fast path. No hashing and above all no GPU. Only a purged
+            # thumbnail cache costs a decode, and then no pixel is re-embedded.
+            self._restore_thumbnails(path)
             return None
 
         with imaging.open_image(path) as img:
@@ -397,6 +418,20 @@ class Indexer:
             is_screenshot=is_screenshot,
         )
         return Ingested(image_id, small, ocr_image)
+
+    def _restore_thumbnails(self, path: Path) -> None:
+        """Rewrite thumbnails that are gone from disk. Thumbnails exist only from
+        ingest, so after "clear thumbnail cache" nothing else would ever bring
+        the grid back."""
+        row = self.store.image_by_path(str(path))
+        if(row is None):
+            return
+        wanted = {n: paths.thumb_path(row["sha256"], n) for n in imaging.THUMB_SIZES}
+        if(all(p.exists() for p in wanted.values())):
+            return
+        with imaging.open_image(path) as img:
+            for size, dest in wanted.items():
+                imaging.write_thumbnail(img, dest, size)
 
     # -- watcher entry points ------------------------------------------------
 
@@ -590,8 +625,10 @@ class Indexer:
     def start_ocr_backfill(self) -> bool:
         """Background `ocr_missing()`. False if ingest is already busy."""
         with self._lock:
-            if(self.running):
+            # `status.running` too: a watcher batch holds the slot on its own thread.
+            if(self.running or self.status.running):
                 return False
+            self.status.running = True
             self._stop.clear()
             self._thread = threading.Thread(
                 target=self._run_ocr_backfill, name="picsearch-ocr-backfill", daemon=True
@@ -600,7 +637,6 @@ class Indexer:
             return True
 
     def _run_ocr_backfill(self) -> None:
-        self.status.running = True
         done = 0
         try:
             done = self.ocr_missing()
@@ -642,7 +678,11 @@ class Indexer:
 
     def _prune_missing(self, targets: Sequence[tuple[Path, bool]], seen: set[str]) -> int:
         """Drop rows for files that vanished from a scanned root."""
-        roots = [str(Path(root).resolve()) for root, _rec in targets]
+        # Unresolved, because stored paths come from the unresolved walk — a
+        # symlinked root otherwise never matches. A root that is not there (an
+        # unmounted drive) walked nothing, so "not seen" would read as "deleted"
+        # and drop every row, its collections and its vectors with it.
+        roots = [str(Path(root)) for root, _rec in targets if Path(root).is_dir()]
         if(not roots):
             return 0
         gone: list[int] = []

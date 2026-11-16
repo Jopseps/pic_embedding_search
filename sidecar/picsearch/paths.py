@@ -58,6 +58,18 @@ def subtree_prefix(path: str | Path) -> str:
     return str(path).rstrip("/" + os.sep) + os.sep
 
 
+def like_subtree(path: str | Path) -> str:
+    """LIKE pattern (`ESCAPE '\\'`) matching everything under `path`.
+
+    `%` and `_` are legal in directory names, so they are escaped rather than
+    left to act as wildcards: renaming `my_pics` must not also match `myXpics`.
+    """
+    escaped = (
+        subtree_prefix(path).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return escaped + "%"
+
+
 def db_path() -> Path:
     return data_dir() / "index.db"
 
