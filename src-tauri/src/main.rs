@@ -25,6 +25,15 @@ fn main(){
     sidecar::install_panic_hook();
 
     let app = tauri::Builder::default()
+        // First, as its docs require: a second launch must exit before `setup`
+        // starts a second sidecar (or a second `uv sync` on the same venv).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main"){
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         // Hands the OS a file drag that the frontend starts when the pointer
         // leaves the window. Inside the window the drop targets are ours.
@@ -41,7 +50,7 @@ fn main(){
         ])
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Destroyed){
-                window.state::<Backend>().kill();
+                window.state::<Backend>().shutdown();
             }
         })
         .build(tauri::generate_context!())
@@ -51,7 +60,7 @@ fn main(){
         // Belt and braces: Destroyed already fired for a normal close, but a
         // programmatic exit or a closed last window may not route through it.
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested{ .. }){
-            handle.state::<Backend>().kill();
+            handle.state::<Backend>().shutdown();
         }
     });
 }

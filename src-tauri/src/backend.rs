@@ -21,6 +21,9 @@ use crate::sidecar::{Handshake, Sidecar, Sink};
 
 const LOG_LINES: usize = 200;
 
+/// How often the monitor asks whether the sidecar is still there.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "phase", rename_all = "camelCase")]
 pub enum Phase{
@@ -126,19 +129,62 @@ impl Backend{
         let me = self.clone();
         std::thread::spawn(move || {
             let outcome = me.run(&app);
-            me.with(|s| {
-                s.busy = false;
-                match outcome{
-                    Ok(sidecar) => {
-                        s.phase = Phase::Ready{ handshake: sidecar.handshake.clone() };
-                        s.sidecar = Some(sidecar);
-                    }
-                    Err(message) => {
-                        eprintln!("sidecar unavailable: {message}");
-                        s.phase = Phase::Failed{ message };
-                    }
+            me.finish(outcome);
+        });
+    }
+
+    /// Ends a boot: the sidecar becomes the live one and gets a monitor, or the
+    /// failure becomes the phase.
+    fn finish(&self, outcome: Result<Sidecar, String>){
+        let pid = self.with(|s| {
+            s.busy = false;
+            match outcome{
+                Ok(sidecar) => {
+                    let pid = sidecar.pid();
+                    s.phase = Phase::Ready{ handshake: sidecar.handshake.clone() };
+                    s.sidecar = Some(sidecar);
+                    pid
                 }
+                Err(message) => {
+                    eprintln!("sidecar unavailable: {message}");
+                    s.phase = Phase::Failed{ message };
+                    None
+                }
+            }
+        });
+        if let Some(pid) = pid{
+            self.watch(pid);
+        }
+    }
+
+    /// Notices a sidecar that dies on its own after a good start, so the
+    /// frontend (which keeps polling `backend_status`) can offer a restart.
+    /// Every intentional stop (`kill`) takes the sidecar out of the state under
+    /// the same lock, and the pid check keeps a monitor from judging a newer
+    /// sidecar, so only a real death reaches the `Failed` branch.
+    fn watch(&self, pid: u32){
+        let me = self.clone();
+        std::thread::spawn(move || loop{
+            std::thread::sleep(WATCH_EVERY);
+            let done = me.with(|s| {
+                let Some(sidecar) = s.sidecar.as_mut().filter(|sc| sc.pid() == Some(pid)) else{
+                    return true;
+                };
+                let Some(status) = sidecar.exited() else{
+                    return false;
+                };
+                s.sidecar = None;
+                let line = format!("the sidecar exited on its own: {status}");
+                eprintln!("{line}");
+                s.log.push_back(line);
+                s.phase = Phase::Failed{
+                    message: format!("The search backend stopped unexpectedly ({status}). The log below has its last output."),
+                };
+                true
             });
+            if done{
+                return;
+            }
         });
     }
 
@@ -183,6 +229,12 @@ impl Backend{
         Ok(())
     }
 
+    /// The app is exiting: like `kill`, and nothing may be started afterwards.
+    pub fn shutdown(&self){
+        crate::sidecar::begin_shutdown();
+        self.kill();
+    }
+
     pub fn kill(&self){
         self.with(|s| {
             if let Some(mut sc) = s.sidecar.take(){
@@ -206,4 +258,56 @@ pub fn backend_retry(app: AppHandle){
 #[tauri::command]
 pub fn backend_reset(app: AppHandle) -> Result<(), String>{
     app.state::<Backend>().reset(app.clone())
+}
+
+#[cfg(all(test, unix))]
+mod tests{
+    use super::*;
+    use crate::sidecar::Launch;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    const HELLO: &str = r#"echo '{"port": 4242, "token": "t0k"}'"#;
+
+    fn backend_with(script: &str) -> Backend{
+        let backend = Backend::new();
+        let launch = Launch{
+            program: PathBuf::from("sh"),
+            args: vec!["-c".into(), script.into()],
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        };
+        backend.finish(Sidecar::spawn(&launch, backend.sink()));
+        backend
+    }
+
+    fn failed(backend: &Backend) -> Option<String>{
+        match backend.status().phase{
+            Phase::Failed{ message } => Some(message),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_sidecar_that_dies_after_a_good_start_turns_the_phase_to_failed(){
+        let backend = backend_with(&format!("{HELLO}; echo last words >&2; sleep 1; exit 7"));
+        assert!(matches!(backend.status().phase, Phase::Ready{ .. }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while failed(&backend).is_none() && Instant::now() < deadline{
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let message = failed(&backend).expect("the death was never noticed");
+        assert!(message.contains("stopped unexpectedly"), "{message}");
+        assert!(backend.with(|s| s.sidecar.is_none()), "a retry must be allowed to boot");
+    }
+
+    #[test]
+    fn a_live_sidecar_stays_ready_and_an_intentional_kill_is_not_a_death(){
+        let backend = backend_with(&format!("{HELLO}; exec sleep 60"));
+        std::thread::sleep(WATCH_EVERY * 2 + Duration::from_millis(500));
+        assert!(matches!(backend.status().phase, Phase::Ready{ .. }));
+        backend.kill();
+        std::thread::sleep(WATCH_EVERY * 2 + Duration::from_millis(500));
+        assert!(failed(&backend).is_none(), "an intentional kill was reported as a crash");
+    }
 }

@@ -22,7 +22,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -38,6 +38,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 /// the server and one for whichever setup step (uv, prefetch) is running.
 static CHILD_PID: AtomicU32 = AtomicU32::new(0);
 pub static SETUP_PID: AtomicU32 = AtomicU32::new(0);
+
+/// Set once the app is going away for good, so a boot thread that is between
+/// two steps cannot start a child nothing will ever kill.
+static STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// Where a line of child output goes. The boot screen shows the tail.
 pub type Sink = Arc<dyn Fn(String) + Send + Sync>;
@@ -65,6 +69,9 @@ pub struct Sidecar{
 
 impl Sidecar{
     pub fn spawn(launch: &Launch, sink: Sink) -> Result<Self, String>{
+        if stopping(){
+            return Err("PicSearch is closing".into());
+        }
         // No --model flag: the active model comes from config.toml, and passing
         // one here would silently disagree with the vectors already in the DB.
         let mut child = hidden(&launch.program)
@@ -79,6 +86,10 @@ impl Sidecar{
             .map_err(|e| format!("could not start {}: {e}", launch.program.display()))?;
 
         CHILD_PID.store(child.id(), Ordering::SeqCst);
+        if stopping(){
+            // Shutdown ran between the check above and the pid store.
+            let _ = child.kill();
+        }
 
         let stdout = child.stdout.take().ok_or("sidecar stdout was not piped")?;
         if let Some(stderr) = child.stderr.take(){
@@ -124,6 +135,20 @@ impl Sidecar{
                 Err(format!("the sidecar did not hand over a port within {HANDSHAKE_TIMEOUT:?}"))
             }
         }
+    }
+
+    pub fn pid(&self) -> Option<u32>{
+        self.child.as_ref().map(Child::id)
+    }
+
+    /// The exit status once the child has gone away on its own. Reaps it, so no
+    /// zombie holds the pid, and forgets the pid so `kill_orphan` cannot hit a
+    /// recycled one. `kill()` afterwards is a no-op.
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus>{
+        let status = self.child.as_mut()?.try_wait().ok().flatten()?;
+        self.child = None;
+        CHILD_PID.store(0, Ordering::SeqCst);
+        Some(status)
     }
 
     pub fn kill(&mut self){
@@ -188,6 +213,16 @@ pub fn kill_orphan(){
             kill_pid(pid);
         }
     }
+}
+
+pub fn stopping() -> bool{
+    STOPPING.load(Ordering::SeqCst)
+}
+
+/// The app is exiting: refuse new children, kill the running ones.
+pub fn begin_shutdown(){
+    STOPPING.store(true, Ordering::SeqCst);
+    kill_orphan();
 }
 
 /// Installs a panic hook that takes the sidecar down with the app.

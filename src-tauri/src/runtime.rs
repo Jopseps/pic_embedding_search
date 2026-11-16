@@ -29,7 +29,7 @@ use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::sidecar::{drain, hidden, Launch, Sink, SETUP_PID};
+use crate::sidecar::{drain, hidden, stopping, Launch, Sink, SETUP_PID};
 
 /// Oldest driver that runs the cu130 torch wheels. Anything older gets the CPU
 /// build: CUDA torch on a driver it cannot use is 3 GB that falls back to the
@@ -216,7 +216,8 @@ impl Runtime{
         let launch = self.launch();
         let mut prefetch = hidden(&launch.program);
         prefetch
-            .args(["-m", "picsearch.prefetch"])
+            // The watchdog is what ends it if the app is killed mid-download.
+            .args(["-m", "picsearch.prefetch", "--parent-pid", &std::process::id().to_string()])
             .current_dir(&launch.cwd)
             .envs(launch.envs.iter().map(|(k, v)| (k, v)))
             // tqdm redraws with `\r`, which a line reader sees as one endless
@@ -330,6 +331,9 @@ fn driver_major(line: &str) -> u32{
 /// returns whether to also log it) and every line of stderr to the log. Fails
 /// with the last lines of output, so the boot screen can say *why*.
 fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn FnMut(&str) -> bool) -> Result<(), String>{
+    if stopping(){
+        return Err("PicSearch is closing".into());
+    }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,6 +341,9 @@ fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn
         .spawn()
         .map_err(|e| format!("could not run {:?}: {e}", cmd.get_program()))?;
     SETUP_PID.store(child.id(), Ordering::SeqCst);
+    if stopping(){
+        let _ = child.kill();
+    }
 
     let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     if let Some(stderr) = child.stderr.take(){
