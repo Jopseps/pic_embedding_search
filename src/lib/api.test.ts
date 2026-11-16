@@ -171,6 +171,45 @@ describe("HttpApi event stream", () => {
     });
 });
 
+describe("HttpApi event stream reconnect", () => {
+    it("reopens a dropped stream and says so, so the store can catch up", async () => {
+        vi.useFakeTimers();
+        const seen: SidecarEvent[] = [];
+        const fetchMock = vi.fn(async () => streamResponse([
+            'data: {"type":"dates-refreshed","count":1}\n\n',
+        ]));
+        vi.stubGlobal("fetch", fetchMock);
+
+        const stop = new HttpApi(HANDSHAKE).subscribeEvents((e) => seen.push(e));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(seen.map((e) => e.type)).toEqual(["dates-refreshed"]);
+
+        await vi.advanceTimersByTimeAsync(1100);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(seen.map((e) => e.type)).toEqual(["dates-refreshed", "reconnected", "dates-refreshed"]);
+
+        stop();
+        await vi.advanceTimersByTimeAsync(20000);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        vi.useRealTimers();
+    });
+
+    it("keeps retrying while the sidecar is unreachable", async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi.fn(async () => { throw new TypeError("connection refused"); });
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const stop = new HttpApi(HANDSHAKE).subscribeEvents(() => {});
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(3100);
+        expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+        stop();
+        vi.useRealTimers();
+    });
+});
+
 describe("HttpApi collections and saved searches", () => {
     it("posts image ids to the collection's items route", async () => {
         const fetchSpy = vi.fn(async () => jsonResponse({ added: 2, count: 2 }));

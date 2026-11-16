@@ -38,6 +38,7 @@ import type {
     ResolvedTheme,
     SavedSearch,
     SearchQuery,
+    SearchResponse,
     SearchSort,
     Settings,
     OcrStatus,
@@ -319,7 +320,7 @@ const EMPTY_FILTERS: Filters = {
 /** `limit` is capped here by the sidecar; asking for more is asking for this. */
 const MAX_PAGE = 1000;
 
-function describeError(err: unknown): string{
+export function describeError(err: unknown): string{
     return err instanceof Error ? err.message : String(err);
 }
 
@@ -471,7 +472,12 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     setQuery(q){
+        // The search box is in the top bar of Settings too: typing there has to
+        // show the results, not change a list nobody can see.
         set({ query: q, similarTo: null });
+        if(q.trim() !== ""){
+            set({ view: "library" });
+        }
         clearTimeout(debounceTimer);
         if(q.trim() === ""){
             set({ searching: false, searchSort: "relevance" });
@@ -497,34 +503,44 @@ export const useStore = create<State & Actions>((set, get) => ({
         // vector it had until the incoming one reaches full coverage, so
         // search answers normally for the whole swap — see `confirmModelChange`.
         const seq = ++searchSeq;
-        const limit = opts?.keepLoaded === true
+        const keep = opts?.keepLoaded === true;
+        const limit = keep
             ? Math.min(MAX_PAGE, Math.max(s.settings.pageSize, s.results.length))
             : s.settings.pageSize;
         void get().loadTimeline();
         try{
-            const res = await api.search({ ...currentQuery(s), limit });
+            // "Find similar" is not a /search query: re-running it as one (a
+            // rescan, a filter click) would swap the neighbours for the whole
+            // library under a header that still says "Visually similar".
+            const res = s.similarTo !== null
+                ? await api.similar(s.similarTo.id)
+                : await api.search({ ...currentQuery(s), limit });
             if(seq !== searchSeq){
                 return;
             }
             set({
+                ...reanchor(get(), res.items, keep),
                 results: res.items,
                 total: res.total,
                 tookMs: res.tookMs,
                 cursor: res.cursor,
                 loadingMore: false,
                 searching: false,
-                // A refresh the user did not ask for keeps the focused cell.
-                focusedIndex: opts?.keepLoaded === true ? s.focusedIndex : -1,
                 backendError: null,
             });
         }catch(err){
             if(seq !== searchSeq){
                 return;
             }
-            set({
-                searching: false, loadingMore: false, results: [], total: 0, cursor: null,
-                backendError: describeError(err),
-            });
+            // A refresh nobody asked for must not blank a grid the user is
+            // looking at because the sidecar blipped once.
+            set(keep
+                ? { searching: false, loadingMore: false, backendError: describeError(err) }
+                : {
+                    ...reanchor(get(), [], false),
+                    searching: false, loadingMore: false, results: [], total: 0, cursor: null,
+                    backendError: describeError(err),
+                });
         }
     },
 
@@ -582,6 +598,8 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     async findSimilar(photo){
         const seq = ++searchSeq;
+        // A pending keystroke would otherwise fire a search into similar-mode.
+        clearTimeout(debounceTimer);
         const s = get();
         set({
             searching: true,
@@ -601,7 +619,20 @@ export const useStore = create<State & Actions>((set, get) => ({
                 focusedIndex: s.focusedIndex,
             },
         });
-        const res = await api.similar(photo.id);
+        let res: SearchResponse;
+        try{
+            res = await api.similar(photo.id);
+        }catch(err){
+            if(seq === searchSeq){
+                // Back to what was on screen, or the skeletons never go away.
+                set({
+                    searching: false, query: s.query, similarTo: s.similarTo,
+                    beforeSimilar: s.beforeSimilar,
+                });
+                get().showToast(describeError(err));
+            }
+            return;
+        }
         if(seq !== searchSeq){
             return;
         }
@@ -709,12 +740,16 @@ export const useStore = create<State & Actions>((set, get) => ({
             return;
         }
         set({ pendingCollectionDelete: null });
-        await api.deleteCollection(id);
+        try{
+            await api.deleteCollection(id);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         // Looking at it when it goes is the case worth handling: fall back to
         // the library rather than leaving a view that can never load.
         if(get().activeCollection === id){
-            set({ activeCollection: id === get().activeCollection ? null : get().activeCollection,
-                  libraryView: "all" });
+            set({ activeCollection: null, libraryView: "all" });
         }
         await get().loadCollections();
         await get().loadCounts();
@@ -774,7 +809,12 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     async deleteSavedSearch(id){
-        await api.deleteSavedSearch(id);
+        try{
+            await api.deleteSavedSearch(id);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         await get().loadSavedSearches();
     },
 
@@ -872,8 +912,10 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     setDensity(d){
-        set((st) => ({ density: d, settings: { ...st.settings, density: d } }));
-        void get().persistSettings({ density: d });
+        set({ density: d });
+        // Coalesced like every other preference: Ctrl+wheel steps this once per
+        // notch, and each uncoalesced write is a read-modify-write of config.toml.
+        get().setSetting("density", d);
     },
 
     stepDensity(dir){
@@ -1094,8 +1136,17 @@ export const useStore = create<State & Actions>((set, get) => ({
                     void get().loadCounts();
                     void get().runSearch({ keepLoaded: true });
                 }
+            }else if(event.type === "reconnected"){
+                // Whatever the sidecar announced while the stream was down is
+                // gone, so ask for the state instead of waiting to be told.
+                void get().loadFolders();
+                void get().loadStorage();
+                void get().loadCounts();
+                void get().runSearch({ keepLoaded: true });
             }else if(event.type === "error"){
-                set({ backendError: event.message });
+                // An ingest failure is not "cannot reach the service": the
+                // banner says that and stays until a request succeeds.
+                get().showToast(`Indexing error: ${event.message}`);
             }
         });
     },
@@ -1326,9 +1377,18 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     async addFolder(){
-        const added = await api.addFolder();
+        let added;
+        try{
+            added = await api.addFolder();
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         if(added === null){
-            get().showToast("Folder picker requires the desktop shell");
+            // Outside the browser a null is the user cancelling the picker.
+            if(isMockMode){
+                get().showToast("Folder picker requires the desktop shell");
+            }
             return;
         }
         await get().loadFolders();
@@ -1336,7 +1396,12 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     async removeFolder(path){
-        await api.removeFolder(path);
+        try{
+            await api.removeFolder(path);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         await get().loadFolders();
         get().showToast("Folder removed");
     },
@@ -1346,7 +1411,12 @@ export const useStore = create<State & Actions>((set, get) => ({
         if(folder === undefined){
             return;
         }
-        await api.setFolderRecursive(path, !folder.recursive);
+        try{
+            await api.setFolderRecursive(path, !folder.recursive);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         await get().loadFolders();
     },
 
@@ -1371,8 +1441,13 @@ export const useStore = create<State & Actions>((set, get) => ({
             set({ clearCacheConfirm: true });
             return;
         }
-        await api.clearThumbnailCache();
         set({ clearCacheConfirm: false });
+        try{
+            await api.clearThumbnailCache();
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         await get().loadStorage();
         get().showToast("Thumbnail cache cleared");
     },
@@ -1396,7 +1471,13 @@ export const useStore = create<State & Actions>((set, get) => ({
         if(ids.length === 0){
             return;
         }
-        await api.deletePhotos(ids);
+        try{
+            await api.deletePhotos(ids);
+        }catch(err){
+            // The selection stays, so the user can retry.
+            get().showToast(describeError(err));
+            return;
+        }
         set({ selectedIds: new Set(), collectionMenuOpen: false });
         await get().loadCounts();
         // Deleting around row 400 must not collapse the grid to page one.
@@ -1406,7 +1487,12 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     async revealSelected(){
         const ids = [...get().selectedIds];
-        await api.revealInFiles(ids);
+        try{
+            await api.revealInFiles(ids);
+        }catch(err){
+            get().showToast(describeError(err));
+            return;
+        }
         get().showToast("Revealing in file manager…");
     },
 
@@ -1436,7 +1522,13 @@ export const useStore = create<State & Actions>((set, get) => ({
         }finally{
             set({ collectionMenuOpen: false });
         }
-        set({ selectedIds: new Set() });
+        // Only the photos that went in leave the selection: filing one photo
+        // from the lightbox must not drop the forty others the user picked.
+        const moved = new Set(ids);
+        set((st) => {
+            const left = [...st.selectedIds].filter((i) => !moved.has(i));
+            return left.length === st.selectedIds.size ? {} : { selectedIds: new Set(left) };
+        });
         // The rows carry `collections`, so the grid is stale until it refetches.
         await get().loadCounts();
         await get().runSearch({ keepLoaded: true });
@@ -1525,6 +1617,39 @@ function currentQuery(s: State): SearchQuery{
         filters: s.filters,
         sort: activeSort(s),
         limit: s.settings.pageSize,
+    };
+}
+
+/**
+ * Where the open photo and the focused cell sit in a fresh result.
+ *
+ * A refresh inserts and removes rows, so an index into the old list would show
+ * a different photo — or, past the end, leave the lightbox "open" but rendering
+ * nothing, with the grid's keys dead until Esc. Both are re-found by id. Index
+ * order here is `layout.flat` order, which equals `results` order outside the
+ * loading skeletons.
+ */
+function reanchor(cur: State, items: readonly Photo[], keepFocus: boolean){
+    const find = (i: number | null): number => {
+        const id = i === null ? undefined : cur.results[i]?.id;
+        return id === undefined ? -1 : items.findIndex((p) => p.id === id);
+    };
+    let lightboxIndex = cur.lightboxIndex;
+    if(lightboxIndex !== null){
+        const moved = find(lightboxIndex);
+        if(moved >= 0){
+            lightboxIndex = moved;
+        }else if(cur.results[lightboxIndex] === undefined || items.length === 0){
+            lightboxIndex = null;
+        }else{
+            // The photo itself is gone: show whatever now sits in its place.
+            lightboxIndex = Math.min(lightboxIndex, items.length - 1);
+        }
+    }
+    return {
+        lightboxIndex,
+        lightboxFullscreen: lightboxIndex === null ? false : cur.lightboxFullscreen,
+        focusedIndex: keepFocus ? find(cur.focusedIndex) : -1,
     };
 }
 

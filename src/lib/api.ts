@@ -507,6 +507,9 @@ function queryParams(query: SearchQuery): URLSearchParams{
     return p;
 }
 
+const EVENTS_RETRY_MIN_MS = 1000;
+const EVENTS_RETRY_MAX_MS = 15000;
+
 export interface SidecarHandshake{
     port: number;
     token: string;
@@ -685,50 +688,78 @@ export class HttpApi implements PhotoSearchApi{
     /**
      * `/events` is read with fetch rather than `EventSource`, which cannot set
      * the token header. The response is an endless stream, so the reader runs
-     * detached and the returned function aborts it.
+     * detached and the returned function aborts it. When the stream ends or
+     * fails it is reopened with a growing delay: without that, one dropped
+     * connection silently ends indexing progress and every refresh the sidecar
+     * pushes, for the rest of the session. The reopen is announced to the
+     * handler as `reconnected`, because what was said in the gap is lost.
      */
     subscribeEvents(handler: (event: SidecarEvent) => void): () => void{
         const controller = new AbortController();
+        const signal = controller.signal;
 
-        void (async () => {
-            try{
-                const res = await fetch(`${this.base}/events`, {
-                    headers: { "X-PicSearch-Token": this.handshake.token },
-                    signal: controller.signal,
-                });
-                if(res.body === null){
+        const pause = (ms: number) => new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, ms);
+            signal.addEventListener("abort", () => {
+                clearTimeout(t);
+                resolve();
+            }, { once: true });
+        });
+
+        const pump = async (body: ReadableStream<Uint8Array>) => {
+            const reader = body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            while(true){
+                const { done, value } = await reader.read();
+                if(done){
                     return;
                 }
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = "";
-                while(true){
-                    const { done, value } = await reader.read();
-                    if(done){
-                        break;
-                    }
-                    buffer += decoder.decode(value, { stream: true });
-                    // SSE frames are separated by a blank line; a chunk can hold
-                    // several, or half of one.
-                    const frames = buffer.split("\n\n");
-                    buffer = frames.pop() ?? "";
-                    for(const frame of frames){
-                        for(const line of frame.split("\n")){
-                            if(!line.startsWith("data:")){
-                                continue;   // ": keepalive" and friends
-                            }
-                            try{
-                                handler(JSON.parse(line.slice(5).trim()) as SidecarEvent);
-                            }catch{
-                                // A malformed frame is not worth tearing the stream down.
-                            }
+                buffer += decoder.decode(value, { stream: true });
+                // SSE frames are separated by a blank line; a chunk can hold
+                // several, or half of one.
+                const frames = buffer.split("\n\n");
+                buffer = frames.pop() ?? "";
+                for(const frame of frames){
+                    for(const line of frame.split("\n")){
+                        if(!line.startsWith("data:")){
+                            continue;   // ": keepalive" and friends
+                        }
+                        try{
+                            handler(JSON.parse(line.slice(5).trim()) as SidecarEvent);
+                        }catch{
+                            // A malformed frame is not worth tearing the stream down.
                         }
                     }
                 }
-            }catch(err){
-                if(!controller.signal.aborted){
+            }
+        };
+
+        void (async () => {
+            let wasUp = false;
+            let delay = EVENTS_RETRY_MIN_MS;
+            while(!signal.aborted){
+                try{
+                    const res = await fetch(`${this.base}/events`, {
+                        headers: { "X-PicSearch-Token": this.handshake.token },
+                        signal,
+                    });
+                    if(res.ok && res.body !== null){
+                        if(wasUp){
+                            handler({ type: "reconnected" });
+                        }
+                        wasUp = true;
+                        delay = EVENTS_RETRY_MIN_MS;
+                        await pump(res.body);
+                    }
+                }catch(err){
+                    if(signal.aborted){
+                        return;
+                    }
                     console.error("event stream ended", err);
                 }
+                await pause(delay);
+                delay = Math.min(delay * 2, EVENTS_RETRY_MAX_MS);
             }
         })();
 

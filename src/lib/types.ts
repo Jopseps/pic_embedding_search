@@ -295,6 +295,8 @@ export type SidecarEvent =
     | { type: "model-changed"; modelId: string }
     /** Every row's date was re-derived under new rules; the order moved. */
     | { type: "dates-refreshed"; count: number }
+    /** Raised by the client, not the sidecar: the stream dropped and came back. */
+    | { type: "reconnected" }
     | { type: "error"; message: string };
 
 /**

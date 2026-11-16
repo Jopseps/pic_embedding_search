@@ -139,7 +139,8 @@ describe("setSetting", () => {
         expect(put).not.toHaveBeenCalled();
 
         await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
-        expect(put.mock.calls[0]?.[0]).toEqual({ accentHue: 260 });
+        // matchObject: an earlier test's coalesced write may still be queued
+        expect(put.mock.calls[0]?.[0]).toMatchObject({ accentHue: 260 });
         put.mockRestore();
     });
 
@@ -151,7 +152,7 @@ describe("setSetting", () => {
         useStore.getState().setSetting("tintStrength", 200);
 
         await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
-        expect(put.mock.calls[0]?.[0]).toEqual({ tintHue: 70, tintStrength: 200 });
+        expect(put.mock.calls[0]?.[0]).toMatchObject({ tintHue: 70, tintStrength: 200 });
         put.mockRestore();
     });
 });
@@ -303,5 +304,126 @@ describe("paging", () => {
         await useStore.getState().runSearch({ keepLoaded: true });
         expect(search.mock.calls[0]?.[0].limit).toBe(450);
         search.mockRestore();
+    });
+});
+
+describe("find similar", () => {
+    it("puts the screen back when the lookup fails, instead of skeletons forever", async () => {
+        useStore.setState({ query: "masa", results: [photo(1)] });
+        const similar = vi.spyOn(api, "similar").mockRejectedValue(new Error("sidecar gone"));
+        await useStore.getState().findSimilar(photo(7));
+        const s = useStore.getState();
+        expect(s.searching).toBe(false);
+        expect(s.similarTo).toBeNull();
+        expect(s.query).toBe("masa");
+        expect(s.toast).toContain("sidecar gone");
+        similar.mockRestore();
+    });
+
+    it("a background refresh re-runs the similar lookup, not a library search", async () => {
+        const target = photo(7);
+        useStore.setState({ similarTo: target, results: [photo(1)] });
+        const search = vi.spyOn(api, "search");
+        const similar = vi.spyOn(api, "similar").mockResolvedValue(page([1, 2], null, 2));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(search).not.toHaveBeenCalled();
+        expect(similar).toHaveBeenCalledWith(7);
+        expect(useStore.getState().results.map((p) => p.id)).toEqual([1, 2]);
+        search.mockRestore();
+        similar.mockRestore();
+    });
+});
+
+describe("a refresh under an open photo", () => {
+    function open(ids: number[], at: number){
+        useStore.setState({ results: ids.map((id) => photo(id)), lightboxIndex: at, focusedIndex: at });
+    }
+
+    it("follows the photo when rows are inserted before it", async () => {
+        open([1, 2, 3], 1);
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([9, 1, 2, 3], null));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(useStore.getState().lightboxIndex).toBe(2);
+        expect(useStore.getState().focusedIndex).toBe(2);
+        search.mockRestore();
+    });
+
+    it("shows the neighbour when the photo itself is gone, and closes on an empty result", async () => {
+        open([1, 2, 3], 1);
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([1, 3], null));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(useStore.getState().lightboxIndex).toBe(1);
+        search.mockResolvedValue(page([], null, 0));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(useStore.getState().lightboxIndex).toBeNull();
+        search.mockRestore();
+    });
+
+    it("never leaves the lightbox open past the end of a shrunken result", async () => {
+        open([1, 2, 3], 2);
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([1], null));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(useStore.getState().lightboxIndex).toBe(0);
+        search.mockRestore();
+    });
+
+    it("a failed refresh keeps the rows on screen", async () => {
+        open([1, 2], 0);
+        const search = vi.spyOn(api, "search").mockRejectedValue(new Error("blip"));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        const s = useStore.getState();
+        expect(s.results.map((p) => p.id)).toEqual([1, 2]);
+        expect(s.lightboxIndex).toBe(0);
+        expect(s.backendError).toBe("blip");
+        search.mockRestore();
+    });
+});
+
+describe("failing writes", () => {
+    it("a failed delete keeps the selection and says why", async () => {
+        useStore.setState({ selectedIds: new Set([1, 2]) });
+        const del = vi.spyOn(api, "deletePhotos").mockRejectedValue(new Error("locked"));
+        await expect(useStore.getState().deleteSelected()).resolves.toBeUndefined();
+        expect([...useStore.getState().selectedIds]).toEqual([1, 2]);
+        expect(useStore.getState().toast).toContain("locked");
+        del.mockRestore();
+    });
+
+    it("filing one photo leaves the rest of the selection alone", async () => {
+        useStore.setState({ selectedIds: new Set([1, 2, 3]) });
+        const add = vi.spyOn(api, "addToCollection").mockResolvedValue();
+        await useStore.getState().addPhotosToCollection("refs", [2]);
+        expect([...useStore.getState().selectedIds]).toEqual([1, 3]);
+        add.mockRestore();
+    });
+
+    it("filing the whole selection still empties it", async () => {
+        useStore.setState({ selectedIds: new Set([1, 2]) });
+        const add = vi.spyOn(api, "addToCollection").mockResolvedValue();
+        await useStore.getState().addPhotosToCollection("refs", [1, 2]);
+        expect(useStore.getState().selectedIds.size).toBe(0);
+        add.mockRestore();
+    });
+});
+
+describe("typing from Settings", () => {
+    it("brings the library back so the results are visible", () => {
+        useStore.setState({ view: "settings" });
+        useStore.getState().setQuery("masa");
+        expect(useStore.getState().view).toBe("library");
+        useStore.getState().clearQuery();
+    });
+});
+
+describe("density", () => {
+    it("a burst of steps writes the file once", async () => {
+        const put = vi.spyOn(api, "putSettings");
+        useStore.getState().stepDensity(1);
+        useStore.getState().stepDensity(-1);
+        useStore.getState().stepDensity(-1);
+        expect(put).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+        expect(put.mock.calls[0]?.[0]).toMatchObject({ density: 0 });
+        put.mockRestore();
     });
 });
