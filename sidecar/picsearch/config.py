@@ -51,12 +51,20 @@ DEFAULTS: dict[str, Any] = {
     "holdMs": 400,
     "dragSlop": 5,
     # Search. `pageSize` and `searchDebounceMs` belong to the frontend;
-    # `textWeight` is read here, by `Searcher.search`, and is the one setting in
-    # this file the sidecar acts on. 50 weights the two ranked legs of the
-    # hybrid search equally, which is exactly the unweighted RRF.
+    # `textWeight` is read here, by `Searcher.search` — with `sortedSearchKeep`
+    # below, the only settings in this file the sidecar acts on. 50 weights the
+    # two ranked legs of the hybrid search equally, which is exactly the
+    # unweighted RRF.
     "pageSize": 200,
     "searchDebounceMs": 220,
     "textWeight": 50,
+    # Order and grouping. `sort` is the browse order and is sent with every
+    # request; a query starts at relevance regardless, and whatever it is
+    # switched to is session-only. `sortedSearchKeep` is read here: how many of
+    # the best matches a query keeps when it is re-sorted by date, name or size.
+    "sort": "date-desc",
+    "groupBy": "month",
+    "sortedSearchKeep": 100,
 }
 
 ALLOWED = set(DEFAULTS)

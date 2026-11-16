@@ -32,7 +32,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import imaging, paths
+from . import dates, imaging, paths
 from .embed import BATCH_SIZE, Embedder
 from .ocr import OcrEngine, OcrError
 from .store import Store
@@ -382,6 +382,7 @@ class Indexer:
                 img.convert("L") if (is_screenshot and self.ocr is not None) else None
             )
 
+        taken_at, date_source = dates.resolve(path, st.st_mtime)
         image_id = self.store.upsert_image(
             path=str(path),
             mtime=st.st_mtime,
@@ -391,7 +392,8 @@ class Indexer:
             mime=imaging.mime_for(path),
             phash=ph,
             sha256=sha,
-            taken_at=imaging.taken_at(path),
+            taken_at=taken_at,
+            date_source=date_source,
             is_screenshot=is_screenshot,
         )
         return Ingested(image_id, small, ocr_image)

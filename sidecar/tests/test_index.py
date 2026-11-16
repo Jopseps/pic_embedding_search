@@ -201,21 +201,6 @@ def test_screenshot_heuristic(indexer: Indexer, store: Store, library):
     assert not any("photo_" in p for p in shots)
 
 
-def test_taken_at_parses_the_exif_spelling(tmp_path):
-    from PIL import Image as PILImage
-
-    p = tmp_path / "exif.jpg"
-    img = PILImage.new("RGB", (64, 64), (10, 10, 10))
-    exif = img.getexif()
-    exif[36867] = "2026:03:14 14:22:00"
-    img.save(p, exif=exif)
-    assert imaging.taken_at(p) == "2026-03-14T14:22:00"
-
-
-def test_taken_at_is_none_without_exif(library):
-    assert imaging.taken_at(library / "photo_00.jpg") is None
-
-
 # -- pHash ------------------------------------------------------------------
 
 def blobby(path, size=(600, 400), seed=0):

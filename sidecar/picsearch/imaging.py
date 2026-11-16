@@ -1,4 +1,4 @@
-"""Decoding, EXIF, hashing, thumbnails — everything that touches pixels.
+"""Decoding, EXIF rotation, hashing, thumbnails — everything that touches pixels.
 
 `index.py` orchestrates ingest; the per-file pixel work lives here so it can be
 tested without a database and reused by `dupes.py`.
@@ -36,10 +36,6 @@ MIME_BY_SUFFIX = {
     ".tif": "image/tiff", ".tiff": "image/tiff", ".heic": "image/heic",
     ".heif": "image/heif", ".avif": "image/avif",
 }
-
-EXIF_DATETIME_ORIGINAL = 36867
-EXIF_DATETIME_DIGITIZED = 36868
-EXIF_DATETIME = 306
 
 SCREENSHOT_DIR_RE = re.compile(r"screenshot|ekran|screen shot", re.IGNORECASE)
 
@@ -80,30 +76,6 @@ def sha256_file(path: Path | str, chunk: int = 1 << 20) -> str:
                 break
             h.update(block)
     return h.hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# EXIF
-# ---------------------------------------------------------------------------
-
-def taken_at(path: Path | str) -> str | None:
-    """EXIF DateTimeOriginal as ISO-8601, or None. Never raises."""
-    try:
-        with Image.open(path) as img:
-            exif = img.getexif()
-    except Exception:
-        return None
-    if(not exif):
-        return None
-    for tag in (EXIF_DATETIME_ORIGINAL, EXIF_DATETIME_DIGITIZED, EXIF_DATETIME):
-        raw = exif.get(tag)
-        if(not raw):
-            continue
-        text = str(raw).strip().rstrip("\x00")
-        # EXIF spells it "2026:03:14 14:22:00".
-        if(len(text) >= 19 and text[4] == ":" and text[7] == ":"):
-            return f"{text[0:4]}-{text[5:7]}-{text[8:10]}T{text[11:19]}"
-    return None
 
 
 def is_screenshot(path: Path, width: int, height: int) -> bool:

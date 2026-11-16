@@ -27,10 +27,10 @@ from typing import Any
 
 import numpy as np
 
-from . import paths
+from . import dates, paths
 from .paths import db_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Copied from ARCHITECTURE.md § 3. The ocr_fts triggers are a deliberate
 # addition: ocr_fts is an external-content FTS5 table, so writing ocr_text does
@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS images(
     sha256      TEXT NOT NULL,
     taken_at    TEXT,
     is_screenshot INTEGER NOT NULL DEFAULT 0,
-    indexed_at  TEXT NOT NULL
+    indexed_at  TEXT NOT NULL,
+    date_source TEXT,
+    name_key    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_images_taken   ON images(taken_at);
 CREATE INDEX IF NOT EXISTS idx_images_phash   ON images(phash);
@@ -100,6 +102,14 @@ CREATE TABLE IF NOT EXISTS saved_searches(
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, query_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+# Indexes on columns a migration adds. They cannot sit in SCHEMA_SQL: that
+# script runs *before* the migrations, against a v1 table that does not have
+# the column yet.
+INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_images_name    ON images(name_key);
+CREATE INDEX IF NOT EXISTS idx_images_size    ON images(size_bytes);
 """
 
 
@@ -190,20 +200,22 @@ class Store:
             current = self.get_setting("schema_version")
             if(current is None):
                 self.set_setting("schema_version", str(SCHEMA_VERSION))
-                return
-            version = int(current)
-            while(version < SCHEMA_VERSION):
-                step = MIGRATIONS.get(version + 1)
-                if(step is None):
-                    raise RuntimeError(f"no migration to schema version {version + 1}")
-                step(c)
-                c.commit()
-                version += 1
-                self.set_setting("schema_version", str(version))
-            if(version > SCHEMA_VERSION):
-                raise RuntimeError(
-                    f"database is schema v{version}, this build understands v{SCHEMA_VERSION}"
-                )
+            else:
+                version = int(current)
+                while(version < SCHEMA_VERSION):
+                    step = MIGRATIONS.get(version + 1)
+                    if(step is None):
+                        raise RuntimeError(f"no migration to schema version {version + 1}")
+                    step(c)
+                    c.commit()
+                    version += 1
+                    self.set_setting("schema_version", str(version))
+                if(version > SCHEMA_VERSION):
+                    raise RuntimeError(
+                        f"database is schema v{version}, this build understands v{SCHEMA_VERSION}"
+                    )
+            c.executescript(INDEX_SQL)
+            c.commit()
 
     # -- settings -----------------------------------------------------------
 
@@ -262,22 +274,25 @@ class Store:
         sha256: str,
         taken_at: str | None,
         is_screenshot: bool,
+        date_source: str | None = None,
     ) -> int:
         with self._write_lock:
             c = self.conn()
             cur = c.execute(
                 "INSERT INTO images(path, mtime, size_bytes, width, height, mime, phash,"
-                " sha256, taken_at, is_screenshot, indexed_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+                " sha256, taken_at, is_screenshot, indexed_at, date_source, name_key)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(path) DO UPDATE SET"
                 "  mtime=excluded.mtime, size_bytes=excluded.size_bytes,"
                 "  width=excluded.width, height=excluded.height, mime=excluded.mime,"
                 "  phash=excluded.phash, sha256=excluded.sha256, taken_at=excluded.taken_at,"
-                "  is_screenshot=excluded.is_screenshot, indexed_at=excluded.indexed_at"
+                "  is_screenshot=excluded.is_screenshot, indexed_at=excluded.indexed_at,"
+                "  date_source=excluded.date_source, name_key=excluded.name_key"
                 " RETURNING id",
                 (
                     path, mtime, size_bytes, width, height, mime,
                     phash_to_db(phash), sha256, taken_at, int(is_screenshot), now_iso(),
+                    date_source, dates.name_key(Path(path).name),
                 ),
             )
             image_id = int(cur.fetchone()["id"])
@@ -304,20 +319,34 @@ class Store:
         the embedding, the OCR text and the thumbnails are all still correct
         and all of them hang off `image_id`. Re-ingesting would spend the GPU
         on a file that only moved.
+
+        The name did change, though, and the name can carry the date: a date
+        that came from the old filename is re-derived from the new one. An EXIF
+        date stays — the bytes it was read from are the same bytes.
         """
         with self._write_lock:
             c = self.conn()
-            row = c.execute("SELECT id FROM images WHERE path=?", (old_path,)).fetchone()
+            row = c.execute(
+                "SELECT id, mtime, taken_at, date_source FROM images WHERE path=?", (old_path,)
+            ).fetchone()
             if(row is None):
                 return None
             image_id = int(row["id"])
+            taken_at, date_source = row["taken_at"], row["date_source"]
+            if(date_source != "exif"):
+                taken_at, date_source = dates.resolve_without_exif(
+                    Path(new_path).name, float(row["mtime"])
+                )
             # Landing on an existing row would violate UNIQUE(path). Whatever
             # was at the destination has just been overwritten on disk, so its
             # row is stale — drop it and let the cascade take its rows with it.
             displaced = c.execute(
                 "DELETE FROM images WHERE path=? AND id!=?", (new_path, image_id)
             ).rowcount
-            c.execute("UPDATE images SET path=? WHERE id=?", (new_path, image_id))
+            c.execute(
+                "UPDATE images SET path=?, name_key=?, taken_at=?, date_source=? WHERE id=?",
+                (new_path, dates.name_key(Path(new_path).name), taken_at, date_source, image_id),
+            )
             c.commit()
             # The rename itself changes no pixels and must not invalidate the
             # dupe index. Overwriting a *different* image does — that row is gone.
@@ -330,6 +359,50 @@ class Store:
 
     def all_paths(self) -> set[str]:
         return {r["path"] for r in self.conn().execute("SELECT path FROM images")}
+
+    # -- dates --------------------------------------------------------------
+
+    def dates_stale(self) -> bool:
+        return self.get_setting("date_rules_version") != str(dates.DATE_RULES_VERSION)
+
+    def refresh_dates(self, batch: int = 500) -> int:
+        """Re-derive `taken_at`, `date_source` and `name_key` for every row.
+
+        Run once per `dates.DATE_RULES_VERSION`, on start. A rescan cannot do
+        this: an unchanged file is skipped on `(path, mtime, size)` before
+        anything reads it, so rows indexed under the old rules would keep
+        their old date forever. Reads EXIF headers only — no decode, no GPU.
+        The stored `mtime` is used rather than a fresh `stat`, and a file that
+        cannot be opened falls through to filename and mtime like any other.
+        Returns how many rows were read; a row changed underneath is skipped.
+        """
+        rows = [
+            (int(r["id"]), r["path"], float(r["mtime"]))
+            for r in self.conn().execute("SELECT id, path, mtime FROM images ORDER BY id")
+        ]
+        done = 0
+        for start in range(0, len(rows), batch):
+            payload = []
+            for image_id, path, mtime in rows[start:start + batch]:
+                taken_at, date_source = dates.resolve(path, mtime)
+                payload.append((
+                    taken_at, date_source, dates.name_key(Path(path).name), image_id, path, mtime,
+                ))
+            with self._write_lock:
+                c = self.conn()
+                # Guarded on the path and mtime the values were derived from:
+                # this runs beside the watcher, and a row renamed or re-ingested
+                # since it was read already has the right values for what it is
+                # now — overwriting them would put the old name's date back.
+                c.executemany(
+                    "UPDATE images SET taken_at=?, date_source=?, name_key=?"
+                    " WHERE id=? AND path=? AND mtime=?",
+                    payload,
+                )
+                c.commit()
+            done += len(payload)
+        self.set_setting("date_rules_version", str(dates.DATE_RULES_VERSION))
+        return done
 
     # -- embeddings ---------------------------------------------------------
 
@@ -623,5 +696,12 @@ class Store:
             return cur.rowcount > 0
 
 
-MIGRATIONS: dict[int, Any] = {}
-"""version -> callable(conn). Empty at v1; add entries as the schema evolves."""
+def _migrate_v2(c: sqlite3.Connection) -> None:
+    """`date_source` and `name_key`. Both are filled by `refresh_dates`, which
+    the sidecar runs on start because `date_rules_version` is not yet set."""
+    c.execute("ALTER TABLE images ADD COLUMN date_source TEXT")
+    c.execute("ALTER TABLE images ADD COLUMN name_key TEXT NOT NULL DEFAULT ''")
+
+
+MIGRATIONS: dict[int, Any] = {2: _migrate_v2}
+"""version -> callable(conn). Add entries as the schema evolves."""
