@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildLayout, HEADER_HEIGHT, type Layout, type Section } from "./grid";
 import { GRID_GAP, GRID_ROW_HEIGHTS } from "./catalog";
-import { monthLabel } from "./format";
-import { gridMode, searchKey, useStore } from "./store";
-import type { GridMode, Photo } from "./types";
+import { groupLabel } from "./format";
+import { gridMode, searchKey, sectionsByDate, useStore } from "./store";
+import type { GridMode, GroupBy, Photo } from "./types";
 
 export const GRID_PAD_X = 20;
 
@@ -24,6 +24,7 @@ function skeletonPhotos(): Photo[]{
         height: 1000,
         mime: "",
         takenAt: null,
+        dateSource: null,
         isScreenshot: false,
         hasOcr: false,
         ocrText: null,
@@ -35,20 +36,23 @@ function skeletonPhotos(): Photo[]{
 
 const SKELETONS = skeletonPhotos();
 
-function buildSections(mode: GridMode, results: Photo[]): Section<Photo>[]{
+function buildSections(
+    mode: GridMode, results: Photo[], byDate: boolean, groupBy: GroupBy,
+): Section<Photo>[]{
     if(mode === "loading"){
         return [{ label: null, items: SKELETONS }];
     }
     if(mode === "emptySearch" || mode === "emptyLibrary"){
         return [];
     }
-    // Browsing groups by month; search results are relevance-ordered, so a date
-    // separator there would be actively misleading.
-    if(mode === "idle"){
+    // Headers follow the *order*, not the mode: a query sorted by date gets
+    // them too. Relevance, name and size orders get none — a date separator
+    // over a list that is not in date order would be actively misleading.
+    if(byDate){
         const sections: Section<Photo>[] = [];
         let current: Section<Photo> | null = null;
         for(const p of results){
-            const label = monthLabel(p.takenAt);
+            const label = groupLabel(p.takenAt, groupBy);
             if(current === null || current.label !== label){
                 current = { label, items: [] };
                 sections.push(current);
@@ -94,6 +98,8 @@ export function useGridLayout(): GridLayoutHandle{
     const density = useStore((s) => s.density);
     const uiScale = useStore((s) => s.settings.uiScale);
     const mode = useStore(gridMode);
+    const byDate = useStore(sectionsByDate);
+    const groupBy = useStore((s) => s.settings.groupBy);
     /** The search on screen, as one string — see `searchKey`. */
     const query = useStore(searchKey);
 
@@ -150,7 +156,7 @@ export function useGridLayout(): GridLayoutHandle{
     }, [onScroll, scrollEl]);
 
     const layout = useMemo(() => {
-        const sections = buildSections(mode, results);
+        const sections = buildSections(mode, results, byDate, groupBy);
         const base = GRID_ROW_HEIGHTS[density] ?? GRID_ROW_HEIGHTS[1];
         // The UI scale is an accessibility setting, so it moves the photos and
         // the month headers with everything else — the header height is a
@@ -158,7 +164,7 @@ export function useGridLayout(): GridLayoutHandle{
         // its own text would be overrun by it.
         const s = uiScale / 100;
         return buildLayout(sections, base * s, GRID_GAP, width, HEADER_HEIGHT * s);
-    }, [mode, results, density, width, uiScale]);
+    }, [mode, results, byDate, groupBy, density, width, uiScale]);
 
     // Reset scroll when the user asks a *different* question, so a new search
     // does not land them halfway down a shorter list.

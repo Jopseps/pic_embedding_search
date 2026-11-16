@@ -12,10 +12,14 @@ import {
     DEFAULT_PAGE_SIZE,
     DEFAULT_SEARCH_DEBOUNCE_MS,
     DEFAULT_SELECTION_BORDER,
+    DEFAULT_GROUP_BY,
+    DEFAULT_SORT,
+    DEFAULT_SORTED_SEARCH_KEEP,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
     DEFAULT_TINT_STRENGTH,
     DEFAULT_UI_SCALE,
+    isDateSort,
     modelById,
 } from "./catalog";
 import type {
@@ -33,10 +37,13 @@ import type {
     ReindexStatus,
     ResolvedTheme,
     SavedSearch,
+    SearchQuery,
+    SearchSort,
     Settings,
     OcrStatus,
     StorageUsage,
     ThemePref,
+    Timeline,
     UiScale,
     WatchedFolder,
 } from "./types";
@@ -75,6 +82,7 @@ export type MainView = "library" | "settings";
 /** The search that was showing when "find similar" took over. */
 export interface SimilarOrigin{
     query: string;
+    searchSort: SearchSort;
     filters: Filters;
     libraryView: LibraryView | null;
     activeCollection: string | null;
@@ -96,6 +104,18 @@ interface State{
     results: Photo[];
     total: number;
     tookMs: number;
+    /** Next page of the current search, or null when everything is loaded. */
+    cursor: string | null;
+    /** A next page is in flight. Never `searching`: that flips the grid to
+     *  skeletons, which mid-scroll would blank everything already on screen. */
+    loadingMore: boolean;
+    /** The order a *query* is shown in. Session-only: relevance until the user
+     *  picks something else, and back to relevance when the query clears.
+     *  Browsing uses the persisted `settings.sort`. */
+    searchSort: SearchSort;
+    /** Photos per month over the whole result, for the scrubber. Null unless
+     *  the grid is sorted by date. */
+    timeline: Timeline | null;
     /** Set when results came from "find similar" rather than a text query. */
     similarTo: Photo | null;
     /** What was on screen before "find similar" replaced it, so Esc can put it
@@ -172,7 +192,16 @@ interface Actions{
 
     setQuery(q: string): void;
     clearQuery(): void;
-    runSearch(): Promise<void>;
+    /** `keepLoaded` re-fetches as many rows as are loaded, for refreshes the
+     *  user did not ask for — a rescan must not cut a deep scroll to page one. */
+    runSearch(opts?: { keepLoaded?: boolean }): Promise<void>;
+    /** Append the next page. No-op while one is in flight or none is left. */
+    loadMore(): Promise<void>;
+    /** Load pages until row `index` exists — a scrubber jump far down. */
+    loadThrough(index: number): Promise<void>;
+    loadTimeline(): Promise<void>;
+    /** Persisted when browsing; session-only while a query is active. */
+    setSort(sort: SearchSort): void;
     findSimilar(photo: Photo): Promise<void>;
     exitSimilar(): void;
 
@@ -192,6 +221,8 @@ interface Actions{
 
     toggleFilterSection(key: keyof FilterSectionsOpen): void;
     setDatePreset(p: DatePreset): void;
+    /** Either end may be null (open). Clears the preset. */
+    setDateRange(from: string | null, to: string | null): void;
     toggleFolderFilter(folder: string): void;
     toggleTypeFilter(t: PhotoKind): void;
     setDimsFilter(d: DimsFilter): void;
@@ -282,7 +313,11 @@ const SETTINGS_FLUSH_MS = 250;
 /** Guards against an older in-flight search overwriting a newer one. */
 let searchSeq = 0;
 
-const EMPTY_FILTERS: Filters = { datePreset: null, folders: [], types: [], dims: null };
+const EMPTY_FILTERS: Filters = {
+    datePreset: null, dateFrom: null, dateTo: null, folders: [], types: [], dims: null,
+};
+/** `limit` is capped here by the sidecar; asking for more is asking for this. */
+const MAX_PAGE = 1000;
 
 function describeError(err: unknown): string{
     return err instanceof Error ? err.message : String(err);
@@ -342,6 +377,10 @@ export const useStore = create<State & Actions>((set, get) => ({
     results: [],
     total: 0,
     tookMs: 0,
+    cursor: null,
+    loadingMore: false,
+    searchSort: "relevance",
+    timeline: null,
     similarTo: null,
     beforeSimilar: null,
 
@@ -410,6 +449,9 @@ export const useStore = create<State & Actions>((set, get) => ({
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        sort: DEFAULT_SORT,
+        groupBy: DEFAULT_GROUP_BY,
+        sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
     },
     resolvedTheme: "dark",
     folders: [],
@@ -432,7 +474,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         set({ query: q, similarTo: null });
         clearTimeout(debounceTimer);
         if(q.trim() === ""){
-            set({ searching: false });
+            set({ searching: false, searchSort: "relevance" });
             void get().runSearch();
             return;
         }
@@ -445,24 +487,22 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     clearQuery(){
         clearTimeout(debounceTimer);
-        set({ query: "", searching: false, similarTo: null });
+        set({ query: "", searching: false, similarTo: null, searchSort: "relevance" });
         void get().runSearch();
     },
 
-    async runSearch(){
+    async runSearch(opts){
         const s = get();
         // A re-index no longer blocks this. The outgoing model keeps every
         // vector it had until the incoming one reaches full coverage, so
         // search answers normally for the whole swap — see `confirmModelChange`.
         const seq = ++searchSeq;
+        const limit = opts?.keepLoaded === true
+            ? Math.min(MAX_PAGE, Math.max(s.settings.pageSize, s.results.length))
+            : s.settings.pageSize;
+        void get().loadTimeline();
         try{
-            const res = await api.search({
-                q: s.query,
-                view: s.activeCollection === null ? s.libraryView : null,
-                collection: s.activeCollection,
-                filters: s.filters,
-                limit: s.settings.pageSize,
-            });
+            const res = await api.search({ ...currentQuery(s), limit });
             if(seq !== searchSeq){
                 return;
             }
@@ -470,16 +510,74 @@ export const useStore = create<State & Actions>((set, get) => ({
                 results: res.items,
                 total: res.total,
                 tookMs: res.tookMs,
+                cursor: res.cursor,
+                loadingMore: false,
                 searching: false,
-                focusedIndex: -1,
+                // A refresh the user did not ask for keeps the focused cell.
+                focusedIndex: opts?.keepLoaded === true ? s.focusedIndex : -1,
                 backendError: null,
             });
         }catch(err){
             if(seq !== searchSeq){
                 return;
             }
-            set({ searching: false, results: [], total: 0, backendError: describeError(err) });
+            set({
+                searching: false, loadingMore: false, results: [], total: 0, cursor: null,
+                backendError: describeError(err),
+            });
         }
+    },
+
+    async loadMore(){
+        await fetchMore(get().settings.pageSize);
+    },
+
+    async loadThrough(index){
+        // One request per missing stretch rather than page after page: a jump
+        // to the far end of a large library is otherwise dozens of round trips.
+        while(get().results.length <= index && get().cursor !== null){
+            const loaded = get().results.length;
+            const want = Math.min(MAX_PAGE, Math.max(get().settings.pageSize, index + 1 - loaded));
+            if(!await fetchMore(want)){
+                return;
+            }
+        }
+    },
+
+    async loadTimeline(){
+        const s = get();
+        if(!sectionsByDate(s)){
+            set({ timeline: null });
+            return;
+        }
+        const seq = searchSeq;
+        try{
+            const timeline = await api.timeline(currentQuery(s));
+            if(seq === searchSeq){
+                set({ timeline });
+            }
+        }catch{
+            // Advisory: without it the scrubber hides, and the grid still works.
+            if(seq === searchSeq){
+                set({ timeline: null });
+            }
+        }
+    },
+
+    setSort(sort){
+        const s = get();
+        if(s.query.trim() !== ""){
+            set({ searchSort: sort, searching: true });
+        }else if(sort !== "relevance"){
+            // Routed through `setSetting` so it persists like every other
+            // preference; the search re-runs here, not in the flush, so the
+            // grid does not wait out the write debounce.
+            get().setSetting("sort", sort);
+            set({ searching: true });
+        }else{
+            return;
+        }
+        void get().runSearch();
     },
 
     async findSimilar(photo){
@@ -496,6 +594,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             // silently thrown away the search you came from.
             beforeSimilar: s.similarTo !== null ? s.beforeSimilar : {
                 query: s.query,
+                searchSort: s.searchSort,
                 filters: s.filters,
                 libraryView: s.libraryView,
                 activeCollection: s.activeCollection,
@@ -510,6 +609,9 @@ export const useStore = create<State & Actions>((set, get) => ({
             results: res.items,
             total: res.total,
             tookMs: res.tookMs,
+            cursor: null,
+            loadingMore: false,
+            timeline: null,
             searching: false,
             focusedIndex: -1,
         });
@@ -527,6 +629,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             similarTo: null,
             beforeSimilar: null,
             query: origin?.query ?? "",
+            searchSort: origin?.searchSort ?? "relevance",
             filters: origin?.filters ?? EMPTY_FILTERS,
             libraryView: origin?.libraryView ?? "all",
             activeCollection: origin?.activeCollection ?? null,
@@ -537,12 +640,12 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     setLibraryView(v){
-        set({ libraryView: v, activeCollection: null, selectedIds: new Set(), similarTo: null });
+        set({ view: "library", libraryView: v, activeCollection: null, selectedIds: new Set(), similarTo: null });
         void get().runSearch();
     },
 
     setActiveCollection(id){
-        set({ activeCollection: id, libraryView: null, selectedIds: new Set(), similarTo: null });
+        set({ view: "library", activeCollection: id, libraryView: null, selectedIds: new Set(), similarTo: null });
         void get().runSearch();
     },
 
@@ -576,7 +679,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 await api.addToCollection(made.id, ids);
                 set({ collectionMenuOpen: false, selectedIds: new Set() });
                 await get().loadCounts();
-                await get().runSearch();
+                await get().runSearch({ keepLoaded: true });
                 get().showToast(`${ids.length} added to "${name}"`);
                 return;
             }
@@ -680,8 +783,31 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     setDatePreset(p){
+        // A preset and a custom range are two answers to one question; the
+        // one just picked wins.
         set((s) => ({
-            filters: { ...s.filters, datePreset: s.filters.datePreset === p ? null : p },
+            filters: {
+                ...s.filters,
+                datePreset: s.filters.datePreset === p ? null : p,
+                dateFrom: null,
+                dateTo: null,
+            },
+        }));
+        void get().runSearch();
+    },
+
+    setDateRange(from, to){
+        const f = get().filters;
+        if(f.dateFrom === from && f.dateTo === to){
+            return;
+        }
+        set((s) => ({
+            filters: {
+                ...s.filters,
+                dateFrom: from,
+                dateTo: to,
+                datePreset: from === null && to === null ? s.filters.datePreset : null,
+            },
         }));
         void get().runSearch();
     },
@@ -720,7 +846,7 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     clearAllFilters(){
-        set({ filters: { datePreset: null, folders: [], types: [], dims: null } });
+        set({ filters: EMPTY_FILTERS });
         void get().runSearch();
     },
 
@@ -862,6 +988,18 @@ export const useStore = create<State & Actions>((set, get) => ({
     },
 
     stepLightbox(dir, count){
+        const cur = get();
+        // Past the last *loaded* photo is not the end while pages remain:
+        // wrapping to the first would skip everything not fetched yet.
+        if(dir === 1 && cur.lightboxIndex === count - 1 && cur.cursor !== null){
+            const from = cur.lightboxIndex;
+            void get().loadMore().then(() => {
+                if(get().lightboxIndex === from && get().results.length > count){
+                    set({ lightboxIndex: from + 1, ocrExpanded: false });
+                }
+            });
+            return;
+        }
         set((s) => {
             if(s.lightboxIndex === null || count === 0){
                 return {};
@@ -940,6 +1078,11 @@ export const useStore = create<State & Actions>((set, get) => ({
                 }));
                 get().showToast(`Now searching with ${modelById(event.modelId)?.name ?? event.modelId}`);
                 void get().runSearch();
+            }else if(event.type === "dates-refreshed"){
+                // Dates were re-derived under new rules: the order, the month
+                // headers and the "Recent" count all moved.
+                void get().loadCounts();
+                void get().runSearch({ keepLoaded: true });
             }else if(event.type === "scan-complete"){
                 // New rows exist now, so the visible results are stale. `ocred`
                 // counts too: an OCR backfill changes hasOcr and the snippets
@@ -949,7 +1092,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     void get().loadFolders();
                     void get().loadStorage();
                     void get().loadCounts();
-                    void get().runSearch();
+                    void get().runSearch({ keepLoaded: true });
                 }
             }else if(event.type === "error"){
                 set({ backendError: event.message });
@@ -1051,11 +1194,17 @@ export const useStore = create<State & Actions>((set, get) => ({
             // Merged over the defaults rather than replacing them: a
             // config.toml written by an older build has no appearance keys, and
             // `uiScale: undefined` reaches CSS as `calc(1px * undefined)`.
+            const before = get();
             set((st) => ({
                 settings: { ...st.settings, ...settings },
                 density: settings.density ?? st.density,
             }));
             get().resolveTheme();
+            // The boot search ran before this landed, with the default order.
+            // A saved "Name A–Z" has to show as that, not as newest-first.
+            if(before.query.trim() === "" && before.settings.sort !== get().settings.sort){
+                void get().runSearch();
+            }
             if(s.pendingModelId !== null){
                 // A swap the sidecar resumed on its own after a restart.
                 set({
@@ -1151,7 +1300,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             // returns, so the results on screen are stale the moment either
             // lands. Re-run once, at the end of the drag — a search per slider
             // step would embed the query on the GPU thirty times.
-            if("pageSize" in patch || "textWeight" in patch){
+            if("pageSize" in patch || "textWeight" in patch || "sortedSearchKeep" in patch){
                 void get().runSearch();
             }
         }, SETTINGS_FLUSH_MS);
@@ -1250,7 +1399,8 @@ export const useStore = create<State & Actions>((set, get) => ({
         await api.deletePhotos(ids);
         set({ selectedIds: new Set(), collectionMenuOpen: false });
         await get().loadCounts();
-        await get().runSearch();
+        // Deleting around row 400 must not collapse the grid to page one.
+        await get().runSearch({ keepLoaded: true });
         get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} removed from index`);
     },
 
@@ -1289,7 +1439,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         set({ selectedIds: new Set() });
         // The rows carry `collections`, so the grid is stale until it refetches.
         await get().loadCounts();
-        await get().runSearch();
+        await get().runSearch({ keepLoaded: true });
         get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} added to "${name}"`);
     },
 }));
@@ -1337,11 +1487,84 @@ export function searchKey(s: State): string{
         s.libraryView ?? "",
         s.activeCollection ?? "",
         s.similarTo?.id ?? "",
+        // A new order is a different question: the top of the list is
+        // somewhere else entirely.
+        activeSort(s),
         f.datePreset ?? "",
+        f.dateFrom ?? "",
+        f.dateTo ?? "",
         f.dims ?? "",
         f.types.join("+"),
         f.folders.join("+"),
         // NUL between the fields, not a space: the query is free text and
         // could otherwise spell the next field's value and collide with it.
     ].join("\u0000");
+}
+
+/** The order on screen: the session's query sort while one is typed, the
+ *  persisted browse sort otherwise. "find similar" is always by similarity. */
+export function activeSort(s: State): SearchSort{
+    if(s.similarTo !== null){
+        return "relevance";
+    }
+    return s.query.trim() !== "" ? s.searchSort : s.settings.sort;
+}
+
+/** Date headers, the pinned label and the scrubber exist exactly when the
+ *  order is by date. One predicate, so the three can never disagree. */
+export function sectionsByDate(s: State): boolean{
+    return isDateSort(activeSort(s));
+}
+
+/** The request `runSearch`, `loadMore` and the timeline all send. */
+function currentQuery(s: State): SearchQuery{
+    return {
+        q: s.query,
+        view: s.activeCollection === null ? s.libraryView : null,
+        collection: s.activeCollection,
+        filters: s.filters,
+        sort: activeSort(s),
+        limit: s.settings.pageSize,
+    };
+}
+
+/** Append up to `limit` more rows. False when nothing was appended — stale,
+ *  in flight, exhausted or failed — so a loop over it always terminates. */
+async function fetchMore(limit: number): Promise<boolean>{
+    const s = useStore.getState();
+    if(s.cursor === null || s.loadingMore || s.searching || s.similarTo !== null){
+        return false;
+    }
+    // Shares the search's sequence without advancing it: a page that lands
+    // after the user asked something new belongs to the old question.
+    const seq = searchSeq;
+    useStore.setState({ loadingMore: true });
+    try{
+        const res = await api.search({ ...currentQuery(s), limit, cursor: s.cursor });
+        if(seq !== searchSeq){
+            return false;
+        }
+        const cur = useStore.getState();
+        // Offset paging shifts when the watcher inserts a row mid-scroll, so a
+        // page can repeat the tail of the last one. A duplicate id would be two
+        // cells for one photo, and two cells with one React key.
+        const seen = new Set(cur.results.map((p) => p.id));
+        const fresh = res.items.filter((p) => !seen.has(p.id));
+        useStore.setState({
+            results: fresh.length > 0 ? [...cur.results, ...fresh] : cur.results,
+            total: res.total,
+            cursor: res.cursor,
+            loadingMore: false,
+        });
+        return fresh.length > 0 || res.cursor !== null;
+    }catch(err){
+        if(seq === searchSeq){
+            // The cursor goes with the failure. Left in place, the load-more
+            // effect sees `loadingMore` fall, fires again, fails again — with
+            // the sidecar gone that is a request storm pinned to a CPU core.
+            // The next `runSearch` brings the cursor back.
+            useStore.setState({ loadingMore: false, cursor: null, backendError: describeError(err) });
+        }
+        return false;
+    }
 }

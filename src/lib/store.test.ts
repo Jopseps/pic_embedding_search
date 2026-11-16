@@ -5,9 +5,13 @@ import {
     SIDEBAR_DEFAULT_W,
     SIDEBAR_MAX_W,
     SIDEBAR_MIN_W,
+    activeSort,
     clampSidebarWidth,
+    searchKey,
+    sectionsByDate,
     useStore,
 } from "./store";
+import type { Photo, SearchResponse } from "./types";
 
 const INITIAL = useStore.getState();
 
@@ -164,5 +168,140 @@ describe("drag out", () => {
             count: 0,
             overCollection: null,
         });
+    });
+});
+
+function photo(id: number, takenAt: string | null = "2026-05-01T10:00:00"): Photo{
+    return {
+        id, path: `/p/${id}.png`, filename: `${id}.png`, folder: "/p", width: 100, height: 100,
+        mime: "image/png", takenAt, dateSource: takenAt === null ? null : "filename",
+        isScreenshot: false, hasOcr: false, ocrText: null, snippet: null, isDupe: false,
+        collections: [],
+    };
+}
+
+function page(ids: number[], cursor: string | null, total = 10): SearchResponse{
+    return { items: ids.map((id) => photo(id)), total, tookMs: 1, cursor };
+}
+
+describe("sort", () => {
+    it("persists the browse order and sends it with the search", async () => {
+        const search = vi.spyOn(api, "search");
+        useStore.getState().setSort("name-asc");
+        expect(useStore.getState().settings.sort).toBe("name-asc");
+        await vi.waitFor(() => expect(search).toHaveBeenCalled());
+        expect(search.mock.calls.at(-1)?.[0].sort).toBe("name-asc");
+        search.mockRestore();
+    });
+
+    it("keeps a query's order to the session and resets it when the query clears", () => {
+        useStore.setState({ query: "masa" });
+        useStore.getState().setSort("date-asc");
+        const s = useStore.getState();
+        expect(s.searchSort).toBe("date-asc");
+        expect(s.settings.sort).toBe("date-desc");
+        expect(activeSort(s)).toBe("date-asc");
+        useStore.getState().clearQuery();
+        expect(useStore.getState().searchSort).toBe("relevance");
+        expect(activeSort(useStore.getState())).toBe("date-desc");
+    });
+
+    it("draws date headers exactly when the order is by date", () => {
+        expect(sectionsByDate(useStore.getState())).toBe(true);
+        useStore.setState({ query: "masa" });
+        expect(sectionsByDate(useStore.getState())).toBe(false);
+        useStore.setState({ searchSort: "date-desc" });
+        expect(sectionsByDate(useStore.getState())).toBe(true);
+    });
+
+    it("is part of the search key, so a new order starts at the top", () => {
+        const before = searchKey(useStore.getState());
+        useStore.setState((s) => ({ settings: { ...s.settings, sort: "size-desc" } }));
+        expect(searchKey(useStore.getState())).not.toBe(before);
+    });
+});
+
+describe("date range", () => {
+    it("and a preset replace each other", () => {
+        useStore.getState().setDatePreset("week");
+        useStore.getState().setDateRange("2026-05-01", null);
+        let f = useStore.getState().filters;
+        expect([f.datePreset, f.dateFrom, f.dateTo]).toEqual([null, "2026-05-01", null]);
+        useStore.getState().setDatePreset("month");
+        f = useStore.getState().filters;
+        expect([f.datePreset, f.dateFrom, f.dateTo]).toEqual(["month", null, null]);
+    });
+});
+
+describe("paging", () => {
+    it("appends the next page and drops ids it already has", async () => {
+        useStore.setState({ results: [photo(1), photo(2)], cursor: "2" });
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([2, 3, 4], "5"));
+        await useStore.getState().loadMore();
+        const s = useStore.getState();
+        expect(s.results.map((p) => p.id)).toEqual([1, 2, 3, 4]);
+        expect(s.cursor).toBe("5");
+        expect(s.loadingMore).toBe(false);
+        expect(search.mock.calls[0]?.[0].cursor).toBe("2");
+        search.mockRestore();
+    });
+
+    it("does not flip the grid to skeletons", async () => {
+        useStore.setState({ results: [photo(1)], cursor: "1" });
+        let seen = false;
+        const search = vi.spyOn(api, "search").mockImplementation(async () => {
+            seen = useStore.getState().loadingMore && !useStore.getState().searching;
+            return page([2], null);
+        });
+        await useStore.getState().loadMore();
+        expect(seen).toBe(true);
+        search.mockRestore();
+    });
+
+    it("drops a page that lands after a new search started", async () => {
+        useStore.setState({ results: [photo(1)], cursor: "1" });
+        let release: (r: SearchResponse) => void = () => {};
+        const search = vi.spyOn(api, "search").mockImplementationOnce(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        const pending = useStore.getState().loadMore();
+        search.mockResolvedValue(page([9], null));
+        await useStore.getState().runSearch();
+        release(page([2], null));
+        await pending;
+        expect(useStore.getState().results.map((p) => p.id)).toEqual([9]);
+        search.mockRestore();
+    });
+
+    it("loads through to a far index in as few requests as the cap allows", async () => {
+        useStore.setState({ results: [photo(0)], cursor: "1" });
+        const search = vi.spyOn(api, "search").mockImplementation(async (q) => {
+            const from = Number(q.cursor);
+            const ids = Array.from({ length: q.limit ?? 0 }, (_, i) => from + i);
+            return page(ids, String(from + ids.length), 5000);
+        });
+        await useStore.getState().loadThrough(1500);
+        expect(useStore.getState().results.length).toBeGreaterThan(1500);
+        expect(search.mock.calls.map((c) => c[0].limit)).toEqual([1000, 500]);
+        search.mockRestore();
+    });
+
+    it("a failed page stops paging instead of retrying in a loop", async () => {
+        useStore.setState({ results: [photo(1)], cursor: "1" });
+        const search = vi.spyOn(api, "search").mockRejectedValue(new Error("sidecar gone"));
+        await useStore.getState().loadMore();
+        await useStore.getState().loadMore();
+        expect(search).toHaveBeenCalledTimes(1);
+        expect(useStore.getState().cursor).toBe(null);
+        expect(useStore.getState().results.map((p) => p.id)).toEqual([1]);
+        search.mockRestore();
+    });
+
+    it("a background refresh keeps as many rows as were loaded", async () => {
+        useStore.setState({ results: Array.from({ length: 450 }, (_, i) => photo(i)) });
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([1], null));
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(search.mock.calls[0]?.[0].limit).toBe(450);
+        search.mockRestore();
     });
 });
