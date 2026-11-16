@@ -6,12 +6,15 @@ import {
     DRAG_SLOP_RANGE,
     EMBEDDING_MODELS,
     FONTS,
+    GROUP_BY_OPTIONS,
     HOLD_TIMES,
     OCR_ENGINES,
     OCR_LANGUAGES,
     PAGE_SIZES,
     SEARCH_DEBOUNCE_RANGE,
     SELECTION_BORDERS,
+    SORTED_SEARCH_KEEPS,
+    SORT_OPTIONS,
     TINT_PRESETS,
     UI_SCALES,
     accentPresetFor,
@@ -22,7 +25,7 @@ import { fmtCount, fmtEta, fmtGb } from "../lib/format";
 import { isFontAvailable } from "../lib/fontProbe";
 import { isMockMode } from "../lib/api";
 import { Box, Button, Chip, Radio, Slider, Toggle } from "./ui";
-import type { Density, ThemePref } from "../lib/types";
+import type { Density, SortKey, ThemePref } from "../lib/types";
 
 /** Embed-only throughput on the reference GPU (RTX 4070 laptop). Used for the
  *  pre-flight estimate only — the live panel shows the measured rate. */
@@ -36,7 +39,7 @@ const DENSITIES: { v: Density; label: string }[] = [
 ];
 
 type SectionId =
-    | "folders" | "model" | "ocr" | "search" | "appearance" | "accessibility"
+    | "folders" | "model" | "ocr" | "search" | "order" | "appearance" | "accessibility"
     | "gestures" | "shortcuts" | "storage";
 
 /**
@@ -50,6 +53,7 @@ const SECTIONS: { id: SectionId; label: string; keywords: string }[] = [
     { id: "model", label: "Search model", keywords: "embedding siglip jina clip openclip vector re-index reindex turkish multilingual vram gpu" },
     { id: "ocr", label: "Text in images", keywords: "ocr tesseract rapidocr easyocr language turkish english screenshot text recognition" },
     { id: "search", label: "Search behaviour", keywords: "results page size limit how many debounce delay typing wait weight balance text visual ocr rrf fusion hybrid" },
+    { id: "order", label: "Dates & order", keywords: "sort order date newest oldest name size group month day year header timeline scrubber undated taken modified" },
     { id: "appearance", label: "Appearance", keywords: "theme dark light system font jetbrains mono typeface density grid size look colour color accent hue tint warm cool border radius corner selection" },
     { id: "accessibility", label: "Accessibility", keywords: "scale zoom bigger larger text size contrast motion animation reduce focus keyboard a11y" },
     { id: "gestures", label: "Mouse & gestures", keywords: "hold press long delay select drag slop threshold click paint sweep pointer shaky" },
@@ -153,6 +157,7 @@ export const SettingsView = memo(function SettingsView(){
                     {shown.includes("model") ? <ModelSection /> : null}
                     {shown.includes("ocr") ? <OcrSection /> : null}
                     {shown.includes("search") ? <SearchSection /> : null}
+                    {shown.includes("order") ? <OrderSection /> : null}
                     {shown.includes("appearance") ? <AppearanceSection /> : null}
                     {shown.includes("accessibility") ? <AccessibilitySection /> : null}
                     {shown.includes("gestures") ? <GestureSection /> : null}
@@ -566,10 +571,9 @@ function SearchSection(){
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                The grid only renders what is on screen, so a larger page costs thumbnails
-                and memory rather than frames. There is no infinite scroll yet: anything
-                past this number is counted in the result total but not loaded, so raise it
-                if a search keeps ending before the photos do.
+                Rows fetched per request. The grid loads the next page as you near the end,
+                so this trades a few larger requests against more smaller ones — it no
+                longer caps what you can reach.
             </div>
 
             <Label>TYPING DELAY</Label>
@@ -606,6 +610,82 @@ function SearchSection(){
                 Left favours what the photo <em>looks</em> like, right favours words read out
                 of it by OCR. This weights the two ranked lists, never their scores — cosine
                 and BM25 share no scale, and blending them directly is noise.
+            </div>
+        </Group>
+    );
+}
+
+function OrderSection(){
+    const sort = useStore((s) => s.settings.sort);
+    const groupBy = useStore((s) => s.settings.groupBy);
+    const keep = useStore((s) => s.settings.sortedSearchKeep);
+    const setSort = useStore((s) => s.setSort);
+    const searching = useStore((s) => s.query.trim() !== "");
+    const set = useStore((s) => s.setSetting);
+
+    return (
+        <Group
+            title="Dates and order"
+            hint="How the library is ordered, how date headers group it, and what a sorted search keeps."
+        >
+            <Label>LIBRARY ORDER</Label>
+            <div className="mb-[calc(6px*var(--ui-scale))] flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
+                {SORT_OPTIONS.filter((o) => o.key !== "relevance").map((o) => (
+                    <Chip
+                        key={o.key}
+                        label={o.short}
+                        active={sort === o.key}
+                        onClick={() => {
+                            // Here it always means the *library* order. With a
+                            // query typed, `setSort` would take it as that
+                            // query's session-only order, so the setting is
+                            // written directly and the search left alone.
+                            if(searching){
+                                set("sort", o.key as SortKey);
+                            }else{
+                                setSort(o.key as SortKey);
+                            }
+                        }}
+                    />
+                ))}
+            </div>
+            <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                Also in the top bar. A date comes from the photo&apos;s EXIF, then from a date in its
+                filename (<span className="font-mono">Screenshot_20260530_213645.png</span>), then
+                from when the file was last modified — the viewer says &ldquo;Modified&rdquo;
+                rather than &ldquo;Taken&rdquo; for those. Photos with none sort last.
+            </div>
+
+            <Label>GROUP DATE HEADERS BY</Label>
+            <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
+                {GROUP_BY_OPTIONS.map((g) => (
+                    <Chip
+                        key={g.key}
+                        label={g.label}
+                        active={groupBy === g.key}
+                        onClick={() => set("groupBy", g.key)}
+                    />
+                ))}
+            </div>
+            <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                Headers appear whenever the grid is sorted by date — browsing or searching.
+                The scrubber on the right edge always jumps by month.
+            </div>
+
+            <Label>SORTED SEARCH KEEPS</Label>
+            <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
+                {SORTED_SEARCH_KEEPS.map((n) => (
+                    <Chip
+                        key={n}
+                        label={`Top ${n}`}
+                        active={keep === n}
+                        onClick={() => set("sortedSearchKeep", n)}
+                    />
+                ))}
+            </div>
+            <div className="text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                Search ranks every photo in the library, so sorting a query by date, name or
+                size first keeps this many of the best matches, then reorders them.
             </div>
         </Group>
     );

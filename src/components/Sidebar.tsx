@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { SIDEBAR_DEFAULT_W, SIDEBAR_SNAP_W, useStore } from "../lib/store";
 import { fmtCount } from "../lib/format";
 import { Chip, CheckRow, SectionLabel } from "./ui";
@@ -341,11 +341,77 @@ function FilterGroup(props: {
     );
 }
 
+/** A full `YYYY-MM-DD` from 1900 on. The year floor is what makes one rule fit
+ *  both engines: Chrome's picker reports `0002-05-30` while a year is still
+ *  being typed, and where `type="date"` is unsupported the field is plain text
+ *  and reports every keystroke raw. */
+function completeDay(v: string): boolean{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number(v.slice(0, 4)) < 1900){
+        return false;
+    }
+    const d = new Date(`${v}T12:00:00`);
+    return !Number.isNaN(d.getTime()) && d.getDate() === Number(v.slice(8, 10));
+}
+
+/**
+ * One end of the custom range. The draft is local so a half-typed date never
+ * reaches the search; it commits the moment it is a whole date, or empty.
+ */
+function DateField(props: { label: string; value: string | null; onCommit: (v: string | null) => void }){
+    const { label, value, onCommit } = props;
+    const [draft, setDraft] = useState(value ?? "");
+
+    // A preset click or "Clear all" empties the range from outside.
+    useEffect(() => {
+        setDraft(value ?? "");
+    }, [value]);
+
+    const bad = draft !== "" && !completeDay(draft);
+    return (
+        <label className="flex items-center gap-[calc(8px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim">
+            <span className="w-[calc(34px*var(--ui-scale))] flex-shrink-0">{label}</span>
+            <input
+                type="date"
+                value={draft}
+                placeholder="YYYY-MM-DD"
+                onChange={(e) => {
+                    const v = e.target.value;
+                    setDraft(v);
+                    if(v === ""){
+                        onCommit(null);
+                    }else if(completeDay(v)){
+                        onCommit(v);
+                    }
+                }}
+                aria-invalid={bad}
+                className={
+                    "min-w-0 flex-1 rounded-md border bg-raised px-[calc(7px*var(--ui-scale))] py-[calc(4px*var(--ui-scale))] font-mono text-[calc(11.5px*var(--ui-scale))] text-fg outline-none focus:border-accent " +
+                    (bad ? "border-accent" : "border-edge")
+                }
+            />
+            {value !== null ? (
+                <button
+                    type="button"
+                    onClick={() => {
+                        setDraft("");
+                        onCommit(null);
+                    }}
+                    aria-label={`Clear ${label.toLowerCase()} date`}
+                    className="cursor-pointer px-[calc(2px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
+                >
+                    ✕
+                </button>
+            ) : null}
+        </label>
+    );
+}
+
 function FiltersSection(){
     const filters = useStore((s) => s.filters);
     const open = useStore((s) => s.filtersOpen);
     const toggleSection = useStore((s) => s.toggleFilterSection);
     const setDatePreset = useStore((s) => s.setDatePreset);
+    const setDateRange = useStore((s) => s.setDateRange);
     const toggleFolder = useStore((s) => s.toggleFolderFilter);
     const toggleType = useStore((s) => s.toggleTypeFilter);
     const setDims = useStore((s) => s.setDimsFilter);
@@ -356,6 +422,7 @@ function FiltersSection(){
         filters.folders.length +
         filters.types.length +
         (filters.datePreset !== null ? 1 : 0) +
+        (filters.dateFrom !== null || filters.dateTo !== null ? 1 : 0) +
         (filters.dims !== null ? 1 : 0);
 
     return (
@@ -386,6 +453,21 @@ function FiltersSection(){
                             onClick={() => setDatePreset(d.key)}
                         />
                     ))}
+                </div>
+                <div className="mt-[calc(10px*var(--ui-scale))] flex flex-col gap-[calc(6px*var(--ui-scale))]">
+                    <DateField
+                        label="From"
+                        value={filters.dateFrom}
+                        onCommit={(v) => setDateRange(v, filters.dateTo)}
+                    />
+                    <DateField
+                        label="To"
+                        value={filters.dateTo}
+                        onCommit={(v) => setDateRange(filters.dateFrom, v)}
+                    />
+                    {filters.dateFrom !== null && filters.dateTo !== null && filters.dateFrom > filters.dateTo ? (
+                        <div className="text-[calc(11px*var(--ui-scale))] text-fg-faint">From is after To — nothing can match.</div>
+                    ) : null}
                 </div>
             </FilterGroup>
 

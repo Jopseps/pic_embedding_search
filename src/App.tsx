@@ -169,7 +169,11 @@ export default function App(){
             }
 
             if(e.key === "Escape"){
-                if(s.lightboxFullscreen){
+                if(s.view === "settings" && s.lightboxIndex === null){
+                    // Settings has nothing to clear; a stale query or selection
+                    // underneath must not make Esc a no-op here.
+                    s.setView("library");
+                }else if(s.lightboxFullscreen){
                     // Leave fullscreen first — closing outright loses the photo
                     // the user was looking at, which is not what Esc means here.
                     s.toggleLightboxFullscreen();
@@ -182,8 +186,6 @@ export default function App(){
                     s.clearQuery();
                 }else if(s.selectedIds.size > 0){
                     s.clearSelection();
-                }else if(s.view === "settings"){
-                    s.setView("library");
                 }
                 return;
             }

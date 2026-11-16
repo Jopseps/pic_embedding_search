@@ -251,3 +251,13 @@ textarea,
     background: var(--border);
     background-clip: content-box;
 }
+
+/* The date range inputs draw a native calendar icon and picker. Scoped to them,
+   not set on the theme blocks: `color-scheme` on the root would also restyle
+   every native scrollbar in the app. */
+input[type="date"] {
+    color-scheme: dark;
+}
+[data-theme="light"] input[type="date"] {
+    color-scheme: light;
+}

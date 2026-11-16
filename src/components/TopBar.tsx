@@ -1,5 +1,6 @@
-import { memo, useEffect, useRef } from "react";
-import { useStore } from "../lib/store";
+import { memo, useEffect, useRef, useState } from "react";
+import { activeSort, useStore } from "../lib/store";
+import { SORT_OPTIONS } from "../lib/catalog";
 import { fmtCount, fmtEta } from "../lib/format";
 
 const RING_CIRCUMFERENCE = 37.7;
@@ -16,6 +17,7 @@ export const TopBar = memo(function TopBar(){
     const clearQuery = useStore((s) => s.clearQuery);
     const saveSearch = useStore((s) => s.saveCurrentSearch);
     const setView = useStore((s) => s.setView);
+    const view = useStore((s) => s.view);
     const inputRef = useRef<HTMLInputElement>(null);
 
     // `/` focuses search from anywhere; App owns the key handler and pokes here.
@@ -76,13 +78,15 @@ export const TopBar = memo(function TopBar(){
                 </button>
             ) : null}
 
+            <SortMenu />
+
             <div className="flex-1" />
 
             <IndexingIndicator />
 
             <button
                 type="button"
-                onClick={() => setView("settings")}
+                onClick={() => setView(view === "settings" ? "library" : "settings")}
                 aria-label="Settings"
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-raised text-[calc(15px*var(--ui-scale))] text-fg-dim hover:bg-hover"
             >
@@ -91,6 +95,102 @@ export const TopBar = memo(function TopBar(){
         </div>
     );
 });
+
+/**
+ * The order of the grid. Browsing writes the choice to config.toml; with a
+ * query typed it is session-only and starts at Relevance, which is the only
+ * entry that exists while searching.
+ */
+function SortMenu(){
+    const sort = useStore(activeSort);
+    const searching = useStore((s) => s.query.trim() !== "");
+    const similar = useStore((s) => s.similarTo !== null);
+    const setSort = useStore((s) => s.setSort);
+    const [open, setOpen] = useState(false);
+    const rootRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if(!open){
+            return;
+        }
+        const onDown = (e: PointerEvent) => {
+            if(!rootRef.current?.contains(e.target as Node)){
+                setOpen(false);
+            }
+        };
+        // Capture, and stopped: App's Escape would otherwise also clear the
+        // query the menu is sorting.
+        const onKey = (e: KeyboardEvent) => {
+            if(e.key === "Escape"){
+                e.stopPropagation();
+                setOpen(false);
+            }
+        };
+        window.addEventListener("pointerdown", onDown, { capture: true });
+        window.addEventListener("keydown", onKey, { capture: true });
+        return () => {
+            window.removeEventListener("pointerdown", onDown, { capture: true });
+            window.removeEventListener("keydown", onKey, { capture: true });
+        };
+    }, [open]);
+
+    // "Find similar" is ordered by similarity and nothing else.
+    if(similar){
+        return null;
+    }
+    const options = SORT_OPTIONS.filter((o) => searching || o.key !== "relevance");
+    const current = SORT_OPTIONS.find((o) => o.key === sort) ?? SORT_OPTIONS[1];
+
+    return (
+        <div ref={rootRef} className="relative flex-shrink-0">
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                aria-haspopup="listbox"
+                aria-expanded={open}
+                title={searching ? "Order of these results" : "Order of the library"}
+                className="flex h-[calc(30px*var(--ui-scale))] cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
+            >
+                <span className="text-fg-faint">Sort</span>
+                <span className="whitespace-nowrap text-fg">{current?.short}</span>
+                <span className="text-[calc(10px*var(--ui-scale))] text-fg-faint">{open ? "▴" : "▾"}</span>
+            </button>
+            {open ? (
+                <div
+                    role="listbox"
+                    aria-label="Sort order"
+                    className="absolute top-[calc(36px*var(--ui-scale))] left-0 z-40 min-w-[calc(210px*var(--ui-scale))] rounded-[calc(10px*var(--ui-scale))] border border-edge bg-raised p-1 shadow-[var(--shadow-pop)]"
+                >
+                    {options.map((o) => (
+                        <button
+                            key={o.key}
+                            type="button"
+                            role="option"
+                            aria-selected={o.key === sort}
+                            onClick={() => {
+                                setOpen(false);
+                                if(o.key !== sort){
+                                    setSort(o.key);
+                                }
+                            }}
+                            className={
+                                "flex w-full cursor-pointer items-center justify-between gap-3 rounded px-2 py-[calc(6px*var(--ui-scale))] text-left text-[calc(12.5px*var(--ui-scale))] hover:bg-hover " +
+                                (o.key === sort ? "text-fg" : "text-fg-dim")
+                            }
+                        >
+                            <span className="whitespace-nowrap">{o.label}</span>
+                            {o.key === sort ? (
+                                <svg width="12" height="12" viewBox="0 0 12 12" className="flex-shrink-0 text-accent" aria-hidden="true">
+                                    <path d="M2 6.5 5 9.5 10 3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                            ) : null}
+                        </button>
+                    ))}
+                </div>
+            ) : null}
+        </div>
+    );
+}
 
 function IndexingIndicator(){
     const indexing = useStore((s) => s.indexing);

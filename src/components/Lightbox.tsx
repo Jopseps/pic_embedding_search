@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { api } from "../lib/api";
-import { fmtDate } from "../lib/format";
+import { dateVerb, fmtDateTime } from "../lib/format";
 import type { Photo } from "../lib/types";
 
 const MAX_W = 1100;
@@ -472,7 +472,10 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[calc(12.5px*var(--ui-scale))] text-white/85"
                         >
                             {photo.filename} · {natural?.w ?? photo.width}×{natural?.h ?? photo.height} ·{" "}
-                            {fmtDate(photo.takenAt)} · {photo.folder}
+                            <span title={photo.dateSource === "mtime" ? "No capture date in the file — this is when it was last modified" : undefined}>
+                                {photo.takenAt === null ? "Undated" : `${dateVerb(photo.dateSource)} ${fmtDateTime(photo.takenAt)}`}
+                            </span>{" "}
+                            · {photo.folder}
                         </div>
                         <button
                             type="button"

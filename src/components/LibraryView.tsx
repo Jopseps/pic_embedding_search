@@ -1,15 +1,19 @@
-import { memo, useMemo } from "react";
-import { useStore } from "../lib/store";
-import { GRID_GAP } from "../lib/catalog";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { activeSort, sectionsByDate, useStore } from "../lib/store";
+import { GRID_GAP, SORT_OPTIONS } from "../lib/catalog";
 import { visibleRange } from "../lib/grid";
+import { buildMarks } from "../lib/timeline";
 import { GRID_PAD_X, type GridLayoutHandle } from "../lib/useGridLayout";
 import { useGridGesture } from "../lib/useGridGesture";
 import { fmtCount } from "../lib/format";
 import { GridCell, SkeletonCell } from "./GridCell";
+import { Scrubber } from "./Scrubber";
 import { Button } from "./ui";
 import type { Photo } from "../lib/types";
 
 const ZOOM_DOTS = [6, 9, 12];
+/** Start fetching the next page this many viewports before the end. */
+const LOAD_AHEAD_VIEWPORTS = 1.5;
 
 export function LibraryView(props: { grid: GridLayoutHandle }){
     const { grid } = props;
@@ -28,6 +32,13 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const clearQuery = useStore((s) => s.clearQuery);
     const exitSimilar = useStore((s) => s.exitSimilar);
     const addFolder = useStore((s) => s.addFolder);
+    const byDate = useStore(sectionsByDate);
+    const sort = useStore(activeSort);
+    const cursor = useStore((s) => s.cursor);
+    const loadingMore = useStore((s) => s.loadingMore);
+    const loadMore = useStore((s) => s.loadMore);
+    const loadThrough = useStore((s) => s.loadThrough);
+    const timeline = useStore((s) => s.timeline);
 
     const isSearch = mode === "results" || mode === "emptySearch";
     const title = useMemo(() => {
@@ -72,7 +83,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     // Month header currently scrolled past — pinned so the date context never
     // disappears, which plain absolute positioning would otherwise lose.
     const stickyLabel = useMemo(() => {
-        if(mode !== "idle" || headers.length === 0){
+        if(!byDate || mode === "loading" || headers.length === 0){
             return null;
         }
         let lo = 0;
@@ -80,7 +91,9 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
         let found = -1;
         while(lo <= hi){
             const mid = (lo + hi) >> 1;
-            if((headers[mid]?.top ?? 0) <= scrollTop + 1){
+            // Strictly past: a header still in view is its own label, and a
+            // pinned copy over it reads as the month printed twice.
+            if((headers[mid]?.top ?? 0) < scrollTop){
                 found = mid;
                 lo = mid + 1;
             }else{
@@ -88,7 +101,84 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
             }
         }
         return found < 0 ? null : headers[found]?.label ?? null;
-    }, [headers, scrollTop, mode]);
+    }, [headers, scrollTop, mode, byDate]);
+
+    // Infinite scroll. An effect on the geometry rather than a scroll
+    // listener: content shorter than the viewport never scrolls, and a first
+    // page that does not fill a tall window would otherwise never grow.
+    const canPage = mode === "idle" || mode === "results";
+    useEffect(() => {
+        if(!canPage || cursor === null || loadingMore || viewportHeight === 0){
+            return;
+        }
+        if(scrollTop + viewportHeight * (1 + LOAD_AHEAD_VIEWPORTS) >= layout.totalHeight){
+            void loadMore();
+        }
+    }, [canPage, cursor, loadingMore, scrollTop, viewportHeight, layout.totalHeight, loadMore]);
+
+    // ---- scrubber ---------------------------------------------------------
+
+    const marks = useMemo(() => (timeline === null ? null : buildMarks(timeline)), [timeline]);
+
+    // First photo in view, from the rows already sliced for rendering — the
+    // thumb's position, and the month the bubble names while dragging.
+    let currentIndex = 0;
+    for(const b of blocks){
+        if(b.kind === "row" && b.top + b.height > scrollTop){
+            const first = b.row.cells[0];
+            currentIndex = first === undefined ? 0 : (indexById.get(first.item.id) ?? 0);
+            break;
+        }
+    }
+
+    // The native scrollbar's width, so the rail sits beside it, not on it.
+    const [scrollbarW, setScrollbarW] = useState(0);
+    useEffect(() => {
+        const el = grid.scrollRef.current;
+        if(el !== null){
+            setScrollbarW(el.offsetWidth - el.clientWidth);
+        }
+    }, [grid.scrollRef, grid.width, layout.totalHeight]);
+
+    // A jump to a photo that is not loaded yet waits here until it is. The
+    // effect below retries after every layout, so a jump made while another
+    // page was in flight is not dropped.
+    const pendingJump = useRef<number | null>(null);
+    const tryJump = useCallback(() => {
+        const index = pendingJump.current;
+        const el = grid.scrollRef.current;
+        if(index === null || el === null){
+            return;
+        }
+        const entry = layout.rowMap[index];
+        if(entry === undefined){
+            void loadThrough(index);
+            return;
+        }
+        const bi = layout.blocks.findIndex((b) => b.kind === "row" && b.rowIndex === entry.row);
+        const block = layout.blocks[bi];
+        if(block === undefined){
+            return;
+        }
+        // Top-aligned, and onto the month's header when the row opens one:
+        // the minimal scroll `scrollToIndex` does would land a jump downward
+        // at the *bottom* of the viewport.
+        const prev = layout.blocks[bi - 1];
+        el.scrollTop = prev !== undefined && prev.kind === "header" ? prev.top : block.top;
+        pendingJump.current = null;
+    }, [grid.scrollRef, layout, loadThrough]);
+    useEffect(() => {
+        tryJump();
+    }, [tryJump, cursor, loadingMore]);
+    const onJump = useCallback((index: number) => {
+        pendingJump.current = index;
+        tryJump();
+    }, [tryJump]);
+
+    const everythingFits = cursor === null && layout.totalHeight <= viewportHeight;
+    const showScrubber = byDate && canPage && marks !== null && marks.marks.length > 1 && !everythingFits;
+
+    const sortShort = SORT_OPTIONS.find((o) => o.key === sort)?.short ?? "";
 
     return (
         <div className="relative flex min-w-0 flex-1 flex-col">
@@ -97,7 +187,13 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                     <div className="text-[calc(15px*var(--ui-scale))] font-semibold">{title}</div>
                     {mode === "results" ? (
                         <div className="mt-[calc(2px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] tabular-nums text-fg-faint">
-                            {fmtCount(total)} result{total === 1 ? "" : "s"} · {tookMs} ms
+                            {sort === "relevance"
+                                // A re-sorted query keeps only its best matches;
+                                // saying so stops "100 results" reading as if
+                                // the rest of the library vanished.
+                                ? `${fmtCount(total)} result${total === 1 ? "" : "s"}`
+                                : `Top ${fmtCount(total)} match${total === 1 ? "" : "es"}, ${sortShort.toLowerCase()}`}
+                            {" "}· {tookMs} ms
                         </div>
                     ) : null}
                 </div>
@@ -128,76 +224,91 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                 </div>
             </div>
 
-            <div
-                ref={attachScroll}
-                onPointerDown={gesture.onPointerDown}
-                className="relative flex-1 overflow-y-auto pt-2 pb-[calc(90px*var(--ui-scale))]"
-                style={{
-                    paddingLeft: GRID_PAD_X,
-                    paddingRight: GRID_PAD_X,
-                    // The sweep keeps painting under a pointer that has left the
-                    // photos, so the cursor has to say so everywhere in the pane.
-                    cursor: gesture.sweeping ? "crosshair" : undefined,
-                }}
-            >
-                {stickyLabel !== null ? (
-                    <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[calc(10px*var(--ui-scale))] pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim">
-                        {stickyLabel}
-                    </div>
-                ) : null}
+            <div className="relative flex min-h-0 flex-1">
+                <div
+                    ref={attachScroll}
+                    onPointerDown={gesture.onPointerDown}
+                    className="relative min-w-0 flex-1 overflow-y-auto pb-[calc(90px*var(--ui-scale))]"
+                    style={{
+                        paddingLeft: GRID_PAD_X,
+                        paddingRight: GRID_PAD_X,
+                        // The sweep keeps painting under a pointer that has left the
+                        // photos, so the cursor has to say so everywhere in the pane.
+                        cursor: gesture.sweeping ? "crosshair" : undefined,
+                    }}
+                >
+                    {stickyLabel !== null ? (
+                        <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[calc(10px*var(--ui-scale))] pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim">
+                            {stickyLabel}
+                        </div>
+                    ) : null}
 
-                {mode === "emptyLibrary" ? (
-                    <EmptyLibrary onAddFolder={() => void addFolder()} />
-                ) : null}
+                    {mode === "emptyLibrary" ? (
+                        <EmptyLibrary onAddFolder={() => void addFolder()} />
+                    ) : null}
 
-                {mode === "emptySearch" ? (
-                    <EmptySearch
-                        query={query}
-                        similar={similarTo !== null}
-                        onClear={similarTo !== null ? exitSimilar : clearQuery}
-                    />
-                ) : null}
+                    {mode === "emptySearch" ? (
+                        <EmptySearch
+                            query={query}
+                            similar={similarTo !== null}
+                            onClear={similarTo !== null ? exitSimilar : clearQuery}
+                        />
+                    ) : null}
 
-                {layout.totalHeight > 0 ? (
-                    <div
-                        ref={gesture.canvasRef}
-                        className="relative"
-                        style={{ height: layout.totalHeight }}
-                    >
-                        {blocks.map((block) => {
-                            if(block.kind === "header"){
+                    {layout.totalHeight > 0 ? (
+                        <div
+                            ref={gesture.canvasRef}
+                            className="relative mt-2"
+                            style={{ height: layout.totalHeight }}
+                        >
+                            {blocks.map((block) => {
+                                if(block.kind === "header"){
+                                    return (
+                                        <div
+                                            key={block.key}
+                                            className="absolute right-0 left-0 flex items-end pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim"
+                                            style={{ top: block.top, height: block.height }}
+                                        >
+                                            {block.label}
+                                        </div>
+                                    );
+                                }
                                 return (
                                     <div
                                         key={block.key}
-                                        className="absolute right-0 left-0 flex items-end pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim"
-                                        style={{ top: block.top, height: block.height }}
+                                        className="absolute flex"
+                                        style={{ top: block.top, height: block.height, gap: GRID_GAP }}
                                     >
-                                        {block.label}
+                                        {block.row.cells.map((cell) => (
+                                            <Cell
+                                                key={cell.item.id}
+                                                id={cell.item.id}
+                                                width={cell.width}
+                                                height={cell.height}
+                                                skeleton={mode === "loading"}
+                                                layoutFlatIndex={indexById.get(cell.item.id) ?? -1}
+                                                photo={cell.item}
+                                            />
+                                        ))}
                                     </div>
                                 );
-                            }
-                            return (
-                                <div
-                                    key={block.key}
-                                    className="absolute flex"
-                                    style={{ top: block.top, height: block.height, gap: GRID_GAP }}
-                                >
-                                    {block.row.cells.map((cell) => (
-                                        <Cell
-                                            key={cell.item.id}
-                                            id={cell.item.id}
-                                            width={cell.width}
-                                            height={cell.height}
-                                            skeleton={mode === "loading"}
-                                            layoutFlatIndex={indexById.get(cell.item.id) ?? -1}
-                                            photo={cell.item}
-                                        />
-                                    ))}
-                                </div>
-                            );
-                        })}
+                            })}
 
-                    </div>
+                        </div>
+                    ) : null}
+
+                    {loadingMore ? (
+                        <div className="py-4 text-center text-[calc(12px*var(--ui-scale))] text-fg-faint">Loading more…</div>
+                    ) : null}
+                </div>
+                {showScrubber && marks !== null ? (
+                    <Scrubber
+                        marks={marks}
+                        currentIndex={currentIndex}
+                        rightInset={scrollbarW}
+                        onJump={onJump}
+                        scrollRef={grid.scrollRef}
+                    />
                 ) : null}
             </div>
 
