@@ -261,6 +261,7 @@ function CollectionsSection(){
                         if(e.key === "Enter"){
                             commit();
                         }else if(e.key === "Escape"){
+                            e.stopPropagation();
                             cancel();
                         }
                     }}

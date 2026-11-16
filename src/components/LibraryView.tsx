@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { activeSort, sectionsByDate, useStore } from "../lib/store";
+import { activeSort, searchKey, sectionsByDate, useStore } from "../lib/store";
 import { GRID_GAP, SORT_OPTIONS } from "../lib/catalog";
 import { visibleRange } from "../lib/grid";
 import { buildMarks } from "../lib/timeline";
@@ -152,7 +152,13 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
         }
         const entry = layout.rowMap[index];
         if(entry === undefined){
-            void loadThrough(index);
+            if(useStore.getState().cursor === null){
+                // Nothing left to load: the index is not coming. Kept, it would
+                // fire on whatever layout change lands next and yank the grid.
+                pendingJump.current = null;
+            }else{
+                void loadThrough(index);
+            }
             return;
         }
         const bi = layout.blocks.findIndex((b) => b.kind === "row" && b.rowIndex === entry.row);
@@ -175,6 +181,12 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
         tryJump();
     }, [tryJump]);
 
+    // A jump belongs to the question it was made under.
+    const asked = useStore(searchKey);
+    useEffect(() => {
+        pendingJump.current = null;
+    }, [asked]);
+
     const everythingFits = cursor === null && layout.totalHeight <= viewportHeight;
     const showScrubber = byDate && canPage && marks !== null && marks.marks.length > 1 && !everythingFits;
 
@@ -182,7 +194,10 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
 
     return (
         <div className="relative flex min-w-0 flex-1 flex-col">
-            <div className="flex flex-shrink-0 items-center justify-between px-5 pt-[calc(14px*var(--ui-scale))] pb-[calc(6px*var(--ui-scale))]">
+            <div
+                style={{ paddingLeft: GRID_PAD_X, paddingRight: GRID_PAD_X }}
+                className="flex flex-shrink-0 items-center justify-between pt-[calc(14px*var(--ui-scale))] pb-[calc(6px*var(--ui-scale))]"
+            >
                 <div>
                     <div className="text-[calc(15px*var(--ui-scale))] font-semibold">{title}</div>
                     {mode === "results" ? (
@@ -212,8 +227,8 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                             <span
                                 className="rounded-sm"
                                 style={{
-                                    width: dot,
-                                    height: dot,
+                                    width: `calc(${dot}px*var(--ui-scale))`,
+                                    height: `calc(${dot}px*var(--ui-scale))`,
                                     background: density === i
                                         ? "var(--text-primary)"
                                         : "var(--text-tertiary)",
@@ -238,7 +253,19 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                     }}
                 >
                     {stickyLabel !== null ? (
-                        <div className="pointer-events-none sticky top-0 z-[2] -mx-5 bg-canvas px-5 pt-[calc(10px*var(--ui-scale))] pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim">
+                        <div
+                            // The grid's own gutter, not `-mx-5`: that follows the UI
+                            // scale and the gutter does not, so above 100% the pinned
+                            // label stuck out past the scroller and grew a horizontal
+                            // scrollbar.
+                            style={{
+                                marginLeft: -GRID_PAD_X,
+                                marginRight: -GRID_PAD_X,
+                                paddingLeft: GRID_PAD_X,
+                                paddingRight: GRID_PAD_X,
+                            }}
+                            className="pointer-events-none sticky top-0 z-[2] bg-canvas pt-[calc(10px*var(--ui-scale))] pb-2 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg-dim"
+                        >
                             {stickyLabel}
                         </div>
                     ) : null}
@@ -441,6 +468,9 @@ function CollectionMenu(){
                         if(e.key === "Enter"){
                             void commit();
                         }else if(e.key === "Escape"){
+                            // Closes this box only; App's Esc would also clear
+                            // the query or the selection behind it.
+                            e.stopPropagation();
                             cancel();
                         }
                     }}

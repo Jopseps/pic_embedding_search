@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useStore } from "./lib/store";
 import { FONTS, fontById, MONO_FALLBACK, modelById } from "./lib/catalog";
 import { useGridLayout } from "./lib/useGridLayout";
@@ -108,8 +108,15 @@ export default function App(){
     useEffect(() => startEventStream(), [startEventStream]);
 
     // ---- keyboard ---------------------------------------------------------
+    // A ref, so the key listeners bind once. `grid` is a new object on every
+    // render and `App` renders on every scroll frame: with it as a dependency
+    // the window listener was torn down and re-added sixty times a second.
+    const gridRef = useRef(grid);
+    gridRef.current = grid;
+
     const moveFocus = useCallback(
         (key: string) => {
+            const grid = gridRef.current;
             const { rowMap } = grid.layout;
             const { focusedIndex, setFocusedIndex } = useStore.getState();
             if(rowMap.length === 0){
@@ -122,6 +129,10 @@ export default function App(){
             }
             const cur = rowMap[focusedIndex];
             if(cur === undefined){
+                // The list shrank under the focus (a rescan removed photos).
+                // Returning here left the arrow keys dead until a click.
+                setFocusedIndex(rowMap.length - 1);
+                grid.scrollToIndex(rowMap.length - 1);
                 return;
             }
             let next = focusedIndex;
@@ -152,17 +163,24 @@ export default function App(){
             setFocusedIndex(next);
             grid.scrollToIndex(next);
         },
-        [grid],
+        [],
     );
 
     useEffect(() => {
         function onKeyDown(e: KeyboardEvent){
+            // Chords belong to the OS and to the zoom handler below.
+            if(e.ctrlKey || e.metaKey || e.altKey){
+                return;
+            }
+            const grid = gridRef.current;
             const target = e.target as HTMLElement | null;
             const tag = target?.tagName ?? "";
             const inInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+            // Space and Enter already mean something on a focused button.
+            const onButton = target?.closest?.("button, a") != null;
             const s = useStore.getState();
 
-            if(e.key === "/" && !inInput){
+            if(e.key === "/" && !inInput && s.lightboxIndex === null){
                 e.preventDefault();
                 window.dispatchEvent(new Event("picsearch:focus-search"));
                 return;
@@ -202,13 +220,17 @@ export default function App(){
                 return;
             }
 
-            if(inInput || s.view !== "library"){
+            // The skeletons are not photos: a Space here would select one.
+            if(inInput || s.view !== "library" || grid.mode === "loading"){
                 return;
             }
 
             if(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)){
                 e.preventDefault();
                 moveFocus(e.key);
+                return;
+            }
+            if(onButton){
                 return;
             }
             if(e.key === " "){
@@ -219,14 +241,14 @@ export default function App(){
                 }
                 return;
             }
-            if(e.key === "Enter" && s.focusedIndex >= 0){
+            if(e.key === "Enter" && s.focusedIndex >= 0 && s.focusedIndex < grid.layout.flat.length){
                 s.openLightbox(s.focusedIndex);
             }
         }
 
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [grid, moveFocus]);
+    }, [moveFocus]);
 
     // ---- zoom -------------------------------------------------------------
     // Ctrl+wheel and trackpad pinch (which arrives as a wheel event with
@@ -272,11 +294,13 @@ export default function App(){
             if(!["+", "=", "-", "_", "0"].includes(e.key)){
                 return;
             }
+            // Swallowed everywhere, inputs included: the search box has focus
+            // from launch, and a chord left alone there zooms the whole page.
+            e.preventDefault();
             const tag = (e.target as HTMLElement | null)?.tagName ?? "";
             if(tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT"){
                 return;
             }
-            e.preventDefault();
             const s = useStore.getState();
             if(s.lightboxIndex !== null || s.view !== "library"){
                 return;

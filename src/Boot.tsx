@@ -94,7 +94,7 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
 
     const retry = () => {
         setConfirmReset(false);
-        void backendRetry();
+        backendRetry().catch((err: unknown) => setPollError(String(err)));
     };
     const reset = () => {
         if(!confirmReset){

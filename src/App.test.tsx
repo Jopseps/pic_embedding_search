@@ -555,4 +555,67 @@ describe("App", () => {
         expect(banner).toBeTruthy();
         expect(within(banner.parentElement!).getByText("Retry")).toBeTruthy();
     });
+
+    it("swallows the page-zoom chords even while the search box has focus", async () => {
+        await mountApp();
+        const input = screen.getByPlaceholderText(/Search your photos/);
+        input.focus();
+        // `fireEvent` returns false when the default was prevented.
+        for(const key of ["=", "+", "-", "0"]){
+            expect(fireEvent.keyDown(input, { key, ctrlKey: true })).toBe(false);
+        }
+        // Typing the same characters plain is still typing.
+        expect(fireEvent.keyDown(input, { key: "-" })).toBe(true);
+    });
+
+    it("leaves Space to a focused button instead of selecting a photo", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setFocusedIndex(0);
+        });
+        const button = screen.getByLabelText("Settings");
+        button.focus();
+        fireEvent.keyDown(button, { key: " " });
+        expect(useStore.getState().selectedIds.size).toBe(0);
+        fireEvent.keyDown(document.body, { key: " " });
+        expect(useStore.getState().selectedIds.size).toBe(1);
+    });
+
+    it("does not select a skeleton while a search is loading", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.setState({ focusedIndex: 0, searching: true });
+        });
+        fireEvent.keyDown(document.body, { key: " " });
+        expect(useStore.getState().selectedIds.size).toBe(0);
+    });
+
+    it("makes the app behind the viewer inert while it is open", async () => {
+        await mountApp();
+        const topBar = screen.getByLabelText("Settings").closest("div.flex-shrink-0")!.parentElement!;
+        expect(topBar.hasAttribute("inert")).toBe(false);
+        await act(async () => {
+            useStore.getState().openLightbox(0);
+        });
+        const dialog = screen.getByRole("dialog");
+        const siblings = Array.from(dialog.parentElement!.children).filter((el) => el !== dialog);
+        expect(siblings.length).toBeGreaterThan(0);
+        expect(siblings.every((el) => el.hasAttribute("inert"))).toBe(true);
+        await act(async () => {
+            useStore.getState().closeLightbox();
+        });
+        expect(document.querySelectorAll("[inert]").length).toBe(0);
+    });
+
+    it("Esc in the new-collection box closes the box and keeps the query", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.setState({ query: "masa" });
+            useStore.getState().startAddCollection();
+        });
+        const box = screen.getAllByPlaceholderText("Collection name")[0]!;
+        fireEvent.keyDown(box, { key: "Escape" });
+        expect(useStore.getState().addingCollection).toBe(false);
+        expect(useStore.getState().query).toBe("masa");
+    });
 });

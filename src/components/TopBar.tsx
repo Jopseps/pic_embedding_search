@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { activeSort, useStore } from "../lib/store";
 import { SORT_OPTIONS } from "../lib/catalog";
 import { fmtCount, fmtEta } from "../lib/format";
+import { isMockMode } from "../lib/api";
 
 const RING_CIRCUMFERENCE = 37.7;
 
@@ -247,13 +248,18 @@ function IndexingIndicator(){
                         <span>{indexing.rate} img/s</span>
                         <span>ETA {fmtEta(indexing.etaSec)}</span>
                     </div>
-                    <button
-                        type="button"
-                        onClick={togglePause}
-                        className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
-                    >
-                        {indexing.paused ? "Resume indexing" : "Pause indexing"}
-                    </button>
+                    {/* The sidecar has no pause route yet: outside mock mode
+                        this would flip a label until the next event and
+                        change nothing. */}
+                    {isMockMode ? (
+                        <button
+                            type="button"
+                            onClick={togglePause}
+                            className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
+                        >
+                            {indexing.paused ? "Resume indexing" : "Pause indexing"}
+                        </button>
+                    ) : null}
                 </div>
             ) : null}
         </div>

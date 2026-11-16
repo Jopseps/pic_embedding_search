@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { useStore } from "../lib/store";
+import { describeError, useStore } from "../lib/store";
 import { api } from "../lib/api";
 import { dateVerb, fmtDateTime } from "../lib/format";
 import type { Photo } from "../lib/types";
@@ -77,11 +77,14 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
     const toggleOcr = useStore((s) => s.toggleOcrExpanded);
     const findSimilar = useStore((s) => s.findSimilar);
     const collections = useStore((s) => s.collections);
-    const addToCollection = useStore((s) => s.addSelectionToCollection);
+    const addPhotosToCollection = useStore((s) => s.addPhotosToCollection);
     const toggleSelect = useStore((s) => s.toggleSelect);
     const showToast = useStore((s) => s.showToast);
 
     const photo = index === null ? undefined : props.flat[index];
+    const isSelected = useStore((s) => photo !== undefined && s.selectedIds.has(photo.id));
+    const open = photo !== undefined;
+    const rootRef = useRef<HTMLDivElement>(null);
     const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
     const [collectionsOpen, setCollectionsOpen] = useState(false);
 
@@ -227,6 +230,22 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
         return () => window.removeEventListener("keydown", onKey);
     }, [index, zoomAt, resetZoom]);
 
+    /** The viewer is modal, so the app behind it must not be reachable: Tab
+     *  would walk into the sidebar, and Enter on a button there would act on a
+     *  screen nobody can see. Set by hand on the siblings — nothing here owns
+     *  them — and undone by the same cleanup, or the whole app stays dead. */
+    useEffect(() => {
+        const root = rootRef.current;
+        if(!open || root === null || root.parentElement === null){
+            return;
+        }
+        const inerted = Array.from(root.parentElement.children).filter(
+            (el) => el !== root && !el.hasAttribute("inert"),
+        );
+        inerted.forEach((el) => el.setAttribute("inert", ""));
+        return () => inerted.forEach((el) => el.removeAttribute("inert"));
+    }, [open]);
+
     /** A window that got smaller leaves the photo pushed further out than the
      *  new bounds allow, and the gap only closes on the next pan. */
     useEffect(() => {
@@ -332,13 +351,15 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
 
     async function putInCollection(id: string){
         setCollectionsOpen(false);
-        // The collection actions work on the selection, so make this photo it.
-        useStore.setState({ selectedIds: new Set([photo!.id]) });
-        await addToCollection(id);
+        await addPhotosToCollection(id, [photo!.id]);
     }
 
     return (
         <div
+            ref={rootRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Photo viewer"
             onPointerDown={onRootPointerDown}
             onClick={onRootClick}
             className="fixed inset-0 z-[100] flex flex-col bg-black/[0.97]"
@@ -401,7 +422,12 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                     onPointerUp={onPointerUp}
                     onPointerCancel={onPointerUp}
                     className="flex h-full min-w-0 flex-1 items-center justify-center overflow-hidden"
-                    style={{ cursor: zoomed ? (panning ? "grabbing" : "grab") : "default" }}
+                    style={{
+                        cursor: zoomed ? (panning ? "grabbing" : "grab") : "default",
+                        // Pointer-driven pan: left to the browser, a touch drag
+                        // would be taken as a scroll and cancel it.
+                        touchAction: "none",
+                    }}
                 >
                     {full !== null ? (
                         <img
@@ -509,15 +535,19 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         <GhostAction
                             label="Open"
                             onClick={() => {
-                                void api.openExternally(photo.id);
-                                showToast("Opening in default viewer…");
+                                api.openExternally(photo.id).then(
+                                    () => showToast("Opening in default viewer…"),
+                                    (err: unknown) => showToast(describeError(err)),
+                                );
                             }}
                         />
                         <GhostAction
                             label="Reveal in files"
                             onClick={() => {
-                                void api.revealInFiles([photo.id]);
-                                showToast("Revealing in file manager…");
+                                api.revealInFiles([photo.id]).then(
+                                    () => showToast("Revealing in file manager…"),
+                                    (err: unknown) => showToast(describeError(err)),
+                                );
                             }}
                         />
                         <div className="relative">
@@ -550,7 +580,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             onClick={() => toggleSelect(photo.id)}
                             className="cursor-pointer text-[calc(11.5px*var(--ui-scale))] text-white/40 hover:text-white/70"
                         >
-                            Select
+                            {isSelected ? "Deselect" : "Select"}
                         </button>
                     </div>
                 </div>

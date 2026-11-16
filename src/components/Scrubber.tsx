@@ -143,7 +143,9 @@ export const Scrubber = memo(function Scrubber(props: {
                 }
             }}
             onPointerUp={(e) => {
-                e.currentTarget.releasePointerCapture(e.pointerId);
+                if(e.currentTarget.hasPointerCapture(e.pointerId)){
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                }
                 setDragging(false);
                 setHover(null);
             }}
