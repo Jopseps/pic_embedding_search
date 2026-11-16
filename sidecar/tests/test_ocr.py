@@ -215,3 +215,24 @@ def test_install_hint_names_the_missing_piece(monkeypatch):
     monkeypatch.setattr(system, "find_tesseract", lambda binary="tesseract": None)
     hint = ocr.install_hint(None, ["en"])
     assert "not installed" in hint and hint.endswith("sudo pacman -S tesseract tesseract-data-eng")
+
+
+def test_tesseract_runs_with_the_callers_environment(monkeypatch):
+    """`env=` replaces the environment. Passing only OMP_THREAD_LIMIT dropped
+    TESSDATA_PREFIX, so a language that `--list-langs` could see could not be
+    loaded by the child that had to use it."""
+    import subprocess
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, b"hello", b"")
+
+    engine = object.__new__(TesseractEngine)
+    engine.binary, engine.timeout, engine.langs_key = "tesseract", 5.0, "eng"
+    monkeypatch.setenv("TESSDATA_PREFIX", "/somewhere/tessdata")
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    assert engine.read(Image.new("L", (8, 8))) == "hello"
+    assert seen["TESSDATA_PREFIX"] == "/somewhere/tessdata"
+    assert seen["OMP_THREAD_LIMIT"] == "1"

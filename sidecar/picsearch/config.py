@@ -7,6 +7,8 @@ SQLite, not here — they carry per-folder state the UI edits constantly.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import tomllib
 from typing import Any
 
@@ -69,6 +71,9 @@ DEFAULTS: dict[str, Any] = {
 
 ALLOWED = set(DEFAULTS)
 
+# `save` is read-modify-write, and a settings PUT can land beside `promote_model`'s.
+_SAVE_LOCK = threading.Lock()
+
 
 def load() -> dict[str, Any]:
     settings = dict(DEFAULTS)
@@ -88,8 +93,15 @@ def load() -> dict[str, Any]:
 
 
 def save(settings: dict[str, Any]) -> dict[str, Any]:
-    merged = {**load(), **{k: v for k, v in settings.items() if k in ALLOWED}}
-    config_path().write_text(_dump(merged), encoding="utf-8")
+    with _SAVE_LOCK:
+        merged = {**load(), **{k: v for k, v in settings.items() if k in ALLOWED}}
+        path = config_path()
+        # Written aside and renamed: a kill mid-write left a truncated file, which
+        # `load()` reads as "defaults" — including the default model, which can
+        # name a model the library has no vectors for.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(_dump(merged), encoding="utf-8")
+        os.replace(tmp, path)
     return merged
 
 

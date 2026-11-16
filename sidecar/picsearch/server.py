@@ -30,7 +30,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import secrets
 import shutil
 import socket
@@ -208,6 +207,9 @@ class AppState:
         self.embedder = embedder if embedder is not None else Embedder(self.model_id)
         self.embedder_factory = embedder_factory if embedder_factory is not None else Embedder
         self.vectors = VectorIndex.load(self.store, self.model_id, self.spec.dim)
+        # Late-bound: a promotion replaces `self.vectors`, and a row deleted
+        # afterwards has to leave the *new* index.
+        self.store.add_delete_listener(lambda ids: self.vectors.remove(ids))
         self.events = EventBus()
         # resolve() never raises: an OCR engine that is not installed degrades
         # to no OCR with a warning, rather than a sidecar that will not boot.
@@ -216,7 +218,7 @@ class AppState:
             self.store,
             self.embedder,
             ocr=self.ocr,
-            on_event=self.events.publish,
+            on_event=self._on_event,
             on_vector=self._on_vector,
         )
         # Constructed, not started: `create_app`'s lifespan owns that, so the
@@ -257,6 +259,24 @@ class AppState:
             self.dates_ready.set()
         self.events.publish("dates-refreshed", {"count": count})
 
+    def _on_event(self, kind: str, payload: dict) -> None:
+        self.events.publish(kind, payload)
+        # A swap asked for while a scan held the ingest slot was deferred, and
+        # nothing else would ever start it: the boot scan runs before the
+        # lifespan resumes a pending swap.
+        if(kind == "scan-complete" and self.pending_model_id is not None):
+            threading.Thread(target=self._retry_swap, name="swap-retry", daemon=True).start()
+
+    def _retry_swap(self) -> None:
+        self.indexer.join()
+        model_id = self.pending_model_id
+        if(model_id is None or self.indexer.running or self.indexer.status.running):
+            return
+        try:
+            self.begin_model_swap(model_id)
+        except Exception:
+            log.exception("deferred model swap failed to start")
+
     def _on_vector(self, image_id: int, vector) -> None:
         try:
             self.vectors.add(image_id, vector)
@@ -294,8 +314,11 @@ class AppState:
             self.promote_model()
             return False
         # Its own Embedder: `Embedder` holds one resident model, and the live
-        # one is still answering queries.
-        self.pending_embedder = self.embedder_factory(model_id)
+        # one is still answering queries. Kept across retries — a fresh one per
+        # call would drop weights a backfill pass has already loaded.
+        held = self.pending_embedder
+        if(held is None or getattr(held, "model_id", model_id) != model_id):
+            self.pending_embedder = self.embedder_factory(model_id)
         started = self.indexer.start_model_backfill(
             model_id, self.pending_embedder, on_done=self.promote_model
         )
@@ -400,16 +423,22 @@ def _token_of(request: Request) -> str:
     return request.app.state.picsearch.token
 
 
+def _token_matches(supplied: str, request: Request) -> bool:
+    # Bytes: compare_digest raises TypeError on a non-ASCII str, which answered
+    # a bad token with a 500 instead of a 401.
+    return secrets.compare_digest(supplied.encode(), _token_of(request).encode())
+
+
 async def require_token(request: Request) -> None:
     supplied = request.headers.get(TOKEN_HEADER)
-    if(supplied is None or not secrets.compare_digest(supplied, _token_of(request))):
+    if(supplied is None or not _token_matches(supplied, request)):
         raise HTTPException(status_code=401, detail="missing or invalid token")
 
 
 async def require_token_or_query(request: Request, t: str | None = Query(default=None)) -> None:
     """`<img src>` cannot set headers, so bytes routes also take `?t=`."""
     supplied = request.headers.get(TOKEN_HEADER) or t
-    if(supplied is None or not secrets.compare_digest(supplied, _token_of(request))):
+    if(supplied is None or not _token_matches(supplied, request)):
         raise HTTPException(status_code=401, detail="missing or invalid token")
 
 
@@ -574,9 +603,7 @@ def create_app(state: AppState) -> FastAPI:
     @app.delete("/images", dependencies=[guard])
     def delete_images(body: IdsRequest) -> dict:
         """Removes rows and thumbnails. Originals on disk are never touched."""
-        removed = state.store.delete_images(body.ids)
-        state.vectors.remove(body.ids)
-        return {"removed": removed}
+        return {"removed": state.store.delete_images(body.ids)}
 
     # -- bytes -------------------------------------------------------------
 
@@ -803,6 +830,8 @@ def create_app(state: AppState) -> FastAPI:
     def clear_thumbs() -> dict:
         shutil.rmtree(paths.thumbs_dir(), ignore_errors=True)
         paths.thumbs_dir().mkdir(parents=True, exist_ok=True)
+        # Thumbnails exist only from ingest; a rescan rewrites the missing ones.
+        state.indexer.start_rescan()
         return {"ok": True}
 
     # -- shell integration -------------------------------------------------
@@ -869,40 +898,6 @@ def _spawn(argv: list[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Parent watchdog
-# ---------------------------------------------------------------------------
-
-def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) -> None:
-    """Exit hard when the process we belong to disappears.
-
-    Rust also kills the child on window-destroy and on panic, but the happy
-    path alone is not enough: this is what survives `pkill -9` on Tauri, and an
-    orphan holding VRAM is the failure this whole design guards against.
-
-    `--parent-pid` exists because Tauri spawns us through `uv`, so our direct
-    parent is not the process whose death matters. Watching *liveness of a pid*
-    rather than comparing `getppid()` is what makes that case work — an earlier
-    version compared ppid and killed the sidecar the instant it started, since
-    `uv`'s pid never equals Tauri's.
-    """
-    target = parent_pid if parent_pid is not None else os.getppid()
-    # Reparenting is only meaningful when we are watching our own parent.
-    watch_reparent = parent_pid is None
-
-    def watch() -> None:
-        while(True):
-            time.sleep(interval)
-            if(not system.pid_alive(target)):
-                log.warning("watched process %s is gone; exiting", target)
-                os._exit(0)
-            if(watch_reparent and os.getppid() != target):
-                log.warning("reparented away from %s; exiting", target)
-                os._exit(0)
-
-    threading.Thread(target=watch, name="picsearch-parent-watchdog", daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -933,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
 
     state = AppState(model_id=args.model)
     app = create_app(state)
-    start_parent_watchdog(args.parent_pid)
+    system.start_parent_watchdog(args.parent_pid)
 
     sock = _bind(args.host, args.port)
     port = sock.getsockname()[1]
@@ -949,6 +944,9 @@ def main(argv: list[str] | None = None) -> int:
 
     server = uvicorn.Server(uvicorn.Config(
         app, log_level=args.log_level, access_log=False, lifespan="on",
+        # `/events` never ends on its own; without a bound SIGTERM waited for the
+        # client to hang up, which the app's own webview never does.
+        timeout_graceful_shutdown=2,
     ))
     server.run(sockets=[sock])
     return 0

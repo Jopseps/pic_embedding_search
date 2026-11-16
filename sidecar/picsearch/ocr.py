@@ -32,6 +32,7 @@ Two decisions worth knowing:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Sequence
@@ -177,8 +178,9 @@ class TesseractEngine:
                 capture_output=True,
                 timeout=self.timeout,
                 # Tesseract's OpenMP pool fights the ingest thread pool and ends
-                # up slower than single-threaded. This is a known one.
-                env={"OMP_THREAD_LIMIT": "1"},
+                # up slower than single-threaded. This is a known one. Extends the
+                # environment: replacing it dropped TESSDATA_PREFIX (SYSTEMROOT on Windows).
+                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
