@@ -206,3 +206,70 @@ pub fn drain<R: std::io::Read + Send + 'static>(stream: R, sink: Sink){
         }
     });
 }
+
+#[cfg(all(test, unix))]
+mod tests{
+    use super::*;
+
+    const HELLO: &str = r#"echo '{"port": 4242, "token": "t0k"}'"#;
+
+    /// `sh -c <script>`; `--parent-pid N` lands in `$0 $1` and is ignored.
+    fn sh(script: String) -> Launch{
+        Launch{
+            program: PathBuf::from("sh"),
+            args: vec!["-c".into(), script],
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        }
+    }
+
+    fn quiet() -> Sink{
+        Arc::new(|_| {})
+    }
+
+    fn alive(pid: u32) -> bool{
+        Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[test]
+    fn hands_over_the_handshake_and_kill_stops_the_child(){
+        let mut sc = Sidecar::spawn(&sh(format!("{HELLO}; exec sleep 60")), quiet()).unwrap();
+        assert_eq!(sc.handshake.port, 4242);
+        assert_eq!(sc.handshake.token, "t0k");
+        let pid = sc.child.as_ref().unwrap().id();
+        assert!(alive(pid));
+        sc.kill();
+        assert!(!alive(pid));
+    }
+
+    #[test]
+    fn a_sidecar_that_exits_before_the_handshake_is_an_error_not_a_hang(){
+        let err = Sidecar::spawn(&sh("echo boom >&2; exit 3".into()), quiet()).err().unwrap();
+        assert!(err.contains("exited before"), "{err}");
+    }
+
+    #[test]
+    fn a_garbled_handshake_is_an_error_and_the_child_is_killed(){
+        let err = Sidecar::spawn(&sh("echo hello; exec sleep 60".into()), quiet()).err().unwrap();
+        assert!(err.contains("unparseable"), "{err}");
+    }
+
+    #[test]
+    fn a_chatty_stderr_never_blocks_the_child(){
+        let mark = std::env::temp_dir().join(format!("picsearch-chatty-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        let mut launch = sh(format!("{HELLO}; yes | head -c 3000000 >&2; touch \"$MARK\"; exec sleep 60"));
+        launch.envs.push(("MARK".into(), mark.display().to_string()));
+        let mut sc = Sidecar::spawn(&launch, quiet()).unwrap();
+        for _ in 0..100{
+            if mark.exists(){
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let finished = mark.exists();
+        sc.kill();
+        let _ = std::fs::remove_file(&mark);
+        assert!(finished, "the child stalled on a full stderr pipe");
+    }
+}

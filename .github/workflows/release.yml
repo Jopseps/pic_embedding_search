@@ -97,6 +97,13 @@ jobs:
 
       - run: npm ci
 
+      # The PKGBUILD job downloads PicSearch_<tag>_amd64.deb; a tag that differs
+      # from tauri.conf.json would make it look for a file that was never built.
+      - name: Tag matches the app version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: test "${GITHUB_REF_NAME#v}" = "$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+
       - name: Fetch the bundled uv
         run: node scripts/fetch-uv.mjs
 

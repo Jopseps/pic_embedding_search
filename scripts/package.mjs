@@ -24,7 +24,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const extra = process.argv.slice(2);
 
 function run(cmd, args){
-    execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
+    // npx is npx.cmd on Windows and needs a shell; node.exe does not, and a shell
+    // would split "C:\Program Files\nodejs\node.exe" at the space.
+    const shell = process.platform === "win32" && cmd !== process.execPath;
+    execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell });
 }
 
 run(process.execPath, [join(root, "scripts", "fetch-uv.mjs")]);

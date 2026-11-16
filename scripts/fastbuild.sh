@@ -30,6 +30,15 @@ for arg in "$@"; do
     esac
 done
 
+# makepkg names the package after pkgver, so a stale one would install the new
+# build under the old version.
+pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
+appver="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+if (( install == 1 )) && [[ "$pkgver" != "$appver" ]]; then
+    echo "packaging/arch/PKGBUILD has pkgver=$pkgver but tauri.conf.json says $appver: bump the PKGBUILD" >&2
+    exit 1
+fi
+
 if [[ ! -d node_modules ]]; then
     npm install
 fi

@@ -38,6 +38,11 @@ const CUDA13_MIN_DRIVER: u32 = 580;
 
 const STATE_FILE: &str = "state.json";
 
+/// An Optimus laptop wakes its GPU for `nvidia-smi`, which takes seconds; a
+/// wedged driver never answers. Past this the install stops rather than guess,
+/// because the choice is permanent: CPU torch on an NVIDIA machine stays CPU.
+const SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// What the boot screen is told while the install runs.
 pub enum Progress{
     Step(String),
@@ -188,7 +193,7 @@ impl Runtime{
         // A half-written marker from an interrupted run must not survive it.
         let _ = std::fs::remove_file(self.root.join(STATE_FILE));
 
-        let torch = pick_torch(&sink);
+        let torch = pick_torch(&sink)?;
         report(Progress::Note(match torch.as_str(){
             "cu130" => "NVIDIA GPU found — installing CUDA PyTorch (about 3 GB)".to_string(),
             _ => "No usable NVIDIA GPU — installing CPU PyTorch (about 200 MB). Indexing is slower without a GPU.".to_string(),
@@ -276,34 +281,49 @@ fn find_uv() -> PathBuf{
 
 /// `cu130` when an NVIDIA driver new enough for it answers, `cpu` otherwise.
 /// `PICSEARCH_TORCH` overrides either way.
-fn pick_torch(sink: &Sink) -> String{
+fn pick_torch(sink: &Sink) -> Result<String, String>{
     if let Ok(forced) = std::env::var("PICSEARCH_TORCH"){
         if forced == "cpu" || forced == "cu130"{
-            return forced;
+            return Ok(forced);
         }
     }
-    let output = hidden("nvidia-smi")
-        .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
-        .stdin(Stdio::null())
-        .output();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            hidden("nvidia-smi")
+                .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
+                .stdin(Stdio::null())
+                .output(),
+        );
+    });
+    let output = match rx.recv_timeout(SMI_TIMEOUT){
+        Ok(output) => output,
+        Err(_) => return Err(format!(
+            "nvidia-smi did not answer within {SMI_TIMEOUT:?}. Retry, or start PicSearch with PICSEARCH_TORCH=cpu to skip the GPU check."
+        )),
+    };
     let Ok(output) = output else{
         sink("nvidia-smi not found".into());
-        return "cpu".into();
+        return Ok("cpu".into());
     };
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     let Some(first) = text.lines().next().filter(|_| output.status.success()) else{
         sink("nvidia-smi found no GPU".into());
-        return "cpu".into();
+        return Ok("cpu".into());
     };
     sink(format!("GPU: {}", first.trim()));
-    let driver = first.rsplit(',').next().unwrap_or("").trim();
-    let major = driver.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
-    if major >= CUDA13_MIN_DRIVER{
-        "cu130".into()
+    if driver_major(first) >= CUDA13_MIN_DRIVER{
+        Ok("cu130".into())
     }else{
-        sink(format!("driver {driver} is older than {CUDA13_MIN_DRIVER}, which CUDA 13 needs"));
-        "cpu".into()
+        sink(format!("driver is older than {CUDA13_MIN_DRIVER}, which CUDA 13 needs"));
+        Ok("cpu".into())
     }
+}
+
+/// The driver's major version from an `name, driver_version` line, 0 if unreadable.
+fn driver_major(line: &str) -> u32{
+    let driver = line.rsplit(',').next().unwrap_or("").trim();
+    driver.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0)
 }
 
 /// Runs a setup step, feeding every line of stdout through `on_stdout` (which
@@ -349,4 +369,74 @@ fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn
     std::thread::sleep(std::time::Duration::from_millis(100));
     let why = tail.lock().map(|t| t.join("\n")).unwrap_or_default();
     Err(format!("{:?} exited with {status}\n{why}", cmd.get_program()))
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+
+    /// A scratch source + runtime pair under the temp dir, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch{
+        fn new(name: &str) -> Self{
+            let dir = std::env::temp_dir().join(format!("picsearch-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("source")).unwrap();
+            std::fs::create_dir_all(dir.join("root")).unwrap();
+            std::fs::write(dir.join("source").join("pyproject.toml"), "abc").unwrap();
+            std::fs::write(dir.join("source").join("uv.lock"), "xyz").unwrap();
+            Scratch(dir)
+        }
+
+        fn runtime(&self) -> Runtime{
+            Runtime{ source: self.0.join("source"), root: self.0.join("root"), uv: PathBuf::from("uv") }
+        }
+    }
+
+    impl Drop for Scratch{
+        fn drop(&mut self){
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_fnv_over_both_files_and_moves_with_either(){
+        let s = Scratch::new("fingerprint");
+        let rt = s.runtime();
+        assert_eq!(rt.fingerprint().unwrap(), "fbb3823fd29ec6fe");
+        std::fs::write(s.0.join("source").join("uv.lock"), "xyZ").unwrap();
+        assert_ne!(rt.fingerprint().unwrap(), "fbb3823fd29ec6fe");
+    }
+
+    #[test]
+    fn the_venv_is_current_only_with_a_matching_marker_and_a_python(){
+        let s = Scratch::new("current");
+        let rt = s.runtime();
+        assert!(!rt.is_current().unwrap(), "no marker");
+
+        let marker = s.0.join("root").join(STATE_FILE);
+        std::fs::write(&marker, "not json").unwrap();
+        assert!(!rt.is_current().unwrap(), "corrupt marker");
+
+        let good = serde_json::to_string(&State{ fingerprint: rt.fingerprint().unwrap(), torch: "cpu".into() }).unwrap();
+        std::fs::write(&marker, &good).unwrap();
+        assert!(!rt.is_current().unwrap(), "marker but no interpreter");
+
+        std::fs::create_dir_all(rt.python().parent().unwrap()).unwrap();
+        std::fs::write(rt.python(), "").unwrap();
+        assert!(rt.is_current().unwrap());
+
+        std::fs::write(s.0.join("source").join("pyproject.toml"), "changed").unwrap();
+        assert!(!rt.is_current().unwrap(), "pyproject changed");
+    }
+
+    #[test]
+    fn the_cuda_cut_reads_the_driver_major(){
+        assert_eq!(driver_major("NVIDIA GeForce RTX 4070 Laptop GPU, 615.71.09"), 615);
+        assert_eq!(driver_major("Tesla, K80, 470.82.01"), 470);
+        assert!(driver_major("NVIDIA GeForce RTX 4070, 580.95") >= CUDA13_MIN_DRIVER);
+        assert_eq!(driver_major("garbage"), 0);
+        assert_eq!(driver_major(""), 0);
+    }
 }
