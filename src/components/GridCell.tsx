@@ -120,6 +120,18 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
                         style={{ background: "var(--accent)", opacity: 0.1 }}
                     />
                 ) : null}
+                {/* A hairline of canvas colour between photo and frame, so the
+                    frame still reads as one against a photo whose own edge is
+                    accent-coloured. Inside the inset image, so no layout moves. */}
+                {selected ? (
+                    <div
+                        className="pointer-events-none absolute inset-0"
+                        style={{
+                            borderRadius: INNER_RADIUS,
+                            boxShadow: "inset 0 0 0 calc(1px*var(--ui-scale)) var(--surface-canvas)",
+                        }}
+                    />
+                ) : null}
 
                 <button
                     type="button"

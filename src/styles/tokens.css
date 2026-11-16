@@ -161,6 +161,13 @@ body,
     height: 100%;
 }
 
+/* A touchpad or touchscreen pinch is the third way into the webview's page
+   zoom, next to Ctrl+wheel and Ctrl+/-. Panning stays; pinching does not. */
+html,
+body {
+    touch-action: pan-x pan-y;
+}
+
 body {
     margin: 0;
     font-family: var(--font-ui);
