@@ -186,11 +186,12 @@ def test_a_saved_search_carries_its_filters(client):
 
 
 def test_a_saved_search_with_no_filters_still_has_the_full_shape(client):
-    """`Filters` in types.ts has four keys and the store spreads them straight
+    """`Filters` in types.ts has six keys and the store spreads them straight
     into its own state. A missing key would land as `undefined`."""
     made = client.post("/searches", json={"query": "table"}).json()
     assert made["filters"] == {
-        "datePreset": None, "folders": [], "types": [], "dims": None,
+        "datePreset": None, "dateFrom": None, "dateTo": None,
+        "folders": [], "types": [], "dims": None,
     }
     assert made["view"] is None
     assert made["collection"] is None

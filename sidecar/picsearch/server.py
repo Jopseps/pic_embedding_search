@@ -51,11 +51,22 @@ from pydantic.alias_generators import to_camel
 from . import config, ocr, paths, system
 from .embed import Embedder, spec_for
 from .index import Indexer
-from .search import DEFAULT_LIMIT, Searcher, SearchParams, VectorIndex, hydrate
+from .search import (
+    DEFAULT_LIMIT,
+    DEFAULT_SORTED_KEEP,
+    NOW_LOCAL_SQL,
+    Searcher,
+    SearchParams,
+    VectorIndex,
+    hydrate,
+)
 from .store import Store
 from .watch import FolderWatcher
 
 log = logging.getLogger("picsearch.server")
+
+# How long a search waits for the startup date refresh before answering anyway.
+DATES_WAIT_SEC = 5.0
 
 TOKEN_HEADER = "X-PicSearch-Token"
 
@@ -106,7 +117,8 @@ class SettingsRequest(Camel):
 # `Filters` in types.ts, with every key present. A saved search written before a
 # filter existed must still deserialize into the full shape.
 EMPTY_FILTERS: dict[str, Any] = {
-    "datePreset": None, "folders": [], "types": [], "dims": None,
+    "datePreset": None, "dateFrom": None, "dateTo": None,
+    "folders": [], "types": [], "dims": None,
 }
 
 
@@ -218,6 +230,32 @@ class AppState:
         self.pending_model_id: str | None = self.settings.get("pendingModelId")
         self.pending_embedder: Any | None = None
         self.started = time.time()
+        # Set once every row's date follows the current `dates` rules. Search
+        # waits on it briefly (`DATES_WAIT_SEC`) so the first grid after an
+        # upgrade is not ordered by the dates it is about to replace.
+        self.dates_ready = threading.Event()
+        if(self.store.dates_stale() and self.store.image_count() == 0):
+            # Nothing to re-derive: a fresh library is born on the current rules.
+            self.store.refresh_dates()
+        if(not self.store.dates_stale()):
+            self.dates_ready.set()
+
+    def refresh_dates(self) -> None:
+        """Re-derive every row's date under the current rules, then tell the UI.
+
+        Runs on its own thread from the lifespan: EXIF headers for a large
+        library take a while, and the handshake must not wait for them.
+        """
+        try:
+            started = time.perf_counter()
+            count = self.store.refresh_dates()
+            log.info("dates: re-derived %d rows in %.1fs", count, time.perf_counter() - started)
+        except Exception:
+            log.exception("date refresh failed")
+            return
+        finally:
+            self.dates_ready.set()
+        self.events.publish("dates-refreshed", {"count": count})
 
     def _on_vector(self, image_id: int, vector) -> None:
         try:
@@ -386,6 +424,8 @@ def create_app(state: AppState) -> FastAPI:
         # serving loop to hand work back to.
         state.events.bind(asyncio.get_running_loop())
         state.watcher.start()
+        if(not state.dates_ready.is_set()):
+            threading.Thread(target=state.refresh_dates, name="dates", daemon=True).start()
         # A swap interrupted by a crash or a quit picks up where it stopped —
         # `embed_missing` is keyed on what is missing, so nothing is redone.
         state.resume_model_swap()
@@ -452,9 +492,12 @@ def create_app(state: AppState) -> FastAPI:
         showed however many results the current query returned and "Duplicates"
         counted only the loaded window. Both were wrong the moment anyone typed.
         """
+        # "Recent" reads `taken_at`; the first count after an upgrade must not
+        # be taken from the dates the startup refresh is about to replace.
+        state.dates_ready.wait(DATES_WAIT_SEC)
         recent = int(state.store.conn().execute(
-            "SELECT count(*) AS n FROM images"
-            " WHERE COALESCE(taken_at, indexed_at) >= datetime('now', '-7 days')"
+            f"SELECT count(*) AS n FROM images WHERE images.taken_at >= {NOW_LOCAL_SQL}",
+            ("-7 days",),
         ).fetchone()["n"])
         per_collection = {
             str(int(r["id"])): state.store.collection_count(int(r["id"]))
@@ -478,27 +521,44 @@ def create_app(state: AppState) -> FastAPI:
         except (TypeError, ValueError):
             return fallback
 
-    @app.get("/search", dependencies=[guard])
-    def search(
+    def _params(
         q: str = "",
         view: str | None = None,
         collection: str | None = None,
         date: str | None = None,
+        date_from: str | None = Query(default=None, alias="from"),
+        date_to: str | None = Query(default=None, alias="to"),
         dims: str | None = None,
         folder: list[str] = Query(default_factory=list),
         type: list[str] = Query(default_factory=list),
+        sort: str = "",
         limit: int = DEFAULT_LIMIT,
         cursor: str | None = None,
-    ) -> dict:
-        params = SearchParams(
+    ) -> SearchParams:
+        # A first request after an upgrade waits for the date refresh rather
+        # than rendering an order it is about to replace. Bounded, because a
+        # huge library must still answer; `dates-refreshed` covers the rest.
+        state.dates_ready.wait(DATES_WAIT_SEC)
+        return SearchParams(
             q=q, view=view, collection=collection, date=date, dims=dims,
+            date_from=date_from, date_to=date_to,
             folders=list(folder), types=list(type),
-            limit=max(1, min(limit, 1000)), cursor=cursor,
+            limit=max(1, min(limit, 1000)), cursor=cursor, sort=sort,
             # Read per request, not captured at startup: `PUT /settings` writes
-            # it live and the next query has to answer with it.
+            # them live and the next query has to answer with them.
             text_weight=_int_setting("textWeight", 50),
+            sorted_keep=max(1, _int_setting("sortedSearchKeep", DEFAULT_SORTED_KEEP)),
         )
+
+    @app.get("/search", dependencies=[guard])
+    def search(params: SearchParams = Depends(_params)) -> dict:
         return state.searcher.search(params)
+
+    @app.get("/timeline", dependencies=[guard])
+    def timeline(params: SearchParams = Depends(_params)) -> dict:
+        """Photos per month for the same query `/search` would answer, so the
+        scrubber can place months that are not loaded yet."""
+        return state.searcher.timeline(params)
 
     @app.post("/search/similar", dependencies=[guard])
     def similar(body: SimilarRequest) -> dict:

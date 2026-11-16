@@ -55,6 +55,29 @@ MAX_SQL_PARAMS = 900
 DATE_PRESET_DAYS = {"today": 1, "week": 7, "month": 30, "year": 365}
 LARGE_EDGE = 2500
 
+# `taken_at` is naive local wall-clock ISO (`dates.py`), so "now" has to be too,
+# and spelled with the same `T` — `datetime('now')` is UTC and uses a space,
+# which put every photo from today on the wrong side of a string compare.
+NOW_LOCAL_SQL = "strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime', ?)"
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Undated rows sort last in both directions; `id` breaks every tie so a page
+# boundary can never split or repeat a run of equal keys.
+SORT_SQL = {
+    "date-desc": "images.taken_at IS NULL, images.taken_at DESC, images.id DESC",
+    "date-asc": "images.taken_at IS NULL, images.taken_at ASC, images.id ASC",
+    "name-asc": "images.name_key ASC, images.id ASC",
+    "name-desc": "images.name_key DESC, images.id DESC",
+    "size-desc": "images.size_bytes DESC, images.id DESC",
+    "size-asc": "images.size_bytes ASC, images.id ASC",
+}
+DEFAULT_SORT = "date-desc"
+RELEVANCE = "relevance"
+# How many of the best matches a query keeps when it is re-sorted by something
+# other than relevance. The vector leg ranks *every* image, so without a cut
+# "search, sorted by date" is the whole library sorted by date.
+DEFAULT_SORTED_KEEP = 100
+
 
 # ---------------------------------------------------------------------------
 # In-memory vector matrix
@@ -174,6 +197,22 @@ class SearchParams:
     # Balance between the two ranked legs, 0-100 (`textWeight` in config.toml).
     # 50 is equal weighting; 100 is OCR text only, 0 is visual only.
     text_weight: int = 50
+    # A key of SORT_SQL, or "relevance". Empty means the default for the mode:
+    # relevance with a query, newest first without.
+    sort: str = ""
+    # Inclusive `YYYY-MM-DD` bounds on the effective date; either may be open.
+    date_from: str | None = None
+    date_to: str | None = None
+    sorted_keep: int = DEFAULT_SORTED_KEEP
+
+    @property
+    def order(self) -> str:
+        """The sort that applies: a SORT_SQL key or RELEVANCE."""
+        if(self.sort == RELEVANCE and self.q.strip()):
+            return RELEVANCE
+        if(self.sort in SORT_SQL):
+            return self.sort
+        return RELEVANCE if self.q.strip() else DEFAULT_SORT
 
     @property
     def offset(self) -> int:
@@ -235,10 +274,17 @@ def build_filter_sql(params: SearchParams) -> tuple[str, list]:
     if(params.view == "recent" and days is None):
         days = 7
     if(days is not None):
-        clauses.append(
-            "COALESCE(images.taken_at, images.indexed_at) >= datetime('now', ?)"
-        )
+        clauses.append(f"images.taken_at >= {NOW_LOCAL_SQL}")
         args.append(f"-{days} days")
+
+    # A day string compares below every timestamp on that day, so `>=` the
+    # start and `<` the next day's start is exactly "on or between".
+    if(params.date_from and DAY_RE.match(params.date_from)):
+        clauses.append("images.taken_at >= ?")
+        args.append(params.date_from)
+    if(params.date_to and DAY_RE.match(params.date_to)):
+        clauses.append("images.taken_at < date(?, '+1 day')")
+        args.append(params.date_to)
 
     if(params.dims == "large"):
         clauses.append("max(images.width, images.height) >= ?")
@@ -453,6 +499,9 @@ def hydrate(
             "height": int(row["height"]),
             "mime": row["mime"],
             "takenAt": row["taken_at"],
+            # Where the date came from — the lightbox says "Taken" for exif and
+            # filename, "Modified" for a date that is only the file's mtime.
+            "dateSource": row["date_source"],
             "isScreenshot": bool(row["is_screenshot"]),
             "hasOcr": int(row["id"]) in ocr,
             # Present-and-null, never absent: the frontend distinguishes "no
@@ -527,15 +576,7 @@ class Searcher:
             ids, total = self._browse(params, candidates)
             items = hydrate(self.store, ids, dupes=dupes)
         else:
-            # Two ranked lists, fused by rank. The text leg is usually short or
-            # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
-            # visual match no matter what their raw scores look like.
-            vector_ranked = self._vector_search(query, candidates, backend)
-            text_ranked, snippets = fts_search(self.store, query, candidates)
-            ranked = rrf_merge(
-                [[i for i, _ in vector_ranked], text_ranked],
-                weights=leg_weights(params.text_weight),
-            )
+            ranked, snippets = self._ranked(params, candidates, backend)
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
@@ -550,17 +591,93 @@ class Searcher:
             "cursor": cursor,
         }
 
-    def _browse(self, params: SearchParams, candidates: set[int] | None) -> tuple[list[int], int]:
-        """Empty query: newest first over the filtered set."""
+    def _ranked(
+        self, params: SearchParams, candidates: set[int] | None, backend: Backend
+    ) -> tuple[list[tuple[int, float]], dict[int, str]]:
+        """Fused matches in the order the response lists them, plus snippets."""
+        query = params.q.strip()
+        # Two ranked lists, fused by rank. The text leg is usually short or
+        # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
+        # visual match no matter what their raw scores look like.
+        vector_ranked = self._vector_search(query, candidates, backend)
+        text_ranked, snippets = fts_search(self.store, query, candidates)
+        ranked = rrf_merge(
+            [[i for i, _ in vector_ranked], text_ranked],
+            weights=leg_weights(params.text_weight),
+        )
+        if(params.order != RELEVANCE):
+            ranked = self._resort(ranked[:max(1, params.sorted_keep)], params.order)
+        return ranked, snippets
+
+    def timeline(self, params: SearchParams) -> dict:
+        """Photos per month, in the order the grid lists them.
+
+        The scrubber's map of the whole result, including the pages not loaded
+        yet — it is what lets a jump to a month know how far down that month
+        starts. Empty unless the order is by date: the scrubber exists only then.
+        """
+        order = params.order
+        if(order not in ("date-desc", "date-asc")):
+            return {"buckets": [], "undated": 0}
+        dupes = self.dupes.ids
+        candidates = candidate_ids(self.store, params, dupes)
+        if(params.q.strip()):
+            ranked, _ = self._ranked(params, candidates, self._backend)
+            candidates = {i for i, _ in ranked}
+            where = self._where(SearchParams(), candidates)
+        else:
+            where = self._where(params, candidates)
+        if(where is None):
+            return {"buckets": [], "undated": 0}
+        sql_where, args = where
+        rows = self.store.conn().execute(
+            f"SELECT substr(images.taken_at, 1, 7) AS month, count(*) AS n"
+            f" FROM images{sql_where} GROUP BY month",
+            args,
+        )
+        buckets = []
+        undated = 0
+        for r in rows:
+            if(r["month"] is None):
+                undated = int(r["n"])
+            else:
+                buckets.append({"month": r["month"], "count": int(r["n"])})
+        buckets.sort(key=lambda b: b["month"], reverse=(order == "date-desc"))
+        return {"buckets": buckets, "undated": undated}
+
+    def _where(
+        self, params: SearchParams, candidates: set[int] | None
+    ) -> tuple[str, list] | None:
+        """WHERE for the filtered set, or None when it is provably empty."""
         where, args = build_filter_sql(params)
         clauses = [where] if where else []
         if(candidates is not None):
             if(not candidates):
-                return [], 0
+                return None
             marks = ",".join("?" * len(candidates))
             clauses.append(f"images.id IN ({marks})")
             args = list(args) + [int(i) for i in candidates]
-        sql_where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return (f" WHERE {' AND '.join(clauses)}" if clauses else ""), args
+
+    def _resort(self, ranked: list[tuple[int, float]], order: str) -> list[tuple[int, float]]:
+        """The kept matches in `order`, each still carrying its relevance score."""
+        score_of = dict(ranked)
+        if(not score_of):
+            return []
+        marks = ",".join("?" * len(score_of))
+        rows = self.store.conn().execute(
+            f"SELECT images.id FROM images WHERE images.id IN ({marks})"
+            f" ORDER BY {SORT_SQL[order]}",
+            list(score_of),
+        )
+        return [(int(r["id"]), score_of[int(r["id"])]) for r in rows]
+
+    def _browse(self, params: SearchParams, candidates: set[int] | None) -> tuple[list[int], int]:
+        """Empty query: the filtered set in the requested order."""
+        where = self._where(params, candidates)
+        if(where is None):
+            return [], 0
+        sql_where, args = where
 
         total = int(self.store.conn().execute(
             f"SELECT count(*) AS n FROM images{sql_where}", args
@@ -568,7 +685,7 @@ class Searcher:
 
         rows = self.store.conn().execute(
             f"SELECT images.id FROM images{sql_where}"
-            " ORDER BY COALESCE(images.taken_at, images.indexed_at) DESC, images.id DESC"
+            f" ORDER BY {SORT_SQL.get(params.order, SORT_SQL[DEFAULT_SORT])}"
             " LIMIT ? OFFSET ?",
             [*args, params.limit, params.offset],
         )
