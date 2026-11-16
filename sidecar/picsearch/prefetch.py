@@ -86,9 +86,9 @@ def fetch(model_id: str) -> None:
         kwargs = {"trust_remote_code": spec.trust_remote_code}
         # float16 on the CPU halves the RAM this costs; it is loaded to prove
         # the files are complete and the environment can run it, then dropped.
-        model = AutoModel.from_pretrained(spec.hf_id, dtype=torch.float16, **kwargs)
+        model = embed.load_pretrained(AutoModel, spec.hf_id, dtype=torch.float16, **kwargs)
         if(spec.kind != "jina"):
-            AutoProcessor.from_pretrained(spec.hf_id, **kwargs)
+            embed.load_pretrained(AutoProcessor, spec.hf_id, **kwargs)
         del model
     finally:
         stop.set()

@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import secrets
 import shutil
 import socket
@@ -44,12 +45,13 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from . import config, ocr, paths, system
+from . import config, imaging, ocr, paths, system
 from .embed import Embedder, spec_for
-from .index import Indexer
+from .index import EMBED_MAX_EDGE, Indexer
 from .search import (
     DEFAULT_LIMIT,
     DEFAULT_SORTED_KEEP,
@@ -78,11 +80,29 @@ class Camel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class SimilarRequest(BaseModel):
-    # api.ts posts snake_case here while responses are camelCase; both spellings
-    # are accepted rather than "fixing" the frontend.
-    model_config = ConfigDict(populate_by_name=True)
+class SimilarFilters(Camel):
+    """The metadata filters a similar lookup honours — `Filters` in types.ts.
+    Both `image_id` and `imageId` style spellings are accepted (`Camel`), because
+    api.ts posts snake_case here while responses are camelCase."""
+
+    date: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    dims: str | None = None
+    folders: list[str] = []
+    types: list[str] = []
+
+
+class SimilarRequest(SimilarFilters):
     image_id: int
+
+
+class SimilarFileRequest(SimilarFilters):
+    path: str
+
+
+class PauseRequest(Camel):
+    paused: bool
 
 
 class IdsRequest(Camel):
@@ -200,7 +220,15 @@ class AppState:
         self.store = Store(db)
         self.settings = config.load()
         self.model_id = model_id or self.settings.get("modelId")
-        self.spec = spec_for(self.model_id)
+        try:
+            self.spec = spec_for(self.model_id)
+        except KeyError:
+            # A hand-edited or stale config.toml must not stop the app booting.
+            # The file is left as it is; only this run uses the default.
+            fallback = config.DEFAULTS["modelId"]
+            log.warning("model %r is not in the registry; using %s", self.model_id, fallback)
+            self.model_id = fallback
+            self.spec = spec_for(fallback)
         # Injectable so tests can drive the whole API without loading weights.
         # The factory builds the *second*, incoming embedder during a swap, and
         # is injectable for the same reason.
@@ -589,9 +617,46 @@ def create_app(state: AppState) -> FastAPI:
         scrubber can place months that are not loaded yet."""
         return state.searcher.timeline(params)
 
+    def _filter_params(body: SimilarFilters) -> SearchParams:
+        state.dates_ready.wait(DATES_WAIT_SEC)
+        return SearchParams(
+            date=body.date, dims=body.dims, date_from=body.date_from, date_to=body.date_to,
+            folders=list(body.folders), types=list(body.types),
+        )
+
     @app.post("/search/similar", dependencies=[guard])
     def similar(body: SimilarRequest) -> dict:
-        return state.searcher.similar(body.image_id)
+        """Neighbours of an indexed image, narrowed by the same filters `/search` takes."""
+        return state.searcher.similar(body.image_id, params=_filter_params(body))
+
+    @app.post("/search/similar-file", dependencies=[guard])
+    def similar_file(body: SimilarFileRequest) -> dict:
+        """Neighbours of a local image file, same response as `/search/similar`.
+
+        An indexed file reuses its stored vector. Any other is decoded the way
+        ingest decodes, embedded with the serving model, and forgotten — it is
+        never added to the library.
+        """
+        path = Path(body.path).expanduser()
+        if(not path.is_file()):
+            raise HTTPException(status_code=404, detail=f"not a file: {path}")
+        if(not imaging.is_supported(path)):
+            raise HTTPException(status_code=415, detail=f"not a supported image: {path.name}")
+        params = _filter_params(body)
+        row = state.store.image_by_path(str(path))
+        if(row is None and path.resolve() != path):
+            row = state.store.image_by_path(str(path.resolve()))
+        if(row is not None):
+            return state.searcher.similar(int(row["id"]), params=params)
+        try:
+            with imaging.open_image(path) as img:
+                small = img.copy()
+            small.thumbnail((EMBED_MAX_EDGE, EMBED_MAX_EDGE), Image.Resampling.LANCZOS)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422, detail=f"cannot read {path.name} as an image: {exc}"
+            ) from exc
+        return state.searcher.similar_to_image(small, params=params)
 
     @app.get("/images/{image_id}", dependencies=[guard])
     def image_detail(image_id: int) -> dict:
@@ -602,8 +667,35 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.delete("/images", dependencies=[guard])
     def delete_images(body: IdsRequest) -> dict:
-        """Removes rows and thumbnails. Originals on disk are never touched."""
-        return {"removed": state.store.delete_images(body.ids)}
+        """Moves each image's file to the system trash, then drops its row.
+
+        Only paths of indexed rows are ever touched, and a file the trash refuses
+        is never deleted another way: its id comes back in `failed` and its row
+        stays. An id with no row is ignored, and so is a file that is already
+        gone (its row just goes). Thumbnails stay — they are content-addressed
+        and a duplicate elsewhere may still use them. The watcher sees the file
+        vanish too; whichever of the two drops the row first, the other finds
+        nothing to do.
+        """
+        done: list[int] = []
+        failed: list[int] = []
+        for image_id in dict.fromkeys(body.ids):
+            row = state.store.image_by_id(image_id)
+            if(row is None):
+                continue
+            path = Path(row["path"])
+            try:
+                if(os.path.lexists(path)):
+                    system.move_to_trash(path)
+            except FileNotFoundError:
+                pass   # vanished between the check and the move: nothing left to trash
+            except Exception as exc:
+                log.warning("could not move %s to the trash: %s", path, exc)
+                failed.append(image_id)
+                continue
+            done.append(image_id)
+        state.store.delete_images(done)
+        return {"removed": len(done), "failed": failed}
 
     # -- bytes -------------------------------------------------------------
 
@@ -664,9 +756,15 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.delete("/folders", dependencies=[guard])
     def remove_folder(path: str) -> dict:
+        """Stops watching `path` and drops its photos from the library. The files
+        on disk are never touched."""
+        watched = any(r["path"] == path for r in state.store.list_folders())
         state.store.remove_folder(path)
         state.watcher.sync()
-        return {"ok": True}
+        # Only a folder that was really watched: an unknown path must not be
+        # able to empty whatever subtree it names.
+        removed = state.indexer.drop_folder_images(path) if watched else 0
+        return {"ok": True, "removed": removed}
 
     @app.patch("/folders", dependencies=[guard])
     def patch_folder(body: FolderRequest) -> dict:
@@ -676,6 +774,13 @@ def create_app(state: AppState) -> FastAPI:
         # `recursive` changes which events count, so the observer is re-attached.
         state.watcher.sync()
         return {"ok": True}
+
+    @app.post("/indexing/pause", dependencies=[guard])
+    def pause_indexing(body: PauseRequest) -> dict:
+        """Session-only. Work stops between files and batches and resumes where it
+        stopped; the flag is not persisted, so a restart starts running."""
+        state.indexer.pause(body.paused)
+        return state.indexer.status.as_wire()
 
     @app.post("/rescan", dependencies=[guard])
     def rescan() -> dict:

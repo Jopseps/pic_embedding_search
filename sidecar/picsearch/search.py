@@ -714,23 +714,47 @@ class Searcher:
         depth = min(backend.vectors.size, DEFAULT_LIMIT * 10)
         return backend.vectors.search(q_vec, depth, candidates)
 
-    def similar(self, image_id: int, limit: int = 60) -> dict:
-        """Cosine neighbours. This is the correct use of cosine — dupes use pHash."""
-        started = time.perf_counter()
+    def similar(
+        self, image_id: int, limit: int = 60, params: SearchParams | None = None
+    ) -> dict:
+        """Cosine neighbours. This is the correct use of cosine — dupes use pHash.
+
+        `params` carries only the metadata filters; they narrow the candidates
+        through the same `candidate_ids` a `/search` uses.
+        """
         backend = self._backend
         vec = backend.vectors.vector_for(image_id)
         if(vec is None):
-            vec_db = self.store.get_embedding(image_id, backend.vectors.model_id)
-            if(vec_db is None):
+            vec = self.store.get_embedding(image_id, backend.vectors.model_id)
+            if(vec is None):
                 return {"items": [], "total": 0, "tookMs": 0.0, "cursor": None}
-            vec = vec_db
+        return self._neighbours(vec, backend, limit, params, exclude=int(image_id))
 
+    def similar_to_image(
+        self, image, limit: int = 60, params: SearchParams | None = None
+    ) -> dict:
+        """Neighbours of a picture that is not in the library. The image is
+        embedded with the snapshot's own model, the one its index belongs to."""
+        backend = self._backend
+        if(backend.vectors.size == 0):
+            return {"items": [], "total": 0, "tookMs": 0.0, "cursor": None}
+        vec = backend.embedder.embed_pil([image])[0]
+        return self._neighbours(vec, backend, limit, params)
+
+    def _neighbours(
+        self, vec, backend: Backend, limit: int, params: SearchParams | None,
+        exclude: int | None = None,
+    ) -> dict:
+        started = time.perf_counter()
+        dupes = self.dupes.ids
+        candidates = None if params is None else candidate_ids(self.store, params, dupes)
         ranked = [
-            (i, s) for i, s in backend.vectors.search(vec, limit + 1) if i != int(image_id)
+            (i, s) for i, s in backend.vectors.search(vec, limit + 1, candidates)
+            if i != exclude
         ][:limit]
         scores = {i: s for i, s in ranked}
         return {
-            "items": hydrate(self.store, [i for i, _ in ranked], scores, dupes=self.dupes.ids),
+            "items": hydrate(self.store, [i for i, _ in ranked], scores, dupes=dupes),
             "total": len(ranked),
             "tookMs": round((time.perf_counter() - started) * 1000, 2),
             "cursor": None,

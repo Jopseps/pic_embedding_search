@@ -106,6 +106,22 @@ def l2_normalize(x: np.ndarray) -> np.ndarray:
     return (x / norms).astype(np.float32)
 
 
+def load_pretrained(factory: Any, hf_id: str, **kwargs: Any) -> Any:
+    """`factory.from_pretrained`, offline when the files are already cached.
+
+    A cached load still makes HEAD requests to huggingface.co unless told not
+    to, which is network I/O in an app that promises none once the weights are
+    on disk. So the cache is tried first and the hub only when it has to be:
+    first run, or a model the user has just picked and never downloaded. Per
+    call, not `HF_HUB_OFFLINE`: that is read at import time and would also
+    block that legitimate download.
+    """
+    try:
+        return factory.from_pretrained(hf_id, local_files_only=True, **kwargs)
+    except OSError:
+        return factory.from_pretrained(hf_id, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Embedder
 # ---------------------------------------------------------------------------
@@ -183,15 +199,15 @@ class Embedder:
             log.info("loading %s (%s) on %s", spec.model_id, spec.hf_id, self.device)
 
             kwargs: dict[str, Any] = {"trust_remote_code": spec.trust_remote_code}
-            model = AutoModel.from_pretrained(spec.hf_id, dtype=self.dtype, **kwargs)
+            model = load_pretrained(AutoModel, spec.hf_id, dtype=self.dtype, **kwargs)
             model = model.to(self.device).eval()
 
             if(spec.kind == "jina"):
                 # jina-clip exposes encode_text/encode_image and tokenizes itself.
                 processor = None
             else:
-                processor = AutoProcessor.from_pretrained(
-                    spec.hf_id, trust_remote_code=spec.trust_remote_code
+                processor = load_pretrained(
+                    AutoProcessor, spec.hf_id, trust_remote_code=spec.trust_remote_code
                 )
 
             self._model = model

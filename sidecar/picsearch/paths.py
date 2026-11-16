@@ -93,12 +93,6 @@ def thumb_path(sha256: str, size: int) -> Path:
     return thumbs_dir() / sha256[:2] / sha256[2:4] / f"{sha256}_{size}.webp"
 
 
-def ensure_thumb_parent(sha256: str, size: int) -> Path:
-    p = thumb_path(sha256, size)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
-
-
 def dir_size_bytes(root: Path) -> int:
     total = 0
     if(not root.exists()):

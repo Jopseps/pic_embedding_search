@@ -99,6 +99,18 @@ class ScanReport:
     errors: list[str] = field(default_factory=list)
 
 
+def storable(path: Path | str) -> bool:
+    """False for a name that is not valid UTF-8 (Python reads its bytes as lone
+    surrogates). SQLite cannot bind such a string, so a row for it can never be
+    written — the file is skipped up front rather than decoded and thumbnailed
+    first, on every rescan."""
+    try:
+        str(path).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def walk_images(root: Path, recursive: bool = True) -> Iterator[Path]:
     """Yield supported image files, skipping dotdirs and the thumbnail cache."""
     root = Path(root)
@@ -118,6 +130,9 @@ def walk_images(root: Path, recursive: bool = True) -> Iterator[Path]:
                 continue
             p = here / name
             if(imaging.is_supported(p)):
+                if(not storable(p)):
+                    log.warning("skipping %r: the file name is not valid UTF-8", str(p))
+                    continue
                 yield p
 
 
@@ -146,7 +161,7 @@ def indexable_under(path: Path, root: Path, recursive: bool = True) -> bool:
     # contains the cache would otherwise ingest its own output forever.
     if(paths.thumbs_dir().resolve() in path.resolve().parents):
         return False
-    return imaging.is_supported(path)
+    return imaging.is_supported(path) and storable(path)
 
 
 class Indexer:
@@ -234,6 +249,11 @@ class Indexer:
             self._pause.clear()
         self._emit("index", self.status.as_wire())
 
+    def _wait_while_paused(self) -> None:
+        # Polled rather than waited on: `stop()` has to be able to cut it short.
+        while(self._pause.is_set() and not self._stop.is_set()):
+            time.sleep(0.15)
+
     def join(self, timeout: float | None = None) -> None:
         t = self._thread
         if(t is not None):
@@ -272,7 +292,9 @@ class Indexer:
                 seen.add(key)
                 candidates.append(p)
 
-        self.status = IndexStatus(total=len(candidates), running=True)
+        self.status = IndexStatus(
+            total=len(candidates), running=True, paused=self._pause.is_set()
+        )
         self._emit("index", self.status.as_wire())
         # `running` must come down however this ends: an exception out of the GPU
         # batch left it set, and every later scan, watcher flush and swap
@@ -324,8 +346,7 @@ class Indexer:
             for i, path in enumerate(candidates, start=1):
                 if(self._stop.is_set()):
                     break
-                while(self._pause.is_set() and not self._stop.is_set()):
-                    time.sleep(0.15)
+                self._wait_while_paused()
 
                 report.scanned += 1
                 self.status.current = i
@@ -459,7 +480,9 @@ class Indexer:
 
         report = ScanReport()
         try:
-            self.status = IndexStatus(total=len(candidates), running=True)
+            self.status = IndexStatus(
+                total=len(candidates), running=True, paused=self._pause.is_set()
+            )
             self._emit("index", self.status.as_wire())
             self._ingest_many(candidates, report)
         finally:
@@ -480,6 +503,8 @@ class Indexer:
         gone: list[int] = []
         for p in paths_in:
             path = Path(p)
+            if(not storable(path)):
+                continue   # never indexed, and SQLite cannot bind the name
             # Deleted and recreated between the event and now — a save-by-
             # replace does this, and dropping the row would lose the image.
             if(path.exists()):
@@ -490,6 +515,27 @@ class Indexer:
         if(gone):
             self.store.delete_images(gone)
         return len(gone)
+
+    def drop_folder_images(self, root: str) -> int:
+        """Drop the rows under a folder that is no longer watched. Files and
+        thumbnails stay; `delete_images` takes the vectors, OCR text and
+        collection membership with the rows.
+
+        Call after the folder row is gone: a photo that a remaining watched
+        folder still covers (nested roots, respecting its recursive flag) stays,
+        by the same `indexable_under` rule the scan and the watcher use.
+        """
+        remaining = self._enabled_folders()
+        gone: list[int] = []
+        rows = self.store.conn().execute(
+            "SELECT id, path FROM images WHERE path LIKE ? ESCAPE '\\'",
+            (paths.like_subtree(root),),
+        ).fetchall()
+        for row in rows:
+            p = Path(row["path"])
+            if(not any(indexable_under(p, r, rec) for r, rec in remaining)):
+                gone.append(int(row["id"]))
+        return self.store.delete_images(gone)
 
     def move_path(self, src: Path, dest: Path) -> bool:
         """Follow a rename in place. False when there was no row at `src`.
@@ -592,8 +638,7 @@ class Indexer:
             for n, image_id in enumerate(ids, start=1):
                 if(self._stop.is_set()):
                     break
-                while(self._pause.is_set() and not self._stop.is_set()):
-                    time.sleep(0.15)
+                self._wait_while_paused()
                 row = self.store.image_by_id(image_id)
                 if(row is None):
                     continue
@@ -685,10 +730,33 @@ class Indexer:
         roots = [str(Path(root)) for root, _rec in targets if Path(root).is_dir()]
         if(not roots):
             return 0
+        # A mounted-but-empty root is what an unplugged drive's mount point
+        # looks like. Pruning it would drop every row under it, so it keeps them.
+        # Accepted cost: a folder the user really emptied keeps its rows until
+        # they remove the folder in Settings.
+        guarded: list[str] = []
+        for r in roots:
+            prefix = paths.subtree_prefix(r)
+            if(any(p.startswith(prefix) for p in seen)):
+                continue
+            held = self.store.conn().execute(
+                "SELECT 1 FROM images WHERE path LIKE ? ESCAPE '\\' LIMIT 1",
+                (paths.like_subtree(r),),
+            ).fetchone()
+            if(held is not None):
+                guarded.append(prefix)
+                msg = (
+                    f"{r} looks empty; its photos were kept. "
+                    "Remove the folder in Settings if this is intended."
+                )
+                log.warning("%s", msg)
+                self._emit("error", {"message": msg})
         gone: list[int] = []
         for row in self.store.conn().execute("SELECT id, path FROM images"):
             p = row["path"]
             if(p in seen):
+                continue
+            if(any(p.startswith(g) for g in guarded)):
                 continue
             if(not any(p == r or p.startswith(paths.subtree_prefix(r)) for r in roots)):
                 continue
@@ -722,6 +790,7 @@ class Indexer:
         for start in range(0, total, BATCH_SIZE):
             if(self._stop.is_set()):
                 break
+            self._wait_while_paused()
             chunk = ids[start:start + BATCH_SIZE]
             batch_ids: list[int] = []
             batch_imgs: list[Image.Image] = []
