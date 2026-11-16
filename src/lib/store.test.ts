@@ -11,9 +11,12 @@ import {
     sectionsByDate,
     useStore,
 } from "./store";
-import type { Photo, SearchResponse } from "./types";
+import type { Filters, Photo, SearchResponse } from "./types";
 
 const INITIAL = useStore.getState();
+const EMPTY: Filters = {
+    datePreset: null, dateFrom: null, dateTo: null, folders: [], types: [], dims: null,
+};
 
 beforeEach(() => {
     useStore.setState(INITIAL, true);
@@ -327,10 +330,161 @@ describe("find similar", () => {
         const similar = vi.spyOn(api, "similar").mockResolvedValue(page([1, 2], null, 2));
         await useStore.getState().runSearch({ keepLoaded: true });
         expect(search).not.toHaveBeenCalled();
-        expect(similar).toHaveBeenCalledWith(7);
+        expect(similar).toHaveBeenCalledWith(7, EMPTY);
         expect(useStore.getState().results.map((p) => p.id)).toEqual([1, 2]);
         search.mockRestore();
         similar.mockRestore();
+    });
+});
+
+describe("find similar with filters", () => {
+    it("sends the current filters, and a filter click re-runs the lookup with them", async () => {
+        const similar = vi.spyOn(api, "similar").mockResolvedValue(page([1, 2], null, 2));
+        const search = vi.spyOn(api, "search");
+        await useStore.getState().findSimilar(photo(7));
+        expect(similar).toHaveBeenLastCalledWith(7, EMPTY);
+
+        useStore.getState().toggleTypeFilter("Screenshot");
+        await vi.waitFor(() => expect(similar).toHaveBeenCalledTimes(2));
+        expect(similar).toHaveBeenLastCalledWith(7, { ...EMPTY, types: ["Screenshot"] });
+        expect(search).not.toHaveBeenCalled();
+        expect(useStore.getState().similarTo?.id).toBe(7);
+        search.mockRestore();
+        similar.mockRestore();
+    });
+
+    it("Esc brings back the previous search with its own filters, not the ones set since", async () => {
+        const similar = vi.spyOn(api, "similar").mockResolvedValue(page([1], null, 1));
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([5], null, 1));
+        const before: Filters = { ...EMPTY, dims: "large" };
+        useStore.setState({ query: "masa", filters: before, results: [photo(5)] });
+
+        await useStore.getState().findSimilar(photo(7));
+        useStore.getState().toggleTypeFilter("Photo");
+        await vi.waitFor(() => expect(similar).toHaveBeenCalledTimes(2));
+        useStore.getState().exitSimilar();
+
+        const s = useStore.getState();
+        expect(s.similarTo).toBeNull();
+        expect(s.query).toBe("masa");
+        expect(s.filters).toEqual(before);
+        await vi.waitFor(() => expect(search).toHaveBeenCalled());
+        expect(search.mock.calls[0]?.[0].filters).toEqual(before);
+        search.mockRestore();
+        similar.mockRestore();
+    });
+});
+
+describe("find similar to a dropped file", () => {
+    it("looks the file up by path with the filters and shows its name", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockResolvedValue(page([3, 4], null, 2));
+        await useStore.getState().dropFiles(["/home/me/Pictures/cat.jpg"]);
+        expect(byFile).toHaveBeenCalledWith("/home/me/Pictures/cat.jpg", EMPTY);
+        const s = useStore.getState();
+        expect(s.similarTo?.filename).toBe("cat.jpg");
+        expect(s.isDraggingFile).toBe(false);
+        expect(s.results.map((p) => p.id)).toEqual([3, 4]);
+        byFile.mockRestore();
+    });
+
+    it("a background refresh re-runs the same file lookup, not a search or a row lookup", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockResolvedValue(page([3], null, 1));
+        const similar = vi.spyOn(api, "similar");
+        const search = vi.spyOn(api, "search");
+        await useStore.getState().findSimilarToFile("/x/cat.jpg");
+        await useStore.getState().runSearch({ keepLoaded: true });
+        expect(byFile).toHaveBeenCalledTimes(2);
+        expect(similar).not.toHaveBeenCalled();
+        expect(search).not.toHaveBeenCalled();
+        byFile.mockRestore();
+        similar.mockRestore();
+        search.mockRestore();
+    });
+
+    it("uses the first of several files and says so", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockResolvedValue(page([3], null, 1));
+        await useStore.getState().dropFiles(["/a/one.jpg", "/a/two.jpg", "/a/three.jpg"]);
+        expect(byFile).toHaveBeenCalledTimes(1);
+        expect(byFile.mock.calls[0]?.[0]).toBe("/a/one.jpg");
+        expect(useStore.getState().toast).toContain("2 other files were ignored");
+        byFile.mockRestore();
+    });
+
+    it("a file that is not an image toasts the sidecar's sentence and changes nothing", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockRejectedValue(
+            new Error('sidecar 415: {"detail":"not a supported image: notes.txt"}'),
+        );
+        useStore.setState({ query: "masa", results: [photo(1)] });
+        await useStore.getState().dropFiles(["/a/notes.txt"]);
+        const s = useStore.getState();
+        expect(s.toast).toBe("not a supported image: notes.txt");
+        expect(s.similarTo).toBeNull();
+        expect(s.query).toBe("masa");
+        expect(s.searching).toBe(false);
+        byFile.mockRestore();
+    });
+
+    it("two different dropped files are two different searches for the scroll", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockResolvedValue(page([3], null, 1));
+        await useStore.getState().findSimilarToFile("/a/one.jpg");
+        const first = searchKey(useStore.getState());
+        await useStore.getState().findSimilarToFile("/a/two.jpg");
+        expect(searchKey(useStore.getState())).not.toBe(first);
+        byFile.mockRestore();
+    });
+
+    it("Esc restores the search the drop replaced", async () => {
+        const byFile = vi.spyOn(api, "similarToFile").mockResolvedValue(page([3], null, 1));
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([5], null, 1));
+        useStore.setState({ query: "masa", results: [photo(5)] });
+        await useStore.getState().findSimilarToFile("/a/one.jpg");
+        useStore.getState().exitSimilar();
+        expect(useStore.getState().query).toBe("masa");
+        expect(useStore.getState().similarTo).toBeNull();
+        byFile.mockRestore();
+        search.mockRestore();
+    });
+});
+
+describe("pause indexing", () => {
+    it("flips the flag and tells the sidecar", async () => {
+        const pause = vi.spyOn(api, "setIndexingPaused").mockResolvedValue();
+        await useStore.getState().toggleIndexingPause();
+        expect(useStore.getState().indexing.paused).toBe(true);
+        expect(pause).toHaveBeenLastCalledWith(true);
+        await useStore.getState().toggleIndexingPause();
+        expect(useStore.getState().indexing.paused).toBe(false);
+        expect(pause).toHaveBeenLastCalledWith(false);
+        pause.mockRestore();
+    });
+
+    it("puts the flag back and says so when the sidecar refuses", async () => {
+        const pause = vi.spyOn(api, "setIndexingPaused").mockRejectedValue(new Error("gone"));
+        await useStore.getState().toggleIndexingPause();
+        expect(useStore.getState().indexing.paused).toBe(false);
+        expect(useStore.getState().toast).toContain("gone");
+        pause.mockRestore();
+    });
+});
+
+describe("removing a watched folder", () => {
+    it("asks first, then refreshes results, counts and folders", async () => {
+        const remove = vi.spyOn(api, "removeFolder").mockResolvedValue();
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([1], null, 1));
+        const counts = vi.spyOn(api, "counts");
+        useStore.getState().requestRemoveFolder("~/Pictures");
+        expect(useStore.getState().removeFolderConfirm).toBe("~/Pictures");
+        expect(remove).not.toHaveBeenCalled();
+
+        await useStore.getState().removeFolder("~/Pictures");
+        expect(remove).toHaveBeenCalledWith("~/Pictures");
+        expect(useStore.getState().removeFolderConfirm).toBeNull();
+        expect(search).toHaveBeenCalled();
+        expect(counts).toHaveBeenCalled();
+        expect(useStore.getState().toast).toContain("files stay on disk");
+        remove.mockRestore();
+        search.mockRestore();
+        counts.mockRestore();
     });
 });
 
@@ -403,6 +557,51 @@ describe("failing writes", () => {
         await useStore.getState().addPhotosToCollection("refs", [1, 2]);
         expect(useStore.getState().selectedIds.size).toBe(0);
         add.mockRestore();
+    });
+});
+
+describe("move to trash", () => {
+    it("asks first: requesting changes nothing and Cancel is a no-op", () => {
+        const del = vi.spyOn(api, "deletePhotos");
+        useStore.setState({ selectedIds: new Set([1, 2]) });
+        useStore.getState().requestDelete();
+        expect(useStore.getState().deleteConfirm).toBe(true);
+        expect(del).not.toHaveBeenCalled();
+        useStore.getState().cancelDelete();
+        expect(useStore.getState().deleteConfirm).toBe(false);
+        expect([...useStore.getState().selectedIds]).toEqual([1, 2]);
+        expect(del).not.toHaveBeenCalled();
+        del.mockRestore();
+    });
+
+    it("has nothing to ask about with an empty selection", () => {
+        useStore.getState().requestDelete();
+        expect(useStore.getState().deleteConfirm).toBe(false);
+    });
+
+    it("keeps exactly the photos the trash refused selected, and counts the rest", async () => {
+        useStore.setState({ selectedIds: new Set([1, 2, 3]), deleteConfirm: true });
+        const del = vi.spyOn(api, "deletePhotos").mockResolvedValue({ removed: 2, failed: [2] });
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([2], null, 1));
+        await useStore.getState().deleteSelected();
+        const s = useStore.getState();
+        expect(del).toHaveBeenCalledWith([1, 2, 3]);
+        expect(s.deleteConfirm).toBe(false);
+        expect([...s.selectedIds]).toEqual([2]);
+        expect(s.toast).toBe("2 photos moved to the trash; 1 could not be moved");
+        del.mockRestore();
+        search.mockRestore();
+    });
+
+    it("clears the selection when everything moved", async () => {
+        useStore.setState({ selectedIds: new Set([4]) });
+        const del = vi.spyOn(api, "deletePhotos").mockResolvedValue({ removed: 1, failed: [] });
+        const search = vi.spyOn(api, "search").mockResolvedValue(page([], null, 0));
+        await useStore.getState().deleteSelected();
+        expect(useStore.getState().selectedIds.size).toBe(0);
+        expect(useStore.getState().toast).toBe("1 photo moved to the trash");
+        del.mockRestore();
+        search.mockRestore();
     });
 });
 

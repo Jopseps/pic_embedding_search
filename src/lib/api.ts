@@ -1,5 +1,6 @@
 import type {
     Collection,
+    DeleteResult,
     Filters,
     LibraryCounts,
     Photo,
@@ -50,11 +51,17 @@ export interface PhotoSearchApi{
     search(query: SearchQuery): Promise<SearchResponse>;
     /** Photos per month for the same query, over every page. */
     timeline(query: SearchQuery): Promise<Timeline>;
-    similar(id: number): Promise<SearchResponse>;
+    /** Neighbours of an indexed photo, narrowed by the same filters a search takes. */
+    similar(id: number, filters: Filters): Promise<SearchResponse>;
+    /** Neighbours of an image file outside the library, by its path on disk.
+     *  The file is read, never added. Rejects with the sidecar's message when
+     *  it is not an image. */
+    similarToFile(path: string, filters: Filters): Promise<SearchResponse>;
     thumbUrl(id: number, size: 256 | 512): string | null;
     fileUrl(id: number): string | null;
     listFolders(): Promise<WatchedFolder[]>;
     addFolder(): Promise<WatchedFolder | null>;
+    /** Stops watching and drops the folder's photos from the library. Files stay on disk. */
     removeFolder(path: string): Promise<void>;
     setFolderRecursive(path: string, recursive: boolean): Promise<void>;
     counts(): Promise<LibraryCounts>;
@@ -75,7 +82,10 @@ export interface PhotoSearchApi{
     clearThumbnailCache(): Promise<void>;
     revealInFiles(ids: number[]): Promise<void>;
     openExternally(id: number): Promise<void>;
-    deletePhotos(ids: number[]): Promise<void>;
+    /** Moves the files to the system trash, then drops them from the library. */
+    deletePhotos(ids: number[]): Promise<DeleteResult>;
+    /** Session-only: work stops between files and resumes where it stopped. */
+    setIndexingPaused(paused: boolean): Promise<void>;
     /** Live indexing progress. Returns an unsubscribe function. */
     subscribeEvents(handler: (event: SidecarEvent) => void): () => void;
 }
@@ -303,14 +313,16 @@ export class MockApi implements PhotoSearchApi{
         return { buckets, undated };
     }
 
-    async similar(id: number): Promise<SearchResponse>{
-        const target = this.items.find((it) => it.id === id);
+    private neighbours(target: MockPhoto | undefined, filters: Filters): SearchResponse{
         const started = performance.now();
         if(target === undefined){
             return { items: [], total: 0, tookMs: 0, cursor: null };
         }
-        const scored = this.items
-            .filter((it) => it.id !== id)
+        const pool = applyScope(
+            this.items.filter((it) => it.id !== target.id),
+            { q: "", view: null, collection: null, filters },
+        );
+        const scored = pool
             .map((it) => {
                 const shared = it.tags.filter((t) => target.tags.includes(t)).length;
                 const aspectDelta = Math.abs(it.width / it.height - target.width / target.height);
@@ -325,6 +337,19 @@ export class MockApi implements PhotoSearchApi{
             tookMs: Math.round(performance.now() - started) + 6,
             cursor: null,
         };
+    }
+
+    async similar(id: number, filters: Filters): Promise<SearchResponse>{
+        return this.neighbours(this.items.find((it) => it.id === id), filters);
+    }
+
+    /** There are no bytes to read in a browser, so any image name resolves to a
+     *  fixed stand-in photo; a non-image is refused the way the sidecar refuses it. */
+    async similarToFile(path: string, filters: Filters): Promise<SearchResponse>{
+        if(!/\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif|avif)$/i.test(path)){
+            throw new Error("sidecar 415: not a supported image");
+        }
+        return this.neighbours(this.items[path.length % this.items.length], filters);
     }
 
     /** No real bytes in mock mode — cells fall back to their placeholder fill. */
@@ -346,6 +371,12 @@ export class MockApi implements PhotoSearchApi{
 
     async removeFolder(path: string): Promise<void>{
         this.folders = this.folders.filter((f) => f.path !== path);
+        // Photos a remaining folder still covers stay, like the sidecar's rule.
+        const covered = (it: MockPhoto) => this.folders.some((f) => (
+            it.folder === f.path || (f.recursive && it.folder.startsWith(`${f.path}/`))
+        ));
+        const under = (it: MockPhoto) => it.folder === path || it.folder.startsWith(`${path}/`);
+        this.items = this.items.filter((it) => !under(it) || covered(it));
     }
 
     async setFolderRecursive(path: string, recursive: boolean): Promise<void>{
@@ -452,10 +483,15 @@ export class MockApi implements PhotoSearchApi{
     async revealInFiles(): Promise<void>{}
     async openExternally(): Promise<void>{}
 
-    async deletePhotos(ids: number[]): Promise<void>{
+    async deletePhotos(ids: number[]): Promise<DeleteResult>{
         const drop = new Set(ids);
+        const removed = this.items.filter((it) => drop.has(it.id)).length;
         this.items = this.items.filter((it) => !drop.has(it.id));
+        return { removed, failed: [] };
     }
+
+    /** The store simulates progress in mock mode and owns the flag. */
+    async setIndexingPaused(): Promise<void>{}
 
     /** No sidecar, no events — the store simulates progress in mock mode. */
     subscribeEvents(): () => void{
@@ -507,6 +543,19 @@ function queryParams(query: SearchQuery): URLSearchParams{
     return p;
 }
 
+/** `Filters` as the body of the similar lookups — filters only: the view and the
+ *  collection do not scope "find similar". */
+function filterBody(f: Filters){
+    return {
+        date: f.datePreset,
+        dateFrom: f.dateFrom,
+        dateTo: f.dateTo,
+        dims: f.dims,
+        folders: f.folders,
+        types: f.types,
+    };
+}
+
 const EVENTS_RETRY_MIN_MS = 1000;
 const EVENTS_RETRY_MAX_MS = 15000;
 
@@ -548,10 +597,17 @@ export class HttpApi implements PhotoSearchApi{
         return this.req<Timeline>(`/timeline?${p.toString()}`);
     }
 
-    similar(id: number): Promise<SearchResponse>{
+    similar(id: number, filters: Filters): Promise<SearchResponse>{
         return this.req<SearchResponse>("/search/similar", {
             method: "POST",
-            body: JSON.stringify({ image_id: id }),
+            body: JSON.stringify({ image_id: id, ...filterBody(filters) }),
+        });
+    }
+
+    similarToFile(path: string, filters: Filters): Promise<SearchResponse>{
+        return this.req<SearchResponse>("/search/similar-file", {
+            method: "POST",
+            body: JSON.stringify({ path, ...filterBody(filters) }),
         });
     }
 
@@ -681,8 +737,12 @@ export class HttpApi implements PhotoSearchApi{
         await this.req("/open", { method: "POST", body: JSON.stringify({ id }) });
     }
 
-    async deletePhotos(ids: number[]): Promise<void>{
-        await this.req("/images", { method: "DELETE", body: JSON.stringify({ ids }) });
+    deletePhotos(ids: number[]): Promise<DeleteResult>{
+        return this.req<DeleteResult>("/images", { method: "DELETE", body: JSON.stringify({ ids }) });
+    }
+
+    async setIndexingPaused(paused: boolean): Promise<void>{
+        await this.req("/indexing/pause", { method: "POST", body: JSON.stringify({ paused }) });
     }
 
     /**

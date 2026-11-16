@@ -45,6 +45,12 @@ export interface SearchResponse{
 
 export type LibraryView = "all" | "recent" | "dupes";
 
+/** `DELETE /images`: how many files went to the trash, and the ids that could not. */
+export interface DeleteResult{
+    removed: number;
+    failed: number[];
+}
+
 export interface Filters{
     datePreset: DatePreset | null;
     /** Inclusive `YYYY-MM-DD` bounds; either end may be open. Exclusive with

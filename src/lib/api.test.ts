@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { HttpApi } from "./api";
+import { HttpApi, MockApi } from "./api";
 import type { SearchQuery, SidecarEvent } from "./types";
 
 const HANDSHAKE = { port: 41337, token: "tok-en/with+chars" };
@@ -278,5 +278,95 @@ describe("HttpApi folder picker", () => {
 
         expect(await new HttpApi(HANDSHAKE).addFolder()).toBeNull();
         expect(fetchSpy).not.toHaveBeenCalled();
+    });
+});
+
+const FILTERS = {
+    datePreset: "week", dateFrom: null, dateTo: null,
+    folders: ["/p"], types: ["Screenshot"], dims: "large",
+} as const;
+
+describe("HttpApi similar, delete and pause", () => {
+    function stub(body: unknown){
+        const fetchSpy = vi.fn(async () => jsonResponse(body));
+        vi.stubGlobal("fetch", fetchSpy);
+        return fetchSpy;
+    }
+    function call(fetchSpy: ReturnType<typeof stub>){
+        const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        return { url, init, body: JSON.parse(init.body as string) as Record<string, unknown> };
+    }
+
+    it("posts the filters, and only the filters, with a find-similar", async () => {
+        const f = stub({ items: [], total: 0, tookMs: 1, cursor: null });
+        await new HttpApi(HANDSHAKE).similar(7, { ...FILTERS, folders: [...FILTERS.folders], types: [...FILTERS.types] });
+        const { url, init, body } = call(f);
+        expect(url).toBe("http://127.0.0.1:41337/search/similar");
+        expect(init.method).toBe("POST");
+        expect(body).toEqual({
+            image_id: 7, date: "week", dateFrom: null, dateTo: null,
+            dims: "large", folders: ["/p"], types: ["Screenshot"],
+        });
+    });
+
+    it("looks a file up by path, token and filters included", async () => {
+        const f = stub({ items: [], total: 0, tookMs: 1, cursor: null });
+        await new HttpApi(HANDSHAKE).similarToFile("/a/b.jpg", { ...FILTERS, folders: [], types: [] });
+        const { url, init, body } = call(f);
+        expect(url).toBe("http://127.0.0.1:41337/search/similar-file");
+        expect((init.headers as Record<string, string>)["X-PicSearch-Token"]).toBe(HANDSHAKE.token);
+        expect(body.path).toBe("/a/b.jpg");
+        expect(body.date).toBe("week");
+    });
+
+    it("returns the delete result and posts the pause flag", async () => {
+        const del = stub({ removed: 1, failed: [3] });
+        await expect(new HttpApi(HANDSHAKE).deletePhotos([2, 3])).resolves.toEqual({ removed: 1, failed: [3] });
+        expect(call(del).init.method).toBe("DELETE");
+        expect(call(del).body).toEqual({ ids: [2, 3] });
+
+        const pause = stub({});
+        await new HttpApi(HANDSHAKE).setIndexingPaused(true);
+        expect(call(pause).url).toBe("http://127.0.0.1:41337/indexing/pause");
+        expect(call(pause).body).toEqual({ paused: true });
+    });
+});
+
+describe("MockApi mirrors the new calls", () => {
+    const none = { datePreset: null, dateFrom: null, dateTo: null, folders: [], types: [], dims: null } as const;
+    const open = () => ({ ...none, folders: [], types: [] });
+
+    it("narrows similar results by filters", async () => {
+        const api = new MockApi();
+        const all = await api.similar(1, open());
+        const shots = await api.similar(1, { ...open(), types: ["Screenshot"] });
+        expect(all.items.length).toBeGreaterThan(0);
+        expect(shots.items.length).toBeGreaterThan(0);
+        expect(shots.items.every((p) => p.isScreenshot)).toBe(true);
+        expect(all.items.some((p) => !p.isScreenshot)).toBe(true);
+    });
+
+    it("answers a file lookup for an image name and refuses anything else", async () => {
+        const api = new MockApi();
+        expect((await api.similarToFile("cat.JPG", open())).items.length).toBeGreaterThan(0);
+        await expect(api.similarToFile("notes.txt", open())).rejects.toThrow(/415/);
+    });
+
+    it("reports a delete the way the sidecar does", async () => {
+        const api = new MockApi();
+        const first = (await api.search({ q: "", view: null, collection: null, filters: open(), limit: 2 })).items;
+        const res = await api.deletePhotos([first[0]!.id, 999999]);
+        expect(res).toEqual({ removed: 1, failed: [] });
+    });
+
+    it("removing a folder drops its photos but keeps the ones another folder covers", async () => {
+        const api = new MockApi();
+        const count = async () => (await api.counts()).library;
+        const before = await count();
+        // ~/Pictures is recursive and covers ~/Pictures/Screenshots.
+        await api.removeFolder("~/Pictures/Screenshots");
+        expect(await count()).toBe(before);
+        await api.removeFolder("~/Pictures");
+        expect(await count()).toBeLessThan(before);
     });
 });

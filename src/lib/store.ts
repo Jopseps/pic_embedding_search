@@ -183,6 +183,10 @@ interface State{
     /** Null until Settings asks. Carries the install hint for tesseract. */
     ocrStatus: OcrStatus | null;
     clearCacheConfirm: boolean;
+    /** The "Move to trash" dialog is open for the current selection. */
+    deleteConfirm: boolean;
+    /** Watched folder whose removal is waiting for a second click. */
+    removeFolderConfirm: string | null;
 
     isDraggingFile: boolean;
     toast: string | null;
@@ -204,6 +208,10 @@ interface Actions{
     /** Persisted when browsing; session-only while a query is active. */
     setSort(sort: SearchSort): void;
     findSimilar(photo: Photo): Promise<void>;
+    /** Find similar for an image file that is not in the library. */
+    findSimilarToFile(path: string): Promise<void>;
+    /** A drop from the OS: the first file becomes the subject. */
+    dropFiles(paths: string[]): Promise<void>;
     exitSimilar(): void;
 
     setLibraryView(v: LibraryView): void;
@@ -259,7 +267,7 @@ interface Actions{
     toggleOcrExpanded(): void;
 
     toggleIndexingPanel(): void;
-    toggleIndexingPause(): void;
+    toggleIndexingPause(): Promise<void>;
     startEventStream(): () => void;
     tickIndexing(): void;
 
@@ -286,6 +294,8 @@ interface Actions{
 
     loadFolders(): Promise<void>;
     addFolder(): Promise<void>;
+    requestRemoveFolder(path: string): void;
+    cancelRemoveFolder(): void;
     removeFolder(path: string): Promise<void>;
     toggleRecursive(path: string): Promise<void>;
     loadStorage(): Promise<void>;
@@ -295,6 +305,9 @@ interface Actions{
 
     setDragging(v: boolean): void;
     showToast(msg: string): void;
+    requestDelete(): void;
+    cancelDelete(): void;
+    /** The confirmed half: moves the selection to the trash. */
     deleteSelected(): Promise<void>;
     revealSelected(): Promise<void>;
     toggleCollectionMenu(): void;
@@ -322,6 +335,45 @@ const MAX_PAGE = 1000;
 
 export function describeError(err: unknown): string{
     return err instanceof Error ? err.message : String(err);
+}
+
+/** The sidecar's own sentence, for errors that are meant to be read: its 4xx
+ *  bodies are `{"detail": "..."}` behind a `sidecar 415:` prefix. */
+function describeDetail(err: unknown): string{
+    const m = /^sidecar \d+: (.*)$/s.exec(describeError(err));
+    if(m !== null){
+        try{
+            const detail = (JSON.parse(m[1]!) as { detail?: unknown }).detail;
+            if(typeof detail === "string"){
+                return detail;
+            }
+        }catch{
+            // Not JSON: fall through to the whole message.
+        }
+    }
+    return describeError(err);
+}
+
+/** `Photo.id` of the stand-in for an image dropped from outside the library. */
+export const EXTERNAL_ID = -1;
+
+/** The subject of a find-similar that is a file on disk rather than a row. It
+ *  rides in `similarTo` so every "similar mode" check keeps working unchanged. */
+function externalPhoto(path: string): Photo{
+    const name = path.split(/[\\/]/).pop() || path;
+    return {
+        id: EXTERNAL_ID, path, filename: name,
+        folder: path.slice(0, path.length - name.length).replace(/[\\/]$/, ""),
+        width: 0, height: 0, mime: "", takenAt: null, dateSource: null,
+        isScreenshot: false, hasOcr: false, ocrText: null, snippet: null,
+        isDupe: false, collections: [],
+    };
+}
+
+function fetchSimilar(photo: Photo, filters: Filters): Promise<SearchResponse>{
+    return photo.id === EXTERNAL_ID
+        ? api.similarToFile(photo.path, filters)
+        : api.similar(photo.id, filters);
 }
 
 let mockReindexTimer: ReturnType<typeof setInterval> | undefined;
@@ -461,6 +513,8 @@ export const useStore = create<State & Actions>((set, get) => ({
     storage: { thumbnailCacheGb: 0, indexGb: 0 },
     ocrStatus: null,
     clearCacheConfirm: false,
+    deleteConfirm: false,
+    removeFolderConfirm: null,
 
     isDraggingFile: false,
     toast: null,
@@ -510,10 +564,10 @@ export const useStore = create<State & Actions>((set, get) => ({
         void get().loadTimeline();
         try{
             // "Find similar" is not a /search query: re-running it as one (a
-            // rescan, a filter click) would swap the neighbours for the whole
+            // rescan) would swap the neighbours for the whole
             // library under a header that still says "Visually similar".
             const res = s.similarTo !== null
-                ? await api.similar(s.similarTo.id)
+                ? await fetchSimilar(s.similarTo, s.filters)
                 : await api.search({ ...currentQuery(s), limit });
             if(seq !== searchSeq){
                 return;
@@ -621,7 +675,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         });
         let res: SearchResponse;
         try{
-            res = await api.similar(photo.id);
+            res = await fetchSimilar(photo, s.filters);
         }catch(err){
             if(seq === searchSeq){
                 // Back to what was on screen, or the skeletons never go away.
@@ -629,7 +683,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     searching: false, query: s.query, similarTo: s.similarTo,
                     beforeSimilar: s.beforeSimilar,
                 });
-                get().showToast(describeError(err));
+                get().showToast(describeDetail(err));
             }
             return;
         }
@@ -647,6 +701,22 @@ export const useStore = create<State & Actions>((set, get) => ({
             focusedIndex: -1,
         });
         get().showToast(`Showing images visually similar to ${photo.filename}`);
+    },
+
+    async findSimilarToFile(path){
+        await get().findSimilar(externalPhoto(path));
+    },
+
+    async dropFiles(paths){
+        set({ isDraggingFile: false });
+        const first = paths[0];
+        if(first === undefined){
+            return;
+        }
+        await get().findSimilarToFile(first);
+        if(paths.length > 1){
+            get().showToast(`Using ${externalPhoto(first).filename}; ${paths.length - 1} other file${paths.length === 2 ? " was" : "s were"} ignored`);
+        }
     },
 
     /**
@@ -1069,8 +1139,15 @@ export const useStore = create<State & Actions>((set, get) => ({
         set((s) => ({ indexingPanelOpen: !s.indexingPanelOpen }));
     },
 
-    toggleIndexingPause(){
-        set((s) => ({ indexing: { ...s.indexing, paused: !s.indexing.paused } }));
+    async toggleIndexingPause(){
+        const next = !get().indexing.paused;
+        set((s) => ({ indexing: { ...s.indexing, paused: next } }));
+        try{
+            await api.setIndexingPaused(next);
+        }catch(err){
+            set((s) => ({ indexing: { ...s.indexing, paused: !next } }));
+            get().showToast(describeError(err));
+        }
     },
 
     /**
@@ -1395,7 +1472,16 @@ export const useStore = create<State & Actions>((set, get) => ({
         get().showToast(`Watching ${added.path}`);
     },
 
+    requestRemoveFolder(path){
+        set({ removeFolderConfirm: path });
+    },
+
+    cancelRemoveFolder(){
+        set({ removeFolderConfirm: null });
+    },
+
     async removeFolder(path){
+        set({ removeFolderConfirm: null });
         try{
             await api.removeFolder(path);
         }catch(err){
@@ -1403,7 +1489,12 @@ export const useStore = create<State & Actions>((set, get) => ({
             return;
         }
         await get().loadFolders();
-        get().showToast("Folder removed");
+        void get().loadCounts();
+        void get().loadStorage();
+        // The folder's photos left the library: results, counts and the timeline
+        // (which `runSearch` reloads) all moved.
+        await get().runSearch({ keepLoaded: true });
+        get().showToast("Folder removed — its photos left the library, the files stay on disk");
     },
 
     async toggleRecursive(path){
@@ -1466,23 +1557,43 @@ export const useStore = create<State & Actions>((set, get) => ({
         toastTimer = setTimeout(() => set({ toast: null }), 2400);
     },
 
+    requestDelete(){
+        if(get().selectedIds.size > 0){
+            set({ deleteConfirm: true });
+        }
+    },
+
+    cancelDelete(){
+        set({ deleteConfirm: false });
+    },
+
     async deleteSelected(){
         const ids = [...get().selectedIds];
+        set({ deleteConfirm: false });
         if(ids.length === 0){
             return;
         }
+        let res;
         try{
-            await api.deletePhotos(ids);
+            res = await api.deletePhotos(ids);
         }catch(err){
             // The selection stays, so the user can retry.
             get().showToast(describeError(err));
             return;
         }
-        set({ selectedIds: new Set(), collectionMenuOpen: false });
+        // Exactly the ones the trash refused stay selected.
+        const failed = new Set(res.failed);
+        set({
+            selectedIds: new Set(ids.filter((id) => failed.has(id))),
+            collectionMenuOpen: false,
+        });
         await get().loadCounts();
         // Deleting around row 400 must not collapse the grid to page one.
         await get().runSearch({ keepLoaded: true });
-        get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} removed from index`);
+        const moved = `${res.removed} photo${res.removed === 1 ? "" : "s"} moved to the trash`;
+        get().showToast(
+            failed.size > 0 ? `${moved}; ${failed.size} could not be moved` : moved,
+        );
     },
 
     async revealSelected(){
@@ -1578,7 +1689,8 @@ export function searchKey(s: State): string{
         s.query.trim(),
         s.libraryView ?? "",
         s.activeCollection ?? "",
-        s.similarTo?.id ?? "",
+        // The path too: two dropped files are both id -1.
+        s.similarTo === null ? "" : `${s.similarTo.id}:${s.similarTo.path}`,
         // A new order is a different question: the top of the list is
         // somewhere else entirely.
         activeSort(s),

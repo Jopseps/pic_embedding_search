@@ -63,16 +63,76 @@ export async function startFileDrag(paths: readonly string[]): Promise<void>{
     if(!isTauri() || paths.length === 0){
         return;
     }
+    // Armed before the await: the pointer is already outside, and the drag can
+    // come straight back in while the plugin is still starting.
+    outboundUntil = Date.now() + OUTBOUND_MAX_MS;
     try{
         const { startDrag } = await import("@crabnebula/tauri-plugin-drag");
         // The preview image is required and must be a path on disk. The first
         // dragged photo is the only image we are certain exists there — the
         // thumbnails live in the cache dir, which the frontend only ever sees
         // through the sidecar's HTTP URLs.
-        await startDrag({ item: [...paths], icon: paths[0]! });
+        await startDrag({ item: [...paths], icon: paths[0]! }, () => {
+            outboundUntil = Date.now() + OUTBOUND_GRACE_MS;
+        });
     }catch{
         // Nothing to recover: the pointer is already gone.
+        outboundUntil = Date.now() + OUTBOUND_GRACE_MS;
     }
+}
+
+/** Until when an OS drag that this app started may still be in flight. */
+let outboundUntil = 0;
+// The plugin reports the end of a drag through its callback, but it may never
+// do so (a compositor that refuses the drag), so the flag also expires on its own.
+const OUTBOUND_MAX_MS = 60_000;
+// A drop on our own window can be delivered just after the callback.
+const OUTBOUND_GRACE_MS = 800;
+
+/** True while a drag the app itself started (a photo carried out of the grid) is
+ *  in progress or has only just ended. */
+export function ownDragInFlight(): boolean{
+    return Date.now() < outboundUntil;
+}
+
+export interface FileDropHandlers{
+    enter(): void;
+    leave(): void;
+    drop(paths: string[]): void;
+}
+
+/**
+ * Files dragged in from another app, with their real paths.
+ *
+ * With `dragDropEnabled` the webview hands the drop to Tauri, so HTML5 drop
+ * events never fire in the desktop shell and this is the only way to get a path.
+ * A photo dragged out of the grid and back over the window arrives here too —
+ * it is the app's own drag, so it is dropped on the floor and the overlay is
+ * cleared instead. `over` fires per pointer move and is ignored.
+ *
+ * Outside the desktop shell there is nothing to listen to and the returned
+ * function does nothing.
+ */
+export async function listenFileDrop(h: FileDropHandlers): Promise<() => void>{
+    if(!isTauri()){
+        return () => {};
+    }
+    const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+    return await getCurrentWebview().onDragDropEvent((event) => {
+        const p = event.payload;
+        if(p.type === "over"){
+            return;
+        }
+        if(ownDragInFlight()){
+            h.leave();
+        }else if(p.type === "enter"){
+            h.enter();
+        }else if(p.type === "drop"){
+            h.drop(p.paths);
+        }else{
+            h.leave();
+        }
+    });
 }
 
 /** Native directory picker. Null when cancelled, or outside the desktop app. */
