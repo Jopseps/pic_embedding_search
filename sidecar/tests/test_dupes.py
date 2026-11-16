@@ -260,3 +260,35 @@ def test_the_threshold_is_configurable(store, threshold):
     add_image(store, "/lib/b.png", bits(*range(8)), "sha-b")
     index = DupeIndex(store, threshold=threshold)
     assert bool(index.ids) is (threshold >= 8)
+
+
+def test_the_vectorised_edge_search_finds_what_the_tree_finds():
+    """`_edges` replaced a BK-tree that could not prune at radius 10 and took
+    minutes at 20k photos. Planted clusters, so there are real edges to compare."""
+    from picsearch.dupes import _edges
+
+    rng = random.Random(7)
+    values: set[int] = set()
+    for _ in range(300):
+        base = rng.getrandbits(64)
+        values.add(base)
+        for _ in range(rng.randint(0, 4)):
+            values.add(base ^ bits(*rng.sample(range(64), rng.randint(0, 12))))
+    hashes = sorted(values)
+
+    tree = BkTree(hashes)
+    expected = sorted(
+        (hamming64(h, o), h, o) for h in hashes for o in tree.query(h, 10) if o > h
+    )
+    assert expected
+    assert sorted(_edges(hashes, 10)) == expected
+
+
+def test_clustering_ten_thousand_hashes_is_not_quadratic_python():
+    import time
+
+    rng = random.Random(1)
+    data = [(i, rng.getrandbits(63), f"s{i}") for i in range(10_000)]
+    started = time.perf_counter()
+    cluster(data)
+    assert time.perf_counter() - started < 5.0       # the tree took ~20 s here

@@ -21,6 +21,7 @@ Design notes that are decisions, not accidents:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -48,9 +49,6 @@ DEFAULT_LIMIT = 200
 FTS_DEPTH = 500
 # Words of context around the match in the returned snippet.
 SNIPPET_TOKENS = 12
-# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 32766, but a candidate set that
-# large is better filtered in Python than bound one id at a time.
-MAX_SQL_PARAMS = 900
 
 DATE_PRESET_DAYS = {"today": 1, "week": 7, "month": 30, "year": 365}
 LARGE_EDGE = 2500
@@ -93,14 +91,25 @@ class VectorIndex:
     def __init__(self, model_id: str, dim: int):
         self.model_id = model_id
         self.dim = dim
-        self.ids = np.zeros((0,), dtype=np.int64)
-        self.matrix = np.zeros((0, dim), dtype=np.float32)
+        # Spare capacity past `_n`: copying the whole matrix per added vector
+        # made indexing a large library quadratic in memory traffic.
+        self._ids_buf = np.zeros((0,), dtype=np.int64)
+        self._mat_buf = np.zeros((0, dim), dtype=np.float32)
+        self._n = 0
         self._row_of: dict[int, int] = {}
         self._lock = threading.RLock()
 
     @property
+    def ids(self) -> np.ndarray:
+        return self._ids_buf[:self._n]
+
+    @property
+    def matrix(self) -> np.ndarray:
+        return self._mat_buf[:self._n]
+
+    @property
     def size(self) -> int:
-        return int(self.ids.shape[0])
+        return self._n
 
     @classmethod
     def load(cls, store: Store, model_id: str, dim: int) -> "VectorIndex":
@@ -117,8 +126,9 @@ class VectorIndex:
             ids.append(image_id)
             vecs.append(vec)
         if(ids):
-            idx.ids = np.asarray(ids, dtype=np.int64)
-            idx.matrix = np.ascontiguousarray(np.stack(vecs), dtype=np.float32)
+            idx._ids_buf = np.asarray(ids, dtype=np.int64)
+            idx._mat_buf = np.ascontiguousarray(np.stack(vecs), dtype=np.float32)
+            idx._n = len(ids)
             idx._row_of = {int(i): r for r, i in enumerate(ids)}
         log.info("vector index: %d vectors for %s", idx.size, model_id)
         return idx
@@ -130,21 +140,34 @@ class VectorIndex:
         with self._lock:
             existing = self._row_of.get(int(image_id))
             if(existing is not None):
-                self.matrix[existing] = v
+                self._mat_buf[existing] = v
                 return
-            self.ids = np.append(self.ids, np.int64(image_id))
-            self.matrix = np.ascontiguousarray(np.vstack([self.matrix, v[None, :]]))
-            self._row_of[int(image_id)] = self.size - 1
+            n = self._n
+            if(n == self._mat_buf.shape[0]):
+                # New buffers rather than resizing in place: a search that took
+                # its view before this keeps reading the old, still-valid ones.
+                cap = max(256, n + n // 4)
+                ids_buf = np.zeros((cap,), dtype=np.int64)
+                mat_buf = np.zeros((cap, self.dim), dtype=np.float32)
+                ids_buf[:n] = self._ids_buf[:n]
+                mat_buf[:n] = self._mat_buf[:n]
+                self._ids_buf, self._mat_buf = ids_buf, mat_buf
+            self._ids_buf[n] = image_id
+            self._mat_buf[n] = v
+            self._row_of[int(image_id)] = n
+            self._n = n + 1
 
     def remove(self, image_ids: Iterable[int]) -> None:
         drop = {int(i) for i in image_ids}
         if(not drop or self.size == 0):
             return
         with self._lock:
-            keep = np.array([int(i) not in drop for i in self.ids], dtype=bool)
-            self.ids = self.ids[keep]
-            self.matrix = np.ascontiguousarray(self.matrix[keep])
-            self._row_of = {int(i): r for r, i in enumerate(self.ids)}
+            keep = ~np.isin(self.ids, np.fromiter(drop, dtype=np.int64, count=len(drop)))
+            ids = self.ids[keep]
+            self._mat_buf = np.ascontiguousarray(self.matrix[keep])
+            self._ids_buf = ids
+            self._n = int(ids.shape[0])
+            self._row_of = {int(i): r for r, i in enumerate(ids)}
 
     def vector_for(self, image_id: int) -> np.ndarray | None:
         row = self._row_of.get(int(image_id))
@@ -231,21 +254,6 @@ class SearchParams:
 DIRNAME_SQL = f"rtrim(rtrim(images.path, replace(images.path, '{os.sep}', '')), '{os.sep}')"
 
 
-def _like_subtree(folder: str) -> str:
-    """LIKE pattern matching everything under `folder`.
-
-    `%` and `_` are legal in filenames, so they are escaped rather than left to
-    act as wildcards.
-    """
-    escaped = (
-        paths.subtree_prefix(folder)
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
-    return escaped + "%"
-
-
 def build_filter_sql(params: SearchParams) -> tuple[str, list]:
     """WHERE fragments + params for the metadata prefilter."""
     clauses: list[str] = []
@@ -267,7 +275,7 @@ def build_filter_sql(params: SearchParams) -> tuple[str, list]:
         parts = []
         for folder in params.folders:
             parts.append(f"({DIRNAME_SQL} = ? OR images.path LIKE ? ESCAPE '\\')")
-            args.extend([paths.subtree_prefix(folder)[:-1], _like_subtree(folder)])
+            args.extend([paths.subtree_prefix(folder)[:-1], paths.like_subtree(folder)])
         clauses.append("(" + " OR ".join(parts) + ")")
 
     days = DATE_PRESET_DAYS.get(params.date or "")
@@ -373,17 +381,15 @@ def fts_search(
         " FROM ocr_fts WHERE ocr_fts MATCH ?"
     )
     args: list = [match]
-    post_filter: set[int] | None = None
 
     if(candidates is not None):
         if(not candidates):
             return [], {}
-        if(len(candidates) <= MAX_SQL_PARAMS):
-            marks = ",".join("?" * len(candidates))
-            sql += f" AND ocr_fts.rowid IN ({marks})"
-            args.extend(int(i) for i in candidates)
-        else:
-            post_filter = candidates
+        # In SQL however many there are: filtering the top `limit` afterwards
+        # dropped real matches whenever a common word filled the top 500 with
+        # rows outside the filter.
+        sql += " AND ocr_fts.rowid IN (SELECT value FROM json_each(?))"
+        args.append(json.dumps(sorted(candidates)))
 
     # bm25() is negative and *more* negative is better, so ascending is
     # best-first. A DESC here would rank the worst matches at the top.
@@ -402,8 +408,6 @@ def fts_search(
     snippets: dict[int, str] = {}
     for row in rows:
         image_id = int(row["id"])
-        if(post_filter is not None and image_id not in post_filter):
-            continue
         ids.append(image_id)
         snippets[image_id] = row["snip"]
     return ids, snippets
@@ -575,14 +579,18 @@ class Searcher:
         if(query == ""):
             ids, total = self._browse(params, candidates)
             items = hydrate(self.store, ids, dupes=dupes)
+            taken = len(ids)
         else:
             ranked, snippets = self._ranked(params, candidates, backend)
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
             items = hydrate(self.store, [i for i, _ in window], scores, snippets, dupes)
+            taken = len(window)
 
-        consumed = params.offset + len(items)
+        # Rows asked for, not rows that came back: `hydrate` drops an id whose row
+        # is gone, and counting only survivors repeats items on the next page.
+        consumed = params.offset + taken
         cursor = str(consumed) if consumed < total else None
         return {
             "items": items,
@@ -654,9 +662,11 @@ class Searcher:
         if(candidates is not None):
             if(not candidates):
                 return None
-            marks = ",".join("?" * len(candidates))
-            clauses.append(f"images.id IN ({marks})")
-            args = list(args) + [int(i) for i in candidates]
+            # One bound value, not one `?` per id: a filter that matches tens of
+            # thousands of photos blew SQLite's variable limit (32766 in the
+            # bundled CPython) and answered every browse request with a 500.
+            clauses.append("images.id IN (SELECT value FROM json_each(?))")
+            args = list(args) + [json.dumps(sorted(candidates))]
         return (f" WHERE {' AND '.join(clauses)}" if clauses else ""), args
 
     def _resort(self, ranked: list[tuple[int, float]], order: str) -> list[tuple[int, float]]:
@@ -664,11 +674,11 @@ class Searcher:
         score_of = dict(ranked)
         if(not score_of):
             return []
-        marks = ",".join("?" * len(score_of))
         rows = self.store.conn().execute(
-            f"SELECT images.id FROM images WHERE images.id IN ({marks})"
+            "SELECT images.id FROM images"
+            " WHERE images.id IN (SELECT value FROM json_each(?))"
             f" ORDER BY {SORT_SQL[order]}",
-            list(score_of),
+            (json.dumps(list(score_of)),),
         )
         return [(int(r["id"]), score_of[int(r["id"])]) for r in rows]
 

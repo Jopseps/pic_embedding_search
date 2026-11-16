@@ -359,3 +359,30 @@ def test_counts_include_collection_membership(client):
 def test_counts_need_the_token(state):
     bare = TestClient(create_app(state))
     assert bare.get("/counts").status_code == 401
+
+
+def test_a_swap_deferred_by_a_busy_slot_starts_when_the_slot_frees(state):
+    """The boot scan runs before the lifespan resumes a pending swap, so the swap
+    found the slot taken, logged "deferred", and nothing ever started it."""
+    import time
+
+    state.indexer.status.running = True                 # a scan holds the slot
+    assert state.begin_model_swap(OTHER) is False
+    assert state.pending_model_id == OTHER and state.model_id == MODEL
+
+    state.indexer.status.running = False
+    state._on_event("scan-complete", {})
+    deadline = time.time() + 10
+    while(time.time() < deadline and state.model_id != OTHER):
+        time.sleep(0.05)
+    assert state.model_id == OTHER
+    assert state.pending_model_id is None
+
+
+def test_a_retry_keeps_the_embedder_that_is_already_loaded(state):
+    """Each retry built a fresh embedder, dropping weights a pass had loaded."""
+    state.indexer.status.running = True                 # keep the backfill from starting
+    state.begin_model_swap(OTHER)
+    first = state.pending_embedder
+    state.begin_model_swap(OTHER)
+    assert state.pending_embedder is first

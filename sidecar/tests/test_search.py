@@ -521,6 +521,12 @@ def test_similar_accepts_the_snake_case_body_api_ts_sends(client):
     assert first["id"] not in [i["id"] for i in res.json()["items"]]
 
 
+def test_a_non_ascii_token_is_a_401_not_a_500(app_state):
+    bare = TestClient(create_app(app_state))
+    assert bare.get("/health", headers={TOKEN_HEADER: "tökén".encode("latin-1")}).status_code == 401
+    assert bare.get("/thumb/1", params={"t": "tökén"}).status_code == 401
+
+
 def test_thumb_accepts_the_token_as_a_query_param(client, app_state):
     """`<img src>` cannot set headers, so ?t= has to work."""
     image_id = client.get("/search", params={"q": ""}).json()["items"][0]["id"]
@@ -831,3 +837,94 @@ def test_an_unavailable_ocr_engine_is_still_persisted(client, app_state):
     # The preference is the user's; what actually runs is whatever is installed.
     assert body["ocrEngineId"] == "easyocr"
     assert client.get("/health").json()["ocrEngine"] != "easyocr"
+
+
+# ---------------------------------------------------------------------------
+# Stability on a big library
+# ---------------------------------------------------------------------------
+
+def test_a_filter_matching_more_rows_than_sqlite_has_variables_still_browses(app_state):
+    """The id set was bound one `?` per id: past SQLITE_MAX_VARIABLE_NUMBER
+    (32766 in the CPython that ships with the app) every filtered browse, and
+    the timeline, answered 500. The limit is lowered here instead of indexing
+    30,000 photos."""
+    import sqlite3
+
+    app_state.store.conn().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 5)
+    params = SearchParams(q="", types=["Photo"], limit=3)
+    res = app_state.searcher.search(params)
+    assert res["total"] == 7
+    assert len(res["items"]) == 3
+    assert app_state.searcher.timeline(params)["buckets"]
+
+
+def test_a_vector_without_a_row_does_not_repeat_items_on_the_next_page(app_state):
+    """`hydrate` drops an id whose row is gone, and the cursor was advanced by
+    the survivors only — so the next page began inside the previous one."""
+    app_state.vectors.add(99999, unit(1, 0, 0))     # ranks first, has no row
+    seen: list[int] = []
+    cursor = None
+    for _ in range(20):
+        page = app_state.searcher.search(SearchParams(q="red", limit=2, cursor=cursor))
+        seen += [i["id"] for i in page["items"]]
+        cursor = page["cursor"]
+        if(cursor is None):
+            break
+    assert len(seen) == len(set(seen))
+
+
+def test_deleting_a_row_removes_its_vector(app_state):
+    """`forget_paths` and `_prune_missing` removed rows and left the vectors, so
+    search kept ranking photos that no longer existed."""
+    row = app_state.store.conn().execute("SELECT id, path FROM images LIMIT 1").fetchone()
+    before = app_state.vectors.size
+    Path(row["path"]).unlink()
+    assert app_state.indexer.forget_paths([Path(row["path"])]) == 1
+    assert app_state.vectors.size == before - 1
+    assert app_state.vectors.vector_for(row["id"]) is None
+
+
+def test_a_rename_over_another_image_removes_the_displaced_vector(app_state):
+    ids = [r["id"] for r in app_state.store.conn().execute("SELECT id FROM images LIMIT 2")]
+    a, b = (app_state.store.image_by_id(i)["path"] for i in ids)
+    before = app_state.vectors.size
+    app_state.store.move_image(a, b)
+    assert app_state.vectors.size == before - 1
+    assert app_state.vectors.vector_for(ids[1]) is None
+
+
+def test_vector_index_grows_in_place_and_stays_consistent():
+    idx = VectorIndex(MODEL, DIM)
+    for n in range(1, 700):
+        idx.add(n, unit(1, n % 7, 0))
+    assert idx.size == 699
+    assert idx.matrix.shape == (699, DIM)
+    assert idx.ids.tolist() == list(range(1, 700))
+    idx.remove([1, 350, 699])
+    assert idx.size == 696
+    assert idx.vector_for(350) is None
+    assert idx.vector_for(2) is not None
+    idx.add(5000, unit(0, 0, 1))
+    assert idx.search(unit(0, 0, 1), 1)[0][0] == 5000
+    idx.add(2, unit(0, 0, 1))                       # re-adding replaces, never appends
+    assert idx.size == 697
+
+
+def test_a_text_query_under_a_filter_is_not_cut_to_the_global_top_500(store: Store):
+    """With more than 900 candidates the text leg took the global top `limit` and
+    filtered afterwards, so a word common outside the filter hid its matches
+    inside it."""
+    rows = []
+    for i in range(1, 2101):
+        rows.append((
+            i, f"/lib/{i}.png", 1.0, 1, 1, 1, "image/png", 1, f"{i:064d}", None, 0,
+            "2026-01-01T00:00:00", None, "",
+        ))
+    store.conn().executemany("INSERT INTO images VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    store.conn().commit()
+    # Ids 1..1000 are outside the filter and repeat the word more, so they win BM25.
+    for i in range(1, 2101):
+        store.put_ocr(i, "tesseract", "eng", "build " * (5 if i <= 1000 else 1) + "failed")
+    inside = set(range(1001, 2101))
+    ids, _ = fts_search(store, "build", inside, limit=50)
+    assert len(ids) == 50 and set(ids) <= inside

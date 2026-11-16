@@ -37,6 +37,8 @@ import logging
 import threading
 from collections.abc import Iterable, Sequence
 
+import numpy as np
+
 from .store import Store, hamming64, phash_from_db
 
 log = logging.getLogger(__name__)
@@ -110,6 +112,31 @@ class BkTree:
 # Clustering
 # ---------------------------------------------------------------------------
 
+# Cells of the XOR matrix held at once, ~4 MB of uint64 per block.
+_BLOCK_CELLS = 4_000_000
+
+
+def _edges(hashes: list[int], threshold: int) -> list[tuple[int, int, int]]:
+    """Every `(distance, a, b)` with `a < b` within `threshold`, for sorted unique
+    `hashes`. Brute force in numpy: a BK-tree cannot prune at radius 10 on 64
+    bits (random hashes sit ~32 apart, so every subtree falls inside the
+    window), which made it O(N^2) in Python — minutes for 20k photos, on the
+    search path."""
+    arr = np.asarray(hashes, dtype=np.uint64)
+    n = arr.shape[0]
+    step = max(1, _BLOCK_CELLS // max(1, n))
+    edges: list[tuple[int, int, int]] = []
+    for start in range(0, n, step):
+        block = arr[start:start + step]
+        # Upper triangle only: columns from `start` on, then drop the diagonal.
+        dist = np.bitwise_count(block[:, None] ^ arr[None, start:])
+        rows, cols = np.nonzero(dist <= threshold)
+        for r, c in zip(rows.tolist(), cols.tolist(), strict=True):
+            if(c > r):
+                edges.append((int(dist[r, c]), hashes[start + r], hashes[start + c]))
+    return edges
+
+
 def cluster(
     rows: Sequence[tuple[int, int, str]], threshold: int = DEFAULT_THRESHOLD
 ) -> list[list[int]]:
@@ -131,17 +158,12 @@ def cluster(
         return []
 
     hashes = sorted(by_hash)
-    tree = BkTree(hashes)
 
     # Candidate pairs, shortest first. Sorting by (distance, a, b) makes the
     # agglomeration deterministic — complete linkage is order-dependent, and a
     # duplicate group that changes between two runs over the same library would
     # be a genuinely maddening bug.
-    edges: list[tuple[int, int, int]] = []
-    for h in hashes:
-        for other in tree.query(h, threshold):
-            if(other > h):
-                edges.append((hamming64(h, other), h, other))
+    edges = _edges(hashes, threshold)
     edges.sort()
 
     members: dict[int, list[int]] = {h: [h] for h in hashes}
