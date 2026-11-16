@@ -56,6 +56,9 @@ jobs:
       - name: Sidecar tests
         env:
           UV_NO_SYNC: "1"
+          # The Windows runner ships a newer system Python that pillow-heif has no wheel for;
+          # the app itself only ever uses uv's managed one.
+          UV_PYTHON_PREFERENCE: only-managed
         working-directory: sidecar
         run: |
           uv sync --frozen --no-default-groups --group dev --group cpu
