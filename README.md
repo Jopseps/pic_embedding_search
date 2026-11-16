@@ -42,6 +42,17 @@ Without it everything else works; screenshots are just not searchable by their w
 
 ## Build it yourself
 
+One command from a fresh clone. It checks the toolchain (and says how to install what is missing), runs `npm ci`, runs the frontend and sidecar tests, builds the packages and copies them into `release/` with a `SHA256SUMS`:
+
+```bash
+scripts/build-linux.sh           # Linux: .deb (+ .AppImage off Arch)
+scripts\build-windows.cmd        # Windows: NSIS setup .exe; double-clicking works too
+```
+
+`--skip-tests` / `-SkipTests` and `--skip-install` / `-SkipInstall` cut steps; any other argument goes to `tauri build` (`--bundles deb`). The sidecar tests run in their own CPU-torch environment, `sidecar/.venv-build`, so the build never touches a dev `.venv`.
+
+Or just the packaging step:
+
 ```bash
 npm install
 npm run package          # fetches a pinned uv, then tauri build
