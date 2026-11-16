@@ -4,9 +4,13 @@ src-tauri/target/
 src-tauri/gen/
 # Fetched by scripts/fetch-uv.mjs, per target triple. Never committed.
 src-tauri/binaries/
+# Collected installers + SHA256SUMS from scripts/build-*.
+release/
 
 # Python sidecar
 sidecar/.venv/
+# CPU-torch test env of scripts/build-*; never the dev .venv.
+sidecar/.venv-build/
 sidecar/.pytest_cache/
 __pycache__/
 *.py[cod]
@@ -19,3 +23,9 @@ __pycache__/
 # PLAN.md are local-only.
 *.md
 !README.md
+
+# Local-only scratch: stale makepkg output and .deb copies under packaging/arch.
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.deb
+packaging/arch/*.pkg.tar.*
