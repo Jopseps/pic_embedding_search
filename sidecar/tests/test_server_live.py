@@ -122,6 +122,17 @@ def test_events_streams_a_snapshot(sidecar):
     res.close()
 
 
+def test_sigterm_stops_the_sidecar_while_an_event_stream_is_open(sidecar):
+    """uvicorn waits for open connections on shutdown and `/events` never ends,
+    so a terminate hung until the client went away."""
+    proc, hs = sidecar
+    res = get(f"http://127.0.0.1:{hs['port']}/events", hs["token"], timeout=15.0)
+    res.readline()
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=8) is not None
+    res.close()
+
+
 PARENT_SCRIPT = """
 import json, subprocess, sys, time
 args = [sys.executable, "-m", "picsearch.server", "--port", "0", "--log-level", "warning"]
