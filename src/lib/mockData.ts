@@ -10,7 +10,16 @@ import type { Photo } from "./types";
  */
 export interface MockPhoto extends Photo{
     tags: string[];
+    /** NaN when undated, so every date comparison against it is false — the
+     *  same way a NULL `taken_at` drops out of the sidecar's date filters. */
     takenMs: number;
+    /** Mock-only stand-in for `images.size_bytes`, for the size sort. */
+    sizeBytes: number;
+}
+
+/** `2026-05-30T21:36:45` — naive local wall-clock, the sidecar's wire form. */
+function localIso(d: Date): string{
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 const PHOTO_TAGS = [
@@ -85,8 +94,11 @@ export function buildMockLibrary(): MockPhoto[]{
             ? (rnd(i, 5) < 0.8 ? "~/Pictures/Screenshots" : "~/Desktop")
             : (MOCK_FOLDERS[Math.floor(rnd(i, 5) * 3)] as string);
 
-        const takenMs = now - Math.floor(i * 1.9 + rnd(i, 6) * 2) * 86_400_000;
-        const d = new Date(takenMs);
+        // A few rows are undated, so the "Undated" section and the undated-last
+        // ordering are exercised in the browser loop too.
+        const undated = i % 53 === 17;
+        const takenMs = undated ? NaN : now - Math.floor(i * 1.9 + rnd(i, 6) * 2) * 86_400_000;
+        const d = new Date(undated ? now : takenMs);
         const height = isScreenshot ? 1080 : 3024;
         const width = Math.round(height * aspect);
 
@@ -104,8 +116,10 @@ export function buildMockLibrary(): MockPhoto[]{
             width,
             height,
             mime: isScreenshot ? "image/png" : "image/jpeg",
-            takenAt: d.toISOString(),
+            takenAt: undated ? null : localIso(d),
+            dateSource: undated ? null : (isScreenshot ? "filename" : (i % 5 === 0 ? "mtime" : "exif")),
             takenMs,
+            sizeBytes: Math.round(width * height * (isScreenshot ? 0.4 : 0.9) * (0.6 + rnd(i, 10))),
             isScreenshot,
             hasOcr: isScreenshot,
             ocrText: isScreenshot ? (OCR_SAMPLES[i % OCR_SAMPLES.length] as string) : null,

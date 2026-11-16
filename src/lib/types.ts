@@ -14,7 +14,12 @@ export interface Photo{
     width: number;
     height: number;
     mime: string;
+    /** Naive local wall-clock ISO (`2026-05-30T21:36:45`) — `new Date()` reads
+     *  it as local, which is what it is. null only when nothing yielded a date. */
     takenAt: string | null;
+    /** Where `takenAt` came from. "mtime" is a guess — the lightbox says
+     *  "Modified" for it rather than "Taken". */
+    dateSource: DateSource | null;
     isScreenshot: boolean;
     /** null until OCR lands (build step 8); false is a real answer, null is "unknown". */
     hasOcr: boolean;
@@ -42,12 +47,21 @@ export type LibraryView = "all" | "recent" | "dupes";
 
 export interface Filters{
     datePreset: DatePreset | null;
+    /** Inclusive `YYYY-MM-DD` bounds; either end may be open. Exclusive with
+     *  `datePreset` — setting one clears the other. */
+    dateFrom: string | null;
+    dateTo: string | null;
     folders: string[];
     types: PhotoKind[];
     dims: DimsFilter | null;
 }
 
 export type DatePreset = "today" | "week" | "month" | "year";
+export type DateSource = "exif" | "filename" | "mtime";
+/** The browse orders. A query adds "relevance", which is never persisted. */
+export type SortKey = "date-desc" | "date-asc" | "name-asc" | "name-desc" | "size-desc" | "size-asc";
+export type SearchSort = SortKey | "relevance";
+export type GroupBy = "day" | "month" | "year";
 export type PhotoKind = "Photo" | "Screenshot";
 export type DimsFilter = "large" | "small";
 
@@ -56,8 +70,17 @@ export interface SearchQuery{
     view: LibraryView | null;
     collection: string | null;
     filters: Filters;
+    sort?: SearchSort;
     limit?: number;
     cursor?: string | null;
+}
+
+/** `GET /timeline`: photos per month, in the order the grid lists them, for
+ *  the whole result — including the pages not loaded yet. Empty unless the
+ *  sort is by date. */
+export interface Timeline{
+    buckets: { month: string; count: number }[];
+    undated: number;
 }
 
 export interface WatchedFolder{
@@ -231,6 +254,16 @@ export interface Settings{
      *  has always run; 100 is OCR text only, 0 is visual only. This weights
      *  *ranks*, never scores — cosine and BM25 still share no scale. */
     textWeight: number;
+
+    // ---- order -----------------------------------------------------------
+    /** The browse order. A query starts at relevance whatever this says. */
+    sort: SortKey;
+    /** Date headers group by this while the sort is by date. */
+    groupBy: GroupBy;
+    /** How many of the best matches a query keeps when it is re-sorted by
+     *  date, name or size. Every image is ranked, so without a cut the
+     *  "sorted results" would be the whole library. */
+    sortedSearchKeep: number;
 }
 
 /** `GET/PUT /settings`. `pendingModelId` is the swap in flight, if any. */
@@ -260,6 +293,8 @@ export type SidecarEvent =
     }
     /** The swap completed and the active model moved. */
     | { type: "model-changed"; modelId: string }
+    /** Every row's date was re-derived under new rules; the order moved. */
+    | { type: "dates-refreshed"; count: number }
     | { type: "error"; message: string };
 
 /**

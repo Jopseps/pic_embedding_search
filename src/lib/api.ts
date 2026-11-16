@@ -6,11 +6,13 @@ import type {
     SavedSearch,
     SearchQuery,
     SearchResponse,
+    SearchSort,
     Settings,
     SettingsResponse,
     SidecarEvent,
     OcrStatus,
     StorageUsage,
+    Timeline,
     WatchedFolder,
 } from "./types";
 import { buildMockLibrary, type MockPhoto } from "./mockData";
@@ -26,6 +28,9 @@ import {
     DEFAULT_PAGE_SIZE,
     DEFAULT_SEARCH_DEBOUNCE_MS,
     DEFAULT_SELECTION_BORDER,
+    DEFAULT_GROUP_BY,
+    DEFAULT_SORT,
+    DEFAULT_SORTED_SEARCH_KEEP,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
     DEFAULT_TINT_STRENGTH,
@@ -43,6 +48,8 @@ import { pickFolder } from "./tauri";
  */
 export interface PhotoSearchApi{
     search(query: SearchQuery): Promise<SearchResponse>;
+    /** Photos per month for the same query, over every page. */
+    timeline(query: SearchQuery): Promise<Timeline>;
     similar(id: number): Promise<SearchResponse>;
     thumbUrl(id: number, size: 256 | 512): string | null;
     fileUrl(id: number): string | null;
@@ -90,7 +97,9 @@ function matches(item: MockPhoto, query: string): boolean{
     return words.every((w) => hay.includes(w));
 }
 
-const NO_FILTERS: Filters = { datePreset: null, folders: [], types: [], dims: null };
+const NO_FILTERS: Filters = {
+    datePreset: null, dateFrom: null, dateTo: null, folders: [], types: [], dims: null,
+};
 
 const DAY_MS = 86_400_000;
 const DATE_PRESET_DAYS: Record<string, number> = {
@@ -126,6 +135,15 @@ function applyScope(items: MockPhoto[], query: SearchQuery): MockPhoto[]{
             out = out.filter((it) => it.takenMs >= cutoff);
         }
     }
+    // Inclusive days, compared on the naive local string like the sidecar's SQL.
+    if(f.dateFrom !== null){
+        const from = f.dateFrom;
+        out = out.filter((it) => it.takenAt !== null && it.takenAt >= from);
+    }
+    if(f.dateTo !== null){
+        const to = `${f.dateTo}T99`;
+        out = out.filter((it) => it.takenAt !== null && it.takenAt < to);
+    }
     if(f.dims === "large"){
         out = out.filter((it) => Math.max(it.width, it.height) >= 2500);
     }else if(f.dims === "small"){
@@ -136,8 +154,38 @@ function applyScope(items: MockPhoto[], query: SearchQuery): MockPhoto[]{
 }
 
 function strip(item: MockPhoto): Photo{
-    const { tags: _tags, takenMs: _takenMs, ...rest } = item;
+    const { tags: _tags, takenMs: _takenMs, sizeBytes: _sizeBytes, ...rest } = item;
     return rest;
+}
+
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** The sidecar's `SORT_SQL`: undated last either way, id breaks every tie. */
+function compareBy(sort: Exclude<SearchSort, "relevance">): (a: MockPhoto, b: MockPhoto) => number{
+    const dir = sort.endsWith("-asc") ? 1 : -1;
+    return (a, b) => {
+        let d = 0;
+        if(sort.startsWith("date")){
+            if((a.takenAt === null) !== (b.takenAt === null)){
+                return a.takenAt === null ? 1 : -1;
+            }
+            d = (a.takenAt ?? "").localeCompare(b.takenAt ?? "");
+        }else if(sort.startsWith("name")){
+            d = nameCollator.compare(a.filename, b.filename);
+        }else{
+            d = a.sizeBytes - b.sizeBytes;
+        }
+        return (d === 0 ? a.id - b.id : d) * dir;
+    };
+}
+
+/** The sort that applies: relevance only exists with a query. */
+function effectiveSort(query: SearchQuery): SearchSort{
+    const q = query.q.trim();
+    if(query.sort === undefined || (query.sort === "relevance" && q === "")){
+        return q === "" ? DEFAULT_SORT : "relevance";
+    }
+    return query.sort;
 }
 
 export class MockApi implements PhotoSearchApi{
@@ -181,30 +229,39 @@ export class MockApi implements PhotoSearchApi{
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        sort: DEFAULT_SORT,
+        groupBy: DEFAULT_GROUP_BY,
+        sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
     };
 
-    async search(query: SearchQuery): Promise<SearchResponse>{
-        const started = performance.now();
+    /** The ordered result, before paging — `search` and `timeline` share it. */
+    private ordered(query: SearchQuery): { it: MockPhoto; score?: number }[]{
         let scoped = applyScope(this.items, query);
         const q = query.q.trim();
-
         if(q !== ""){
             scoped = scoped.filter((it) => matches(it, q));
         }
-
-        const all = scoped.map((it, i) => {
-            const photo = strip(it);
-            if(q === ""){
-                return photo;
+        // Stand-in for the RRF score the sidecar returns.
+        let rows = scoped.map((it, i) => (
+            q === "" ? { it } : { it, score: Math.max(0.05, 0.92 - i * 0.004) }
+        ));
+        const sort = effectiveSort(query);
+        if(sort !== "relevance"){
+            // A re-sorted query keeps its best matches only, like the sidecar.
+            if(q !== ""){
+                rows = rows.slice(0, this.settings.sortedSearchKeep);
             }
-            // Stand-in for the RRF score the sidecar returns.
-            return { ...photo, score: Math.max(0.05, 0.92 - i * 0.004) };
-        });
-
-        // Browsing is newest-first; search is relevance-ordered.
-        if(q === ""){
-            all.sort((a, b) => (b.takenAt ?? "").localeCompare(a.takenAt ?? ""));
+            const cmp = compareBy(sort);
+            rows.sort((a, b) => cmp(a.it, b.it));
         }
+        return rows;
+    }
+
+    async search(query: SearchQuery): Promise<SearchResponse>{
+        const started = performance.now();
+        const all = this.ordered(query).map(({ it, score }) => (
+            score === undefined ? strip(it) : { ...strip(it), score }
+        ));
 
         // Paged like the sidecar pages, rather than always handing back the
         // whole fixture library: the page-size setting has to be visible in
@@ -221,6 +278,29 @@ export class MockApi implements PhotoSearchApi{
             tookMs: Math.round(performance.now() - started) + 8,
             cursor: consumed < all.length ? String(consumed) : null,
         };
+    }
+
+    async timeline(query: SearchQuery): Promise<Timeline>{
+        const sort = effectiveSort(query);
+        if(sort !== "date-desc" && sort !== "date-asc"){
+            return { buckets: [], undated: 0 };
+        }
+        const buckets: { month: string; count: number }[] = [];
+        let undated = 0;
+        for(const { it } of this.ordered(query)){
+            if(it.takenAt === null){
+                undated++;
+                continue;
+            }
+            const month = it.takenAt.slice(0, 7);
+            const last = buckets[buckets.length - 1];
+            if(last !== undefined && last.month === month){
+                last.count++;
+            }else{
+                buckets.push({ month, count: 1 });
+            }
+        }
+        return { buckets, undated };
     }
 
     async similar(id: number): Promise<SearchResponse>{
@@ -387,6 +467,46 @@ export class MockApi implements PhotoSearchApi{
 // HTTP adapter (real sidecar)
 // ---------------------------------------------------------------------------
 
+/** `SearchQuery` as `/search` and `/timeline` query parameters. */
+function queryParams(query: SearchQuery): URLSearchParams{
+    const p = new URLSearchParams();
+    p.set("q", query.q);
+    if(query.view !== null){
+        p.set("view", query.view);
+    }
+    if(query.collection !== null){
+        p.set("collection", query.collection);
+    }
+    if(query.filters.datePreset !== null){
+        p.set("date", query.filters.datePreset);
+    }
+    if(query.filters.dateFrom !== null){
+        p.set("from", query.filters.dateFrom);
+    }
+    if(query.filters.dateTo !== null){
+        p.set("to", query.filters.dateTo);
+    }
+    if(query.filters.dims !== null){
+        p.set("dims", query.filters.dims);
+    }
+    for(const f of query.filters.folders){
+        p.append("folder", f);
+    }
+    for(const t of query.filters.types){
+        p.append("type", t);
+    }
+    if(query.sort !== undefined){
+        p.set("sort", query.sort);
+    }
+    if(query.limit !== undefined){
+        p.set("limit", String(query.limit));
+    }
+    if(query.cursor != null){
+        p.set("cursor", query.cursor);
+    }
+    return p;
+}
+
 export interface SidecarHandshake{
     port: number;
     token: string;
@@ -415,33 +535,14 @@ export class HttpApi implements PhotoSearchApi{
     }
 
     search(query: SearchQuery): Promise<SearchResponse>{
-        const p = new URLSearchParams();
-        p.set("q", query.q);
-        if(query.view !== null){
-            p.set("view", query.view);
-        }
-        if(query.collection !== null){
-            p.set("collection", query.collection);
-        }
-        if(query.filters.datePreset !== null){
-            p.set("date", query.filters.datePreset);
-        }
-        if(query.filters.dims !== null){
-            p.set("dims", query.filters.dims);
-        }
-        for(const f of query.filters.folders){
-            p.append("folder", f);
-        }
-        for(const t of query.filters.types){
-            p.append("type", t);
-        }
-        if(query.limit !== undefined){
-            p.set("limit", String(query.limit));
-        }
-        if(query.cursor != null){
-            p.set("cursor", query.cursor);
-        }
-        return this.req<SearchResponse>(`/search?${p.toString()}`);
+        return this.req<SearchResponse>(`/search?${queryParams(query).toString()}`);
+    }
+
+    timeline(query: SearchQuery): Promise<Timeline>{
+        const p = queryParams(query);
+        p.delete("limit");
+        p.delete("cursor");
+        return this.req<Timeline>(`/timeline?${p.toString()}`);
     }
 
     similar(id: number): Promise<SearchResponse>{

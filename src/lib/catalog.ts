@@ -1,4 +1,13 @@
-import type { EditorFont, EmbeddingModel, OcrEngine, OcrLanguage, UiScale } from "./types";
+import type {
+    EditorFont,
+    EmbeddingModel,
+    GroupBy,
+    OcrEngine,
+    OcrLanguage,
+    SearchSort,
+    SortKey,
+    UiScale,
+} from "./types";
 
 /**
  * The Claude Design source shipped placeholder catalogs (CLIP-only models, and
@@ -230,6 +239,33 @@ export const SEARCH_DEBOUNCE_RANGE = { min: 0, max: 800 } as const;
 /** 50 = both legs of the hybrid search weighted equally, which is the plain
  *  unweighted RRF. See `rrf_merge` in the sidecar. */
 export const DEFAULT_TEXT_WEIGHT = 50;
+
+export const DEFAULT_SORT: SortKey = "date-desc";
+export const DEFAULT_GROUP_BY: GroupBy = "month";
+export const DEFAULT_SORTED_SEARCH_KEEP = 100;
+export const SORTED_SEARCH_KEEPS = [50, 100, 200, 500] as const;
+
+/** The sort menu, in the order it lists them. `relevance` shows only while a
+ *  query is active. `short` is the label on the closed button. */
+export const SORT_OPTIONS: { key: SearchSort; label: string; short: string }[] = [
+    { key: "relevance", label: "Relevance", short: "Relevance" },
+    { key: "date-desc", label: "Date — newest first", short: "Newest" },
+    { key: "date-asc", label: "Date — oldest first", short: "Oldest" },
+    { key: "name-asc", label: "Name — A to Z", short: "Name A–Z" },
+    { key: "name-desc", label: "Name — Z to A", short: "Name Z–A" },
+    { key: "size-desc", label: "Size — largest first", short: "Largest" },
+    { key: "size-asc", label: "Size — smallest first", short: "Smallest" },
+];
+
+export const GROUP_BY_OPTIONS: { key: GroupBy; label: string }[] = [
+    { key: "day", label: "Day" },
+    { key: "month", label: "Month" },
+    { key: "year", label: "Year" },
+];
+
+export function isDateSort(sort: SearchSort): sort is "date-desc" | "date-asc"{
+    return sort === "date-desc" || sort === "date-asc";
+}
 
 export function accentPresetFor(hue: number): string | null{
     return ACCENT_PRESETS.find((a) => a.hue === hue)?.id ?? null;

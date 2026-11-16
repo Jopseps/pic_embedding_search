@@ -18,7 +18,7 @@ function makeQuery(overrides: Partial<SearchQuery> = {}): SearchQuery{
         q: "table",
         view: null,
         collection: null,
-        filters: { datePreset: null, folders: [], types: [], dims: null },
+        filters: { datePreset: null, dateFrom: null, dateTo: null, folders: [], types: [], dims: null },
         ...overrides,
     };
 }
@@ -81,6 +81,8 @@ describe("HttpApi request building", () => {
             view: "recent",
             filters: {
                 datePreset: "week",
+                dateFrom: null,
+                dateTo: null,
                 folders: ["/home/u/Pictures", "/home/u/Downloads"],
                 types: ["Screenshot"],
                 dims: "large",
@@ -196,13 +198,13 @@ describe("HttpApi collections and saved searches", () => {
     it("saves the whole query, not just the text", async () => {
         const fetchSpy = vi.fn(async () => jsonResponse({
             id: "1", query: "masa", view: null, collection: null,
-            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+            filters: { datePreset: "week", dateFrom: null, dateTo: null, folders: [], types: ["Screenshot"], dims: null },
         }));
         vi.stubGlobal("fetch", fetchSpy);
 
         await new HttpApi(HANDSHAKE).saveSearch(makeQuery({
             q: "masa",
-            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+            filters: { datePreset: "week", dateFrom: null, dateTo: null, folders: [], types: ["Screenshot"], dims: null },
         }));
 
         const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
@@ -213,7 +215,7 @@ describe("HttpApi collections and saved searches", () => {
             query: "masa",
             view: null,
             collection: null,
-            filters: { datePreset: "week", folders: [], types: ["Screenshot"], dims: null },
+            filters: { datePreset: "week", dateFrom: null, dateTo: null, folders: [], types: ["Screenshot"], dims: null },
         });
     });
 
