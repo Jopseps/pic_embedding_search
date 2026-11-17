@@ -230,7 +230,7 @@ export const DEFAULT_HOLD_MS = 400;
 export const DEFAULT_DRAG_SLOP = 5;
 export const DRAG_SLOP_RANGE = { min: 2, max: 16 } as const;
 
-export const PAGE_SIZES = [100, 200, 500] as const;
+export const PAGE_SIZES = [20, 50, 100, 200, 500] as const;
 
 export const DEFAULT_PAGE_SIZE = 200;
 export const DEFAULT_SEARCH_DEBOUNCE_MS = 220;
@@ -239,6 +239,9 @@ export const SEARCH_DEBOUNCE_RANGE = { min: 0, max: 800 } as const;
 /** 50 = both legs of the hybrid search weighted equally, which is the plain
  *  unweighted RRF. See `rrf_merge` in the sidecar. */
 export const DEFAULT_TEXT_WEIGHT = 50;
+
+/** 0 = no cutoff. See `strong_matches` in the sidecar. */
+export const DEFAULT_MATCH_STRICTNESS = 50;
 
 export const DEFAULT_SORT: SortKey = "date-desc";
 export const DEFAULT_GROUP_BY: GroupBy = "month";

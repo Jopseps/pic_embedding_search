@@ -626,3 +626,21 @@ describe("density", () => {
         put.mockRestore();
     });
 });
+
+describe("match cutoff", () => {
+    it("lifts for the search it was pressed on, and only that one", async () => {
+        useStore.setState({ query: "flower" });
+        await useStore.getState().runSearch();
+        const cut = useStore.getState();
+        expect(cut.weak).toBeGreaterThan(0);
+
+        cut.showWeakMatches();
+        await vi.waitFor(() => expect(useStore.getState().weak).toBe(0));
+        expect(useStore.getState().total).toBeGreaterThan(cut.total);
+
+        // A different query is a different search: the cutoff is back.
+        useStore.setState({ query: "tree" });
+        await useStore.getState().runSearch();
+        expect(useStore.getState().weak).toBeGreaterThan(0);
+    });
+});

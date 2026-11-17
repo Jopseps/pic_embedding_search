@@ -41,6 +41,8 @@ export interface SearchResponse{
     /** Server-reported query time in milliseconds. */
     tookMs: number;
     cursor: string | null;
+    /** Matches the strictness cutoff held back; "show less relevant" adds them. */
+    weak?: number;
 }
 
 export type LibraryView = "all" | "recent" | "dupes";
@@ -79,6 +81,8 @@ export interface SearchQuery{
     sort?: SearchSort;
     limit?: number;
     cursor?: string | null;
+    /** Ignore the strictness cutoff and rank everything. */
+    weak?: boolean;
 }
 
 /** `GET /timeline`: photos per month, in the order the grid lists them, for
@@ -260,6 +264,10 @@ export interface Settings{
      *  has always run; 100 is OCR text only, 0 is visual only. This weights
      *  *ranks*, never scores — cosine and BM25 still share no scale. */
     textWeight: number;
+    /** How far above the pack a photo must score to count as a match, 0–100.
+     *  The floor sits this far from the median score up to the best one. 0
+     *  returns every image, ranked, as the app did before the cutoff. */
+    matchStrictness: number;
 
     // ---- order -----------------------------------------------------------
     /** The browse order. A query starts at relevance whatever this says. */

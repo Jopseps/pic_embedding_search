@@ -31,6 +31,7 @@ import {
     DEFAULT_SELECTION_BORDER,
     DEFAULT_GROUP_BY,
     DEFAULT_SORT,
+    DEFAULT_MATCH_STRICTNESS,
     DEFAULT_SORTED_SEARCH_KEEP,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
@@ -118,6 +119,9 @@ const DATE_PRESET_DAYS: Record<string, number> = {
     month: 30,
     year: 365,
 };
+
+/** How many mock rows count as strong matches for a query. */
+const MOCK_STRONG = 12;
 
 function applyScope(items: MockPhoto[], query: SearchQuery): MockPhoto[]{
     let out = items;
@@ -239,6 +243,7 @@ export class MockApi implements PhotoSearchApi{
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        matchStrictness: DEFAULT_MATCH_STRICTNESS,
         sort: DEFAULT_SORT,
         groupBy: DEFAULT_GROUP_BY,
         sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
@@ -269,9 +274,16 @@ export class MockApi implements PhotoSearchApi{
 
     async search(query: SearchQuery): Promise<SearchResponse>{
         const started = performance.now();
-        const all = this.ordered(query).map(({ it, score }) => (
+        let all = this.ordered(query).map(({ it, score }) => (
             score === undefined ? strip(it) : { ...strip(it), score }
         ));
+        // Stand-in for the sidecar's cutoff: the first MOCK_STRONG rows are the
+        // matches, the rest wait behind "show less relevant".
+        let weak = 0;
+        if(query.q.trim() !== "" && this.settings.matchStrictness > 0 && query.weak !== true){
+            weak = Math.max(0, all.length - MOCK_STRONG);
+            all = all.slice(0, MOCK_STRONG);
+        }
 
         // Paged like the sidecar pages, rather than always handing back the
         // whole fixture library: the page-size setting has to be visible in
@@ -287,6 +299,7 @@ export class MockApi implements PhotoSearchApi{
             total: all.length,
             tookMs: Math.round(performance.now() - started) + 8,
             cursor: consumed < all.length ? String(consumed) : null,
+            weak,
         };
     }
 
@@ -539,6 +552,9 @@ function queryParams(query: SearchQuery): URLSearchParams{
     }
     if(query.cursor != null){
         p.set("cursor", query.cursor);
+    }
+    if(query.weak === true){
+        p.set("weak", "true");
     }
     return p;
 }

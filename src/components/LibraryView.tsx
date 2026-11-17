@@ -37,6 +37,8 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const cursor = useStore((s) => s.cursor);
     const loadingMore = useStore((s) => s.loadingMore);
     const loadMore = useStore((s) => s.loadMore);
+    const weak = useStore((s) => s.weak);
+    const showWeakMatches = useStore((s) => s.showWeakMatches);
     const loadThrough = useStore((s) => s.loadThrough);
     const timeline = useStore((s) => s.timeline);
 
@@ -329,6 +331,18 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
 
                     {loadingMore ? (
                         <div className="py-4 text-center text-[calc(12px*var(--ui-scale))] text-fg-faint">Loading more…</div>
+                    ) : null}
+
+                    {mode === "results" && cursor === null && weak > 0 ? (
+                        <div className="py-4 text-center">
+                            <button
+                                type="button"
+                                onClick={showWeakMatches}
+                                className="rounded-md border border-edge px-3 py-1.5 text-[calc(12px*var(--ui-scale))] text-fg-dim hover:text-fg"
+                            >
+                                Show {fmtCount(weak)} less relevant
+                            </button>
+                        </div>
                     ) : null}
                 </div>
                 {showScrubber && marks !== null ? (

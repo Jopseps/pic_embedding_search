@@ -14,6 +14,7 @@ import {
     DEFAULT_SELECTION_BORDER,
     DEFAULT_GROUP_BY,
     DEFAULT_SORT,
+    DEFAULT_MATCH_STRICTNESS,
     DEFAULT_SORTED_SEARCH_KEEP,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
@@ -107,6 +108,11 @@ interface State{
     tookMs: number;
     /** Next page of the current search, or null when everything is loaded. */
     cursor: string | null;
+    /** Matches the strictness cutoff is holding back from this search. */
+    weak: number;
+    /** `searchKey` of the search "show less relevant" was pressed on. Compared,
+     *  never reset: a new query changes the key and the cutoff is back. */
+    weakKey: string | null;
     /** A next page is in flight. Never `searching`: that flips the grid to
      *  skeletons, which mid-scroll would blank everything already on screen. */
     loadingMore: boolean;
@@ -202,6 +208,8 @@ interface Actions{
     runSearch(opts?: { keepLoaded?: boolean }): Promise<void>;
     /** Append the next page. No-op while one is in flight or none is left. */
     loadMore(): Promise<void>;
+    /** Lift the strictness cutoff for the search on screen. */
+    showWeakMatches(): void;
     /** Load pages until row `index` exists — a scrubber jump far down. */
     loadThrough(index: number): Promise<void>;
     loadTimeline(): Promise<void>;
@@ -431,6 +439,8 @@ export const useStore = create<State & Actions>((set, get) => ({
     total: 0,
     tookMs: 0,
     cursor: null,
+    weak: 0,
+    weakKey: null,
     loadingMore: false,
     searchSort: "relevance",
     timeline: null,
@@ -502,6 +512,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        matchStrictness: DEFAULT_MATCH_STRICTNESS,
         sort: DEFAULT_SORT,
         groupBy: DEFAULT_GROUP_BY,
         sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
@@ -578,6 +589,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 total: res.total,
                 tookMs: res.tookMs,
                 cursor: res.cursor,
+                weak: res.weak ?? 0,
                 loadingMore: false,
                 searching: false,
                 backendError: null,
@@ -592,7 +604,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 ? { searching: false, loadingMore: false, backendError: describeError(err) }
                 : {
                     ...reanchor(get(), [], false),
-                    searching: false, loadingMore: false, results: [], total: 0, cursor: null,
+                    searching: false, loadingMore: false, results: [], total: 0, cursor: null, weak: 0,
                     backendError: describeError(err),
                 });
         }
@@ -600,6 +612,12 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     async loadMore(){
         await fetchMore(get().settings.pageSize);
+    },
+
+    showWeakMatches(){
+        set({ weakKey: searchKey(get()) });
+        // keepLoaded: the strong matches stay put and the rest arrive below them.
+        void get().runSearch({ keepLoaded: true });
     },
 
     async loadThrough(index){
@@ -695,6 +713,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             total: res.total,
             tookMs: res.tookMs,
             cursor: null,
+            weak: 0,
             loadingMore: false,
             timeline: null,
             searching: false,
@@ -1428,7 +1447,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             // returns, so the results on screen are stale the moment either
             // lands. Re-run once, at the end of the drag — a search per slider
             // step would embed the query on the GPU thirty times.
-            if("pageSize" in patch || "textWeight" in patch || "sortedSearchKeep" in patch){
+            if("pageSize" in patch || "textWeight" in patch || "sortedSearchKeep" in patch || "matchStrictness" in patch){
                 void get().runSearch();
             }
         }, SETTINGS_FLUSH_MS);
@@ -1729,6 +1748,7 @@ function currentQuery(s: State): SearchQuery{
         filters: s.filters,
         sort: activeSort(s),
         limit: s.settings.pageSize,
+        weak: s.weakKey !== null && s.weakKey === searchKey(s),
     };
 }
 

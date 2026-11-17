@@ -581,6 +581,7 @@ function SearchSection(){
     const pageSize = useStore((s) => s.settings.pageSize);
     const debounce = useStore((s) => s.settings.searchDebounceMs);
     const textWeight = useStore((s) => s.settings.textWeight);
+    const strictness = useStore((s) => s.settings.matchStrictness);
     const set = useStore((s) => s.setSetting);
 
     return (
@@ -621,6 +622,25 @@ function SearchSection(){
                 How long typing has to stop before the query is sent. 0 embeds the query on
                 every keystroke — the GPU can take it; a slow disk under a cold cache may
                 not.
+            </div>
+
+            <Label>MATCH STRICTNESS</Label>
+            <div className="mb-[calc(6px*var(--ui-scale))]">
+                <Slider
+                    label="Match strictness"
+                    value={strictness}
+                    min={0}
+                    max={100}
+                    step={5}
+                    readout={strictness === 0 ? "off" : strictness === 50 ? "balanced" : `${strictness}%`}
+                    onChange={(v) => set("matchStrictness", v)}
+                />
+            </div>
+            <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                How far above the rest of your library a photo has to score to count as a
+                match. Higher shows fewer, closer results; off ranks every photo. What is
+                held back is one click away under the results. Photos whose text matches the
+                query are always kept.
             </div>
 
             <Label>TEXT VS VISUAL</Label>
