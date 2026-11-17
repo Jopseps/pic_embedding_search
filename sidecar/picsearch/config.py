@@ -60,6 +60,9 @@ DEFAULTS: dict[str, Any] = {
     "pageSize": 200,
     "searchDebounceMs": 220,
     "textWeight": 50,
+    # How far above the pack a photo has to score to count as a match, 0-100.
+    # 0 returns every image, ranked. Read by `Searcher.search`.
+    "matchStrictness": 50,
     # Order and grouping. `sort` is the browse order and is sent with every
     # request; a query starts at relevance regardless, and whatever it is
     # switched to is session-only. `sortedSearchKeep` is read here: how many of

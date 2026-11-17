@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 
 RRF_K = 60
 DEFAULT_LIMIT = 200
+# How deep the visual leg goes into a response.
+VECTOR_DEPTH = DEFAULT_LIMIT * 10
 
 # How deep the text leg goes. BM25 past a few hundred rows is noise, and RRF
 # weights rank 500 at 1/560 — it cannot move anything.
@@ -227,6 +229,11 @@ class SearchParams:
     date_from: str | None = None
     date_to: str | None = None
     sorted_keep: int = DEFAULT_SORTED_KEEP
+    # How far above the pack a visual hit must score to count as a match, 0-100
+    # (`matchStrictness` in config.toml). 0 keeps every image, as before.
+    strictness: int = 0
+    # The "show less relevant" request: ignore `strictness` and rank everything.
+    weak: bool = False
 
     @property
     def order(self) -> str:
@@ -414,6 +421,32 @@ def fts_search(
 
 
 # ---------------------------------------------------------------------------
+# Match cutoff
+# ---------------------------------------------------------------------------
+
+# Below this many candidates the median is not a baseline, it is just another hit.
+CUTOFF_MIN_CANDIDATES = 20
+
+
+def strong_matches(
+    ranked: list[tuple[int, float]], strictness: int
+) -> list[tuple[int, float]]:
+    """The head of a best-first cosine list that stands clear of the pack.
+
+    The floor sits `strictness`% of the way from the median score up to the top
+    one. Not a fixed cosine: SigLIP's scores bunch near 0.1 and shift per model,
+    language and query, and a floor measured against the top alone cuts "flower"
+    to four photos while keeping a vague "build failed" at a hundred. The median
+    is what the query scores on an image that has nothing to do with it.
+    """
+    if(strictness <= 0 or len(ranked) < CUTOFF_MIN_CANDIDATES):
+        return ranked
+    median = ranked[len(ranked) // 2][1]
+    floor = median + (ranked[0][1] - median) * min(100, strictness) / 100.0
+    return [hit for hit in ranked if hit[1] >= floor]
+
+
+# ---------------------------------------------------------------------------
 # Fusion
 # ---------------------------------------------------------------------------
 
@@ -576,12 +609,13 @@ class Searcher:
         candidates = candidate_ids(self.store, params, dupes)
         query = params.q.strip()
 
+        weak = 0
         if(query == ""):
             ids, total = self._browse(params, candidates)
             items = hydrate(self.store, ids, dupes=dupes)
             taken = len(ids)
         else:
-            ranked, snippets = self._ranked(params, candidates, backend)
+            ranked, snippets, weak = self._ranked(params, candidates, backend)
             total = len(ranked)
             window = ranked[params.offset:params.offset + params.limit]
             scores = {i: s for i, s in window}
@@ -597,25 +631,36 @@ class Searcher:
             "total": total,
             "tookMs": round((time.perf_counter() - started) * 1000, 2),
             "cursor": cursor,
+            # Matches held back by the cutoff; what "show less relevant" adds.
+            "weak": weak,
         }
 
     def _ranked(
         self, params: SearchParams, candidates: set[int] | None, backend: Backend
-    ) -> tuple[list[tuple[int, float]], dict[int, str]]:
-        """Fused matches in the order the response lists them, plus snippets."""
+    ) -> tuple[list[tuple[int, float]], dict[int, str], int]:
+        """Fused matches in the order the response lists them, plus snippets and
+        how many more the cutoff held back."""
         query = params.q.strip()
         # Two ranked lists, fused by rank. The text leg is usually short or
         # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
         # visual match no matter what their raw scores look like.
-        vector_ranked = self._vector_search(query, candidates, backend)
+        cut = params.strictness > 0 and not params.weak
+        vector_ranked = self._vector_search(query, candidates, backend, full=cut)
         text_ranked, snippets = fts_search(self.store, query, candidates)
-        ranked = rrf_merge(
-            [[i for i, _ in vector_ranked], text_ranked],
-            weights=leg_weights(params.text_weight),
+        weights = leg_weights(params.text_weight)
+        everything = rrf_merge(
+            [[i for i, _ in vector_ranked[:VECTOR_DEPTH]], text_ranked], weights=weights
         )
+        ranked = everything
+        if(cut):
+            # Only the visual leg is cut. A photo whose OCR text matches the
+            # query is a match whatever its cosine says.
+            kept = strong_matches(vector_ranked, params.strictness)
+            ranked = rrf_merge([[i for i, _ in kept], text_ranked], weights=weights)
+        weak = len(everything) - len(ranked)
         if(params.order != RELEVANCE):
             ranked = self._resort(ranked[:max(1, params.sorted_keep)], params.order)
-        return ranked, snippets
+        return ranked, snippets, weak
 
     def timeline(self, params: SearchParams) -> dict:
         """Photos per month, in the order the grid lists them.
@@ -630,7 +675,7 @@ class Searcher:
         dupes = self.dupes.ids
         candidates = candidate_ids(self.store, params, dupes)
         if(params.q.strip()):
-            ranked, _ = self._ranked(params, candidates, self._backend)
+            ranked, _, _ = self._ranked(params, candidates, self._backend)
             candidates = {i for i, _ in ranked}
             where = self._where(SearchParams(), candidates)
         else:
@@ -702,7 +747,8 @@ class Searcher:
         return [int(r["id"]) for r in rows], total
 
     def _vector_search(
-        self, query: str, candidates: set[int] | None, backend: Backend
+        self, query: str, candidates: set[int] | None, backend: Backend,
+        full: bool = False,
     ) -> list[tuple[int, float]]:
         # `backend` is the caller's snapshot — the query text and the index it
         # is scanned against have to come from the same model.
@@ -711,7 +757,9 @@ class Searcher:
         q_vec = backend.embedder.embed_text(query)
         # Take a generous slice so pagination has somewhere to go; the matmul
         # already touched every row, so this costs only the sort.
-        depth = min(backend.vectors.size, DEFAULT_LIMIT * 10)
+        # `full` asks for every row: the cutoff needs the median of the whole
+        # candidate set, and a list cut at VECTOR_DEPTH has a skewed one.
+        depth = backend.vectors.size if full else min(backend.vectors.size, VECTOR_DEPTH)
         return backend.vectors.search(q_vec, depth, candidates)
 
     def similar(

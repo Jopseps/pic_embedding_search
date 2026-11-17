@@ -32,6 +32,7 @@ from picsearch.search import (
     fts_search,
     leg_weights,
     rrf_merge,
+    strong_matches,
 )
 from picsearch.server import TOKEN_HEADER, AppState, create_app
 from picsearch.store import Store
@@ -473,7 +474,7 @@ def test_ocr_fields_are_present_and_null_without_text(app_state):
 
 def test_envelope_shape(app_state):
     res = app_state.searcher.search(SearchParams(q=""))
-    assert set(res) == {"items", "total", "tookMs", "cursor"}
+    assert set(res) == {"items", "total", "tookMs", "cursor", "weak"}
     assert isinstance(res["tookMs"], float)
 
 
@@ -502,7 +503,7 @@ def test_search_over_http(client):
     res = client.get("/search", params={"q": "blue", "limit": 5})
     assert res.status_code == 200
     body = res.json()
-    assert set(body) == {"items", "total", "tookMs", "cursor"}
+    assert set(body) == {"items", "total", "tookMs", "cursor", "weak"}
     assert "blue" in body["items"][0]["filename"]
 
 
@@ -690,7 +691,7 @@ def test_indexer_progress_reaches_the_bus(app_state, library):
 def test_searcher_survives_an_empty_index(xdg_tmp):
     state = AppState(model_id=MODEL, embedder=ColorEmbedder())
     res = state.searcher.search(SearchParams(q="red"))
-    assert res == {"items": [], "total": 0, "tookMs": res["tookMs"], "cursor": None}
+    assert res == {"items": [], "total": 0, "tookMs": res["tookMs"], "cursor": None, "weak": 0}
 
 
 def test_indexer_and_searcher_share_the_store(xdg_tmp, library):
@@ -931,3 +932,31 @@ def test_a_text_query_under_a_filter_is_not_cut_to_the_global_top_500(store: Sto
     inside = set(range(1001, 2101))
     ids, _ = fts_search(store, "build", inside, limit=50)
     assert len(ids) == 50 and set(ids) <= inside
+
+
+# -- match cutoff ----------------------------------------------------------
+
+def _hits(scores):
+    return [(i, s) for i, s in enumerate(scores)]
+
+
+def test_cutoff_keeps_what_stands_clear_of_the_pack():
+    # 3 clear hits over 27 images that score like noise around 0.05.
+    ranked = _hits([0.30, 0.28, 0.27] + [0.06 - 0.001 * n for n in range(27)])
+    assert [i for i, _ in strong_matches(ranked, 50)] == [0, 1, 2]
+
+
+def test_cutoff_zero_keeps_everything():
+    ranked = _hits([0.3 - 0.01 * n for n in range(25)])
+    assert strong_matches(ranked, 0) == ranked
+
+
+def test_cutoff_leaves_a_small_candidate_set_alone():
+    ranked = _hits([0.9, 0.1, 0.05])
+    assert strong_matches(ranked, 100) == ranked
+
+
+def test_cutoff_is_monotonic_in_strictness():
+    ranked = _hits([0.3 - 0.01 * n for n in range(25)])
+    sizes = [len(strong_matches(ranked, s)) for s in (0, 25, 50, 75, 100)]
+    assert sizes == sorted(sizes, reverse=True) and sizes[-1] >= 1

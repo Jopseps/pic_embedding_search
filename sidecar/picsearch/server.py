@@ -492,7 +492,7 @@ def create_app(state: AppState) -> FastAPI:
             state.watcher.stop()
 
     app = FastAPI(
-        title="picsearch sidecar", version="1.0.0",
+        title="picsearch sidecar", version="1.0.1",
         docs_url=None, redoc_url=None, lifespan=lifespan,
     )
     app.state.picsearch = state
@@ -591,6 +591,7 @@ def create_app(state: AppState) -> FastAPI:
         sort: str = "",
         limit: int = DEFAULT_LIMIT,
         cursor: str | None = None,
+        weak: bool = False,
     ) -> SearchParams:
         # A first request after an upgrade waits for the date refresh rather
         # than rendering an order it is about to replace. Bounded, because a
@@ -605,6 +606,7 @@ def create_app(state: AppState) -> FastAPI:
             # them live and the next query has to answer with them.
             text_weight=_int_setting("textWeight", 50),
             sorted_keep=max(1, _int_setting("sortedSearchKeep", DEFAULT_SORTED_KEEP)),
+            strictness=_int_setting("matchStrictness", 50), weak=weak,
         )
 
     @app.get("/search", dependencies=[guard])

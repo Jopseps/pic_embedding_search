@@ -105,7 +105,7 @@ def test_search_over_real_http(sidecar):
     _proc, hs = sidecar
     base = f"http://127.0.0.1:{hs['port']}"
     body = json.load(get(f"{base}/search?q=&limit=5", hs["token"]))
-    assert body == {"items": [], "total": 0, "tookMs": body["tookMs"], "cursor": None}
+    assert body == {"items": [], "total": 0, "tookMs": body["tookMs"], "cursor": None, "weak": 0}
 
 
 def test_events_streams_a_snapshot(sidecar):
