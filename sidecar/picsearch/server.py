@@ -1017,6 +1017,63 @@ def _bind(host: str, port: int) -> socket.socket:
     return sock
 
 
+LOG_FILE = "sidecar.log"
+
+
+def _setup_logging(level: str) -> None:
+    """stderr as always, plus `sidecar.log` in the data dir.
+
+    The desktop shell keeps the sidecar's stderr in memory only, so a problem on
+    someone else's machine used to leave nothing to read. 1 MB x 3 files, so it
+    cannot grow without bound.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]  # stdout is the handshake
+    try:
+        handlers.append(RotatingFileHandler(
+            paths.data_dir() / LOG_FILE, maxBytes=1_000_000, backupCount=2, encoding="utf-8",
+        ))
+    except OSError:
+        pass  # a read-only data dir must not stop the app from starting
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
+    logging.captureWarnings(True)
+
+    def crashed(exc_type, exc, tb):
+        logging.getLogger("picsearch").critical("uncaught exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = crashed
+    threading.excepthook = lambda a: crashed(a.exc_type, a.exc_value, a.exc_traceback)
+
+
+def _log_startup(state: "AppState") -> None:
+    """The facts a bug report needs, in one place at the top of the log."""
+    import platform
+
+    import numpy as np
+
+    from . import __version__
+
+    matrix = state.vectors.matrix
+    log.info(
+        "picsearch %s on %s, python %s, data %s", __version__, platform.platform(),
+        platform.python_version(), paths.data_dir(),
+    )
+    log.info(
+        "model %s: %d images, %d vectors, non-finite vector values: %d",
+        state.model_id, state.store.image_count(), state.vectors.size,
+        int(matrix.size - np.count_nonzero(np.isfinite(matrix))),
+    )
+    try:
+        log.info("trash backend: %s", system.trash_backend().__module__)
+    except Exception as exc:
+        log.warning("trash backend: %s", exc)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="picsearch sidecar")
     parser.add_argument("--host", default="127.0.0.1")
@@ -1027,13 +1084,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scan-on-start", action="store_true")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,  # stdout carries the handshake line and nothing else
-    )
+    _setup_logging(args.log_level)
 
     state = AppState(model_id=args.model)
+    _log_startup(state)
     app = create_app(state)
     system.start_parent_watchdog(args.parent_pid)
 
