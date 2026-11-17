@@ -102,6 +102,24 @@ def start_parent_watchdog(parent_pid: int | None = None, interval: float = 1.0) 
 # Trash
 # ---------------------------------------------------------------------------
 
+def trash_backend():
+    """send2trash's function, or an error when it could delete for good.
+
+    Without pywin32 send2trash silently falls back to the old SHFileOperation
+    call on Windows, which deletes permanently whenever the Recycle Bin cannot
+    take the file. The modern one (IFileOperation, pywin32) fails instead. So a
+    Windows install that lost pywin32 refuses to delete rather than lose files.
+    """
+    from send2trash import send2trash
+
+    if(WINDOWS and send2trash.__module__ != "send2trash.win.modern"):
+        raise RuntimeError(
+            "the Recycle Bin API (pywin32) is not installed, so a delete could skip the bin; "
+            "nothing was deleted"
+        )
+    return send2trash
+
+
 def move_to_trash(path: Path) -> None:
     """Move one file to the OS trash. Raises when it cannot.
 
@@ -109,9 +127,7 @@ def move_to_trash(path: Path) -> None:
     a permanent delete: a caller that gets an exception reports the file as not
     moved. One function so tests can replace it.
     """
-    from send2trash import send2trash
-
-    send2trash(str(path))
+    trash_backend()(str(path))
 
 
 # ---------------------------------------------------------------------------

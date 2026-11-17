@@ -17,6 +17,10 @@ dependencies = [
     "protobuf>=5.28",
     "watchdog>=6.0",
     "send2trash>=1.8",
+    # send2trash only uses the Recycle Bin API that refuses to delete for good
+    # when this is importable; without it Windows falls back to a call that
+    # deletes permanently if the bin cannot take the file.
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 # The default OCR engine is tesseract, which is a system binary and needs no
