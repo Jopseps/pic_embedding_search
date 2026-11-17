@@ -6,6 +6,8 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 
 ![PicSearch showing a photo library](docs/screenshot.png)
 
+![Searching for "flower" returns only the flowers](docs/screenshot-search.png)
+
 - **Semantic image search** — SigLIP 2 embeddings computed on your GPU
 - **Text inside screenshots** — an OCR pass makes printed words searchable, fused with visual similarity
 - **English and Turkish** — multilingual model and `tur+eng` OCR by default
