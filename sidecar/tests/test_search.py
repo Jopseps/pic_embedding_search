@@ -960,3 +960,41 @@ def test_cutoff_is_monotonic_in_strictness():
     ranked = _hits([0.3 - 0.01 * n for n in range(25)])
     sizes = [len(strong_matches(ranked, s)) for s in (0, 25, 50, 75, 100)]
     assert sizes == sorted(sizes, reverse=True) and sizes[-1] >= 1
+
+
+def test_cutoff_ignores_non_finite_scores():
+    # A NaN top score used to make the floor NaN, and nothing compares >= NaN.
+    ranked = _hits([float("nan"), 0.30, 0.28, 0.27] + [0.06 - 0.001 * n for n in range(26)])
+    assert [i for i, _ in strong_matches(ranked, 50)] == [1, 2, 3]
+
+
+# -- trash backend ---------------------------------------------------------
+
+def _fake_send2trash(module: str):
+    def send2trash(path):
+        pass
+
+    send2trash.__module__ = module
+    return send2trash
+
+
+def test_windows_refuses_a_delete_that_could_skip_the_bin(monkeypatch):
+    import send2trash as pkg
+
+    from picsearch import system
+
+    monkeypatch.setattr(system, "WINDOWS", True)
+    monkeypatch.setattr(pkg, "send2trash", _fake_send2trash("send2trash.win.legacy"))
+    with pytest.raises(RuntimeError, match="pywin32"):
+        system.trash_backend()
+
+
+def test_windows_with_pywin32_uses_the_recycle_bin_api(monkeypatch):
+    import send2trash as pkg
+
+    from picsearch import system
+
+    fake = _fake_send2trash("send2trash.win.modern")
+    monkeypatch.setattr(system, "WINDOWS", True)
+    monkeypatch.setattr(pkg, "send2trash", fake)
+    assert system.trash_backend() is fake

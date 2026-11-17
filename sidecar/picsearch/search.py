@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -440,6 +441,11 @@ def strong_matches(
     is what the query scores on an image that has nothing to do with it.
     """
     if(strictness <= 0 or len(ranked) < CUTOFF_MIN_CANDIDATES):
+        return ranked
+    # A non-finite score would make the floor NaN, and every comparison against
+    # NaN is false: the cutoff would return nothing at all.
+    ranked = [hit for hit in ranked if math.isfinite(hit[1])]
+    if(not ranked):
         return ranked
     median = ranked[len(ranked) // 2][1]
     floor = median + (ranked[0][1] - median) * min(100, strictness) / 100.0
