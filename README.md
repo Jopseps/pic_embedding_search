@@ -120,4 +120,6 @@ Three things routinely surprise people:
 
 ## License
 
-[MIT](LICENSE)
+Copyright (c) 2026 Jopseps. [GPL-3.0-or-later](LICENSE).
+
+You can use, study, change and share PicSearch freely. If you distribute it, or a modified version, it has to stay open source under the same licence, with its source available.
