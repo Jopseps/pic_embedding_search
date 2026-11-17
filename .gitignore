@@ -29,3 +29,14 @@ packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/*.deb
 packaging/arch/*.pkg.tar.*
+
+# Personal rebuild shortcut (wraps scripts/fastbuild.sh) and tool/editor leftovers
+/update
+.claude/
+graphify-out/
+.vscode/
+.idea/
+.env*
+coverage/
+*.tsbuildinfo
+Thumbs.db
