@@ -62,7 +62,9 @@ command -v makepkg >/dev/null || { echo "makepkg not found: install manually fro
 pkill -x picsearch 2>/dev/null || true
 
 # -C wipes src/ first: makepkg would otherwise reuse the previous extraction of
-# the .deb and reinstall the old build.
+# the .deb and reinstall the old build. It also keeps the file:// source it
+# copied last time and never re-copies it, so that cached .deb goes too.
+rm -f packaging/arch/PicSearch_*_amd64.deb
 (cd packaging/arch && PICSEARCH_DEB="$deb" makepkg -fCsi --noconfirm)
 
 echo "installed picsearch-bin $version"
