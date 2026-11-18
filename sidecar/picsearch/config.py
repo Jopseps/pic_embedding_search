@@ -17,7 +17,7 @@ from .paths import config_path
 log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, Any] = {
-    "modelId": "siglip2-so400m-patch14-384",
+    "modelId": "siglip2-base-patch16-224",
     # The model being embedded in the background, if a swap is in flight.
     # `modelId` stays on the model that still answers searches until coverage
     # reaches 100%, so a sidecar killed mid-swap comes back searching rather

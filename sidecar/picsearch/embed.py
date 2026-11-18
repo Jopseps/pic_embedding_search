@@ -74,7 +74,7 @@ REGISTRY: dict[str, ModelSpec] = {
     ),
 }
 
-DEFAULT_MODEL_ID = "siglip2-so400m-patch14-384"
+DEFAULT_MODEL_ID = "siglip2-base-patch16-224"
 
 
 def spec_for(model_id: str) -> ModelSpec:

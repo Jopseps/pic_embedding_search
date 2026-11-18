@@ -36,7 +36,7 @@ export const EMBEDDING_MODELS: EmbeddingModel[] = [
     {
         id: "siglip2-base-patch16-224",
         name: "SigLIP 2 base",
-        desc: "Fast indexing · ~500 img/s · ~0.5 GB VRAM",
+        desc: "Default · lightest · ~500 img/s · ~0.5 GB VRAM",
         multilingual: true,
         dim: 768,
     },
@@ -49,7 +49,9 @@ export const EMBEDDING_MODELS: EmbeddingModel[] = [
     },
 ];
 
-export const DEFAULT_MODEL_ID = "siglip2-so400m-patch14-384";
+/** The lightest model that still answers Turkish (~0.5 GB VRAM). New installs
+ *  only: a saved `modelId` in config.toml is never rewritten. */
+export const DEFAULT_MODEL_ID = "siglip2-base-patch16-224";
 
 export const OCR_ENGINES: OcrEngine[] = [
     {
