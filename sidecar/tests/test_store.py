@@ -236,7 +236,9 @@ def test_settings_round_trip(store: Store):
 
 
 def test_folder_count_does_not_treat_underscore_as_a_wildcard(store: Store):
-    make_image(store, "/pics/my_pics/a.png")
-    make_image(store, "/pics/my_pics/c.png", sha256="cd" * 32)
-    make_image(store, "/pics/myXpics/b.png", sha256="ef" * 32)
-    assert store.folder_count("/pics/my_pics") == 2
+    # Real paths, not literals: `subtree_prefix` uses the platform separator, and
+    # on Windows stored paths read `\\pics\\my_pics\\a.png`.
+    make_image(store, str(Path("/pics/my_pics/a.png")))
+    make_image(store, str(Path("/pics/my_pics/c.png")), sha256="cd" * 32)
+    make_image(store, str(Path("/pics/myXpics/b.png")), sha256="ef" * 32)
+    assert store.folder_count(str(Path("/pics/my_pics"))) == 2

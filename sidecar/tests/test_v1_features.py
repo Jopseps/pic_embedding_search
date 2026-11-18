@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -348,6 +349,10 @@ def test_a_root_with_some_files_gone_still_prunes(store, scan_library):
 
 # -- names that are not UTF-8 ------------------------------------------------------
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows file names are UTF-16, so a name that is not valid UTF-8 cannot exist there",
+)
 def test_a_non_utf8_name_is_skipped_before_any_work(store, scan_library, monkeypatch):
     bad = os.fsencode(scan_library) + b"/bad\xff.jpg"
     with open(bad, "wb") as fh:
