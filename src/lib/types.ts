@@ -280,6 +280,32 @@ export interface Settings{
     sortedSearchKeep: number;
 }
 
+/** One embedding model's files on disk, from `GET /models`. */
+export interface ModelStatus{
+    id: string;
+    downloaded: boolean;
+    sizeBytes: number;
+    /** The model answering searches. Its files cannot be deleted. */
+    active: boolean;
+    /** The model a swap is moving to. Its files cannot be deleted either. */
+    pending: boolean;
+}
+
+/** A model download in flight, from `GET /models` and the `model-download` event. */
+export interface ModelDownload{
+    modelId: string;
+    done: number;
+    /** 0 while the size is not known yet. */
+    total: number;
+    state: "downloading" | "done" | "error";
+    message?: string;
+}
+
+export interface ModelsResponse{
+    models: ModelStatus[];
+    download: ModelDownload | null;
+}
+
 /** `GET/PUT /settings`. `pendingModelId` is the swap in flight, if any. */
 export interface SettingsResponse extends Settings{
     pendingModelId: string | null;
@@ -307,6 +333,8 @@ export type SidecarEvent =
     }
     /** The swap completed and the active model moved. */
     | { type: "model-changed"; modelId: string }
+    | ({ type: "model-download" } & ModelDownload)
+    | { type: "model-deleted"; modelId: string }
     /** Every row's date was re-derived under new rules; the order moved. */
     | { type: "dates-refreshed"; count: number }
     /** Raised by the client, not the sidecar: the stream dropped and came back. */

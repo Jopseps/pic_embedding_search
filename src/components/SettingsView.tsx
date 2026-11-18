@@ -24,6 +24,7 @@ import {
 import { fmtCount, fmtEta, fmtGb } from "../lib/format";
 import { isFontAvailable } from "../lib/fontProbe";
 import { isMockMode } from "../lib/api";
+import { fmtBytes, fmtTransfer } from "../lib/transfer";
 import { Box, Button, Chip, Radio, Slider, Toggle } from "./ui";
 import type { Density, SortKey, ThemePref } from "../lib/types";
 
@@ -262,6 +263,23 @@ function ModelSection(){
     // to be running, so the warning used to read "~1 minutes for 0 images".
     const libraryTotal = useStore((s) => s.counts.library);
     const activeName = useStore((s) => modelById(s.settings.modelId)?.name ?? s.settings.modelId);
+    const files = useStore((s) => s.models);
+    const download = useStore((s) => s.modelDownload);
+    const deletingId = useStore((s) => s.deletingModelId);
+    const loadModels = useStore((s) => s.loadModels);
+    const fetchModel = useStore((s) => s.downloadModel);
+    const askDelete = useStore((s) => s.askDeleteModel);
+    const cancelDelete = useStore((s) => s.cancelDeleteModel);
+    const confirmDelete = useStore((s) => s.confirmDeleteModel);
+
+    useEffect(() => {
+        void loadModels();
+    }, [loadModels]);
+
+    const deleting = deletingId === null ? null : (modelById(deletingId) ?? null);
+    const deletingSize = deletingId === null ? 0 : (files[deletingId]?.sizeBytes ?? 0);
+    // One download at a time, and none while a swap is moving vectors.
+    const busy = download !== null || reindex.active;
 
     const pending = pendingId === null ? null : (modelById(pendingId) ?? null);
     // A pre-flight guess only: nothing has been measured yet. Once batches land
@@ -275,37 +293,138 @@ function ModelSection(){
         >
             {EMBEDDING_MODELS.map((m) => {
                 const selected = m.id === modelId;
+                const info = files[m.id];
+                const downloading = download !== null && download.modelId === m.id;
+                const inUse = selected || m.id === pendingId || info?.pending === true;
+                const fraction = downloading && download.total > 0
+                    ? Math.min(1, download.done / download.total)
+                    : null;
                 return (
-                    <button
+                    <div
                         key={m.id}
-                        type="button"
-                        onClick={() => select(m.id)}
-                        disabled={reindex.active}
                         className={
-                            "mb-[calc(6px*var(--ui-scale))] flex w-full cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] rounded-lg border px-3 py-[calc(11px*var(--ui-scale))] text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 " +
+                            "mb-[calc(6px*var(--ui-scale))] rounded-lg border px-3 py-[calc(11px*var(--ui-scale))] transition-colors " +
                             (selected
                                 ? "border-accent bg-accent-muted"
-                                : "border-edge bg-raised hover:bg-hover")
+                                : "border-edge bg-raised")
                         }
                     >
-                        <Radio selected={selected} />
-                        <div className="min-w-0">
-                            <div className="flex items-center gap-2 text-[calc(13px*var(--ui-scale))] font-medium">
-                                {m.name}
-                                {!m.multilingual ? (
-                                    <span
-                                        title="Cannot answer Turkish queries"
-                                        className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px text-[calc(10px*var(--ui-scale))] font-normal text-fg-faint"
+                        <div className="flex items-center gap-[calc(10px*var(--ui-scale))]">
+                            <button
+                                type="button"
+                                onClick={() => select(m.id)}
+                                disabled={reindex.active}
+                                className="flex min-w-0 flex-1 cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] border-none bg-transparent p-0 text-left text-fg disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                <Radio selected={selected} />
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2 text-[calc(13px*var(--ui-scale))] font-medium">
+                                        {m.name}
+                                        {!m.multilingual ? (
+                                            <span
+                                                title="Cannot answer Turkish queries"
+                                                className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px text-[calc(10px*var(--ui-scale))] font-normal text-fg-faint"
+                                            >
+                                                EN only
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{m.desc}</div>
+                                    {info !== undefined ? (
+                                        <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-dim">
+                                            {info.downloaded
+                                                ? `${selected ? "In use · " : ""}Downloaded · ${fmtBytes(info.sizeBytes)}`
+                                                : "Not downloaded"}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            </button>
+                            {info !== undefined && !downloading ? (
+                                info.downloaded ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => askDelete(m.id)}
+                                        disabled={inUse || busy}
+                                        title={inUse ? "In use. Switch to another model first." : "Delete this model's files from disk"}
+                                        className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
                                     >
-                                        EN only
+                                        Delete
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => void fetchModel(m.id)}
+                                        disabled={busy}
+                                        className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                    >
+                                        Download
+                                    </button>
+                                )
+                            ) : null}
+                        </div>
+                        {downloading ? (
+                            <div className="mt-[calc(10px*var(--ui-scale))]">
+                                <div className="mb-[calc(6px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
+                                    <span>
+                                        Downloading
+                                        {fraction !== null ? ` · ${Math.round(fraction * 100)}%` : ""}
                                     </span>
+                                    <span className="text-fg-faint">
+                                        {download.total > 0 ? `${fmtBytes(download.done)} of ${fmtBytes(download.total)}` : fmtBytes(download.done)}
+                                    </span>
+                                </div>
+                                <div className="relative h-[calc(6px*var(--ui-scale))] overflow-hidden rounded-full bg-hover">
+                                    {fraction !== null ? (
+                                        <div
+                                            className="h-full rounded-full bg-accent transition-[width] duration-300"
+                                            style={{ width: `${fraction * 100}%` }}
+                                        />
+                                    ) : (
+                                        <div
+                                            className="absolute inset-y-0 w-[15%] rounded-full bg-accent"
+                                            style={{ animation: "shimmer 1.3s linear infinite" }}
+                                        />
+                                    )}
+                                </div>
+                                {download.transfer !== null ? (
+                                    <div className="mt-[calc(6px*var(--ui-scale))] text-right text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-faint">
+                                        {fmtTransfer(download.transfer)}
+                                    </div>
                                 ) : null}
                             </div>
-                            <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{m.desc}</div>
-                        </div>
-                    </button>
+                        ) : null}
+                    </div>
                 );
             })}
+
+            {deleting !== null ? (
+                <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-danger-muted p-[calc(14px*var(--ui-scale))]">
+                    <div className="mb-1 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg">
+                        Delete {deleting.name}?
+                    </div>
+                    <div className="mb-[calc(10px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim">
+                        This frees {fmtBytes(deletingSize)}. Your photos stay indexed for this
+                        model, so switching back only needs a download, not a re-index. Other apps
+                        that share the HuggingFace cache will have to download it again.
+                    </div>
+                    <div className="flex gap-2">
+                        <button
+                            type="button"
+                            onClick={() => void confirmDelete()}
+                            className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-white hover:opacity-90"
+                        >
+                            Delete files
+                        </button>
+                        <button
+                            type="button"
+                            onClick={cancelDelete}
+                            className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg hover:bg-hover"
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            ) : null}
 
             {pending !== null && !reindex.active ? (
                 <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-danger-muted p-[calc(14px*var(--ui-scale))]">
@@ -339,12 +458,18 @@ function ModelSection(){
             {reindex.active ? (
                 <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-raised p-[calc(14px*var(--ui-scale))]">
                     <div className="mb-2 text-[calc(12.5px*var(--ui-scale))] text-fg">
-                        Re-indexing with {reindex.modelName}… {Math.round(reindex.progress)}%
-                        {reindex.total > 0 ? (
-                            <span className="text-fg-faint">
-                                {" "}({fmtCount(reindex.current)} / {fmtCount(reindex.total)})
-                            </span>
-                        ) : null}
+                        {download !== null ? (
+                            `Downloading ${reindex.modelName}, then re-indexing starts. The download bar is on its card above.`
+                        ) : (
+                            <>
+                                Re-indexing with {reindex.modelName}… {Math.round(reindex.progress)}%
+                                {reindex.total > 0 ? (
+                                    <span className="text-fg-faint">
+                                        {" "}({fmtCount(reindex.current)} / {fmtCount(reindex.total)})
+                                    </span>
+                                ) : null}
+                            </>
+                        )}
                     </div>
                     <div className="mb-2 h-[calc(6px*var(--ui-scale))] overflow-hidden rounded-[calc(3px*var(--ui-scale))] bg-hover">
                         <div

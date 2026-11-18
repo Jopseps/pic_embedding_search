@@ -644,3 +644,72 @@ describe("match cutoff", () => {
         expect(useStore.getState().weak).toBeGreaterThan(0);
     });
 });
+
+describe("model files", () => {
+    it("lists what is on disk, and which model is in use", async () => {
+        await useStore.getState().loadModels();
+        const { models } = useStore.getState();
+        expect(models["siglip2-base-patch16-224"]?.downloaded).toBe(true);
+        expect(models["siglip2-base-patch16-224"]?.active).toBe(true);
+        expect(models["jina-clip-v2"]?.downloaded).toBe(false);
+    });
+
+    it("deletes an unused model's files only after the confirmation", async () => {
+        await useStore.getState().loadModels();
+        useStore.getState().askDeleteModel("siglip2-so400m-patch14-384");
+        expect(useStore.getState().deletingModelId).toBe("siglip2-so400m-patch14-384");
+        expect(useStore.getState().models["siglip2-so400m-patch14-384"]?.downloaded).toBe(true);
+
+        await useStore.getState().confirmDeleteModel();
+        expect(useStore.getState().deletingModelId).toBeNull();
+        expect(useStore.getState().models["siglip2-so400m-patch14-384"]?.downloaded).toBe(false);
+    });
+
+    it("cancelling the confirmation deletes nothing", async () => {
+        // The mock api outlives the store reset, and an earlier test deleted this one.
+        await api.downloadModel("siglip2-so400m-patch14-384");
+        await useStore.getState().loadModels();
+        useStore.getState().askDeleteModel("siglip2-so400m-patch14-384");
+        useStore.getState().cancelDeleteModel();
+        expect(useStore.getState().deletingModelId).toBeNull();
+        expect(useStore.getState().models["siglip2-so400m-patch14-384"]?.downloaded).toBe(true);
+    });
+
+    it("refuses to delete the model that is in use", async () => {
+        await useStore.getState().loadModels();
+        useStore.getState().askDeleteModel("siglip2-base-patch16-224");
+        await useStore.getState().confirmDeleteModel();
+        expect(useStore.getState().models["siglip2-base-patch16-224"]?.downloaded).toBe(true);
+        expect(useStore.getState().toast).toContain("in use");
+    });
+
+    it("shows download progress, then marks the model downloaded", async () => {
+        vi.useFakeTimers();
+        try{
+            await useStore.getState().loadModels();
+            await useStore.getState().downloadModel("jina-clip-v2");
+            await vi.advanceTimersByTimeAsync(600);
+            const mid = useStore.getState().modelDownload;
+            expect(mid?.modelId).toBe("jina-clip-v2");
+            expect(mid?.done).toBeGreaterThan(0);
+            await vi.advanceTimersByTimeAsync(6000);
+            expect(useStore.getState().modelDownload).toBeNull();
+            expect(useStore.getState().models["jina-clip-v2"]?.downloaded).toBe(true);
+        }finally{
+            vi.useRealTimers();
+        }
+    });
+
+    it("starts one download at a time", async () => {
+        vi.useFakeTimers();
+        try{
+            await useStore.getState().downloadModel("jina-clip-v2");
+            await vi.advanceTimersByTimeAsync(400);
+            await useStore.getState().downloadModel("openclip-vit-l14");
+            expect(useStore.getState().modelDownload?.modelId).toBe("jina-clip-v2");
+            await vi.advanceTimersByTimeAsync(6000);
+        }finally{
+            vi.useRealTimers();
+        }
+    });
+});

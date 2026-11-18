@@ -5,6 +5,7 @@ import type {
     LibraryCounts,
     Photo,
     SavedSearch,
+    ModelsResponse,
     SearchQuery,
     SearchResponse,
     SearchSort,
@@ -37,6 +38,7 @@ import {
     DEFAULT_TINT_HUE,
     DEFAULT_TINT_STRENGTH,
     DEFAULT_UI_SCALE,
+    EMBEDDING_MODELS,
 } from "./catalog";
 import { pickFolder } from "./tauri";
 
@@ -70,6 +72,12 @@ export interface PhotoSearchApi{
     /** Partial update. A new `modelId` starts a background swap; it does not
      *  take effect until the incoming model can answer a query. */
     putSettings(patch: Partial<Settings>): Promise<SettingsResponse>;
+    /** What is on disk for every model, and the download in flight. */
+    models(): Promise<ModelsResponse>;
+    /** Starts a download; progress arrives as `model-download` events. */
+    downloadModel(id: string): Promise<void>;
+    /** Deletes the model's files. Its index data stays. Rejects for the active model. */
+    deleteModel(id: string): Promise<void>;
     listCollections(): Promise<Collection[]>;
     createCollection(name: string): Promise<Collection>;
     deleteCollection(id: string): Promise<void>;
@@ -420,6 +428,36 @@ export class MockApi implements PhotoSearchApi{
         return this.getSettings();
     }
 
+    /** Model ids on "disk" in the mock, and how big they are. */
+    private modelFiles = new Map<string, number>([
+        ["siglip2-base-patch16-224", 0.5 * 1024 ** 3],
+        ["siglip2-so400m-patch14-384", 3.4 * 1024 ** 3],
+    ]);
+
+    async models(): Promise<ModelsResponse>{
+        return {
+            models: EMBEDDING_MODELS.map((m) => ({
+                id: m.id,
+                downloaded: this.modelFiles.has(m.id),
+                sizeBytes: this.modelFiles.get(m.id) ?? 0,
+                active: m.id === this.settings.modelId,
+                pending: false,
+            })),
+            download: null,
+        };
+    }
+
+    async downloadModel(id: string): Promise<void>{
+        this.modelFiles.set(id, 1.6 * 1024 ** 3);
+    }
+
+    async deleteModel(id: string): Promise<void>{
+        if(id === this.settings.modelId){
+            throw new Error("sidecar 409: this model is in use; switch to another first");
+        }
+        this.modelFiles.delete(id);
+    }
+
     async listCollections(): Promise<Collection[]>{
         return this.collections;
     }
@@ -680,6 +718,18 @@ export class HttpApi implements PhotoSearchApi{
             method: "PUT",
             body: JSON.stringify(patch),
         });
+    }
+
+    models(): Promise<ModelsResponse>{
+        return this.req<ModelsResponse>("/models");
+    }
+
+    async downloadModel(id: string): Promise<void>{
+        await this.req<unknown>(`/models/${encodeURIComponent(id)}/download`, { method: "POST" });
+    }
+
+    async deleteModel(id: string): Promise<void>{
+        await this.req<unknown>(`/models/${encodeURIComponent(id)}`, { method: "DELETE" });
     }
 
     listCollections(): Promise<Collection[]>{

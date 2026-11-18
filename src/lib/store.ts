@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, isMockMode } from "./api";
+import { RateTracker, type Transfer } from "./transfer";
 import {
     DEFAULT_ACCENT_HUE,
     DEFAULT_CELL_RADIUS,
@@ -35,6 +36,8 @@ import type {
     LibraryView,
     Photo,
     PhotoKind,
+    ModelDownload,
+    ModelStatus,
     ReindexStatus,
     ResolvedTheme,
     SavedSearch,
@@ -172,6 +175,12 @@ interface State{
     /** The model the user picked but has not confirmed yet — it drives the
      *  "re-index required" card, and is cleared the moment the swap starts. */
     pendingModelId: string | null;
+    /** Every model's files on disk, by id. Empty until the Settings page asks. */
+    models: Record<string, ModelStatus>;
+    /** The download in flight, with the speed measured so far. */
+    modelDownload: (ModelDownload & { transfer: Transfer | null }) | null;
+    /** The model whose "delete its files?" card is open. */
+    deletingModelId: string | null;
     /** Library-wide counts for the sidebar. Never derived from the current
      *  search, which is what made "All" show the result count instead. */
     counts: LibraryCounts;
@@ -282,6 +291,11 @@ interface Actions{
     selectModel(id: string): void;
     cancelModelChange(): void;
     confirmModelChange(): Promise<void>;
+    loadModels(): Promise<void>;
+    downloadModel(id: string): Promise<void>;
+    askDeleteModel(id: string): void;
+    cancelDeleteModel(): void;
+    confirmDeleteModel(): Promise<void>;
     loadSettings(): Promise<void>;
     persistSettings(patch: Partial<Settings>): Promise<void>;
     loadCounts(): Promise<void>;
@@ -385,6 +399,10 @@ function fetchSimilar(photo: Photo, filters: Filters): Promise<SearchResponse>{
 }
 
 let mockReindexTimer: ReturnType<typeof setInterval> | undefined;
+/** Speed and time left for the model download on screen. */
+const modelRate = new RateTracker();
+/** Mock mode only: stands in for the sidecar's `model-download` events. */
+let mockDownloadTimer: ReturnType<typeof setInterval> | undefined;
 
 /**
  * Mock-mode stand-in for the sidecar's `reindex` / `model-changed` events.
@@ -425,6 +443,32 @@ function simulateReindex(
                 total,
                 rate: 24,
                 etaSec: Math.round(total * (100 - next) / 100 / 24),
+            },
+        });
+    }, 200);
+}
+
+function simulateDownload(
+    set: (partial: Partial<State & Actions> | ((s: State & Actions) => Partial<State & Actions>)) => void,
+    get: () => State & Actions,
+    modelId: string,
+){
+    clearInterval(mockDownloadTimer);
+    const total = 1.6 * 1024 ** 3;
+    let done = 0;
+    modelRate.reset();
+    mockDownloadTimer = setInterval(() => {
+        done = Math.min(total, done + total / 25);
+        if(done >= total){
+            clearInterval(mockDownloadTimer);
+            modelRate.reset();
+            set({ modelDownload: null });
+            void get().loadModels();
+            return;
+        }
+        set({
+            modelDownload: {
+                modelId, done, total, state: "downloading", transfer: modelRate.push(done, total),
             },
         });
     }, 200);
@@ -490,6 +534,9 @@ export const useStore = create<State & Actions>((set, get) => ({
     indexingPanelOpen: false,
     reindex: { active: false, progress: 0, modelName: "", current: 0, total: 0, rate: 0, etaSec: 0 },
     pendingModelId: null,
+    models: {},
+    modelDownload: null,
+    deletingModelId: null,
     counts: { library: 0, recent: 0, dupes: 0, collections: {} },
 
     settings: {
@@ -1205,6 +1252,22 @@ export const useStore = create<State & Actions>((set, get) => ({
                         etaSec: event.etaSec,
                     },
                 });
+            }else if(event.type === "model-download"){
+                if(event.state === "downloading"){
+                    const transfer = event.total > 0 ? modelRate.push(event.done, event.total) : null;
+                    set({ modelDownload: { ...event, transfer } });
+                }else{
+                    modelRate.reset();
+                    set({ modelDownload: null });
+                    void get().loadModels();
+                    if(event.state === "error"){
+                        // A swap that was waiting on these files will not happen.
+                        set((s) => ({ pendingModelId: null, reindex: { ...s.reindex, active: false } }));
+                        get().showToast(`Download failed: ${event.message ?? "unknown error"}`);
+                    }
+                }
+            }else if(event.type === "model-deleted"){
+                void get().loadModels();
             }else if(event.type === "model-changed"){
                 // The swap finished: the incoming model is now the one
                 // answering queries, so the visible results came from the old
@@ -1215,6 +1278,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     reindex: { ...s.reindex, active: false, progress: 0 },
                 }));
                 get().showToast(`Now searching with ${modelById(event.modelId)?.name ?? event.modelId}`);
+                void get().loadModels();
                 void get().runSearch();
             }else if(event.type === "dates-refreshed"){
                 // Dates were re-derived under new rules: the order, the month
@@ -1326,6 +1390,62 @@ export const useStore = create<State & Actions>((set, get) => ({
             // Python, so mock mode simulates the backfill it cannot run.
             simulateReindex(set, get, pending);
         }
+    },
+
+    async loadModels(){
+        try{
+            const res = await api.models();
+            set({
+                models: Object.fromEntries(res.models.map((m) => [m.id, m])),
+                // A sidecar that restarted mid-download resumes it; show it.
+                modelDownload: res.download !== null && res.download.state === "downloading"
+                    ? { ...res.download, transfer: get().modelDownload?.transfer ?? null }
+                    : null,
+            });
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
+    },
+
+    async downloadModel(id){
+        if(get().modelDownload !== null){
+            return;
+        }
+        try{
+            await api.downloadModel(id);
+        }catch(err){
+            get().showToast(describeDetail(err));
+            return;
+        }
+        if(isMockMode){
+            simulateDownload(set, get, id);
+            return;
+        }
+        // Progress arrives as `model-download` events; this makes the card
+        // switch to its bar before the first one.
+        set({ modelDownload: { modelId: id, done: 0, total: 0, state: "downloading", transfer: null } });
+    },
+
+    askDeleteModel(id){
+        set({ deletingModelId: id });
+    },
+
+    cancelDeleteModel(){
+        set({ deletingModelId: null });
+    },
+
+    async confirmDeleteModel(){
+        const id = get().deletingModelId;
+        if(id === null){
+            return;
+        }
+        set({ deletingModelId: null });
+        try{
+            await api.deleteModel(id);
+        }catch(err){
+            get().showToast(describeDetail(err));
+        }
+        await get().loadModels();
     },
 
     /**
