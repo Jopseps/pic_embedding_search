@@ -3,28 +3,35 @@
  * the api module, so the boot screen (which may import neither) can use it.
  */
 
+import { currentLocale, t, translate } from "./i18n";
+
 export function fmtBytes(n: number): string{
     if(n >= 1024 ** 3){
-        return `${(n / 1024 ** 3).toFixed(2)} GB`;
+        const gb = (n / 1024 ** 3).toLocaleString(currentLocale(), {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+        return t("format.gigabytes", { n: gb });
     }
-    return `${Math.round(n / 1024 ** 2)} MB`;
+    return t("format.megabytes", { n: Math.round(n / 1024 ** 2).toLocaleString(currentLocale()) });
 }
 
 export function fmtRate(bytesPerSec: number): string{
-    return `${fmtBytes(bytesPerSec)}/s`;
+    return t("format.perSecond", { size: fmtBytes(bytesPerSec) });
 }
 
 /** "less than a minute", "about 3 min", "about 1 h 20 min". */
 export function fmtTimeLeft(sec: number): string{
     if(sec < 60){
-        return "less than a minute";
+        return t("format.lessThanMinute");
     }
     const min = Math.round(sec / 60);
     if(min < 90){
-        return `about ${min} min`;
+        return t("format.aboutMinutes", { n: min });
     }
+    const h = Math.floor(min / 60);
     const rest = min % 60;
-    return `about ${Math.floor(min / 60)} h${rest === 0 ? "" : ` ${rest} min`}`;
+    return rest === 0 ? t("format.aboutHours", { h }) : t("format.aboutHoursMinutes", { h, m: rest });
 }
 
 export interface Transfer{
@@ -74,5 +81,5 @@ export class RateTracker{
 export function fmtTransfer(t: Transfer): string{
     return t.etaSec === null
         ? fmtRate(t.bytesPerSec)
-        : `${fmtRate(t.bytesPerSec)} · ${fmtTimeLeft(t.etaSec)} left`;
+        : `${fmtRate(t.bytesPerSec)} · ${translate("format.timeLeft", { time: fmtTimeLeft(t.etaSec) })}`;
 }

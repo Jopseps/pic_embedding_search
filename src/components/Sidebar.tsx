@@ -3,24 +3,31 @@ import { SIDEBAR_DEFAULT_W, SIDEBAR_SNAP_W, useStore } from "../lib/store";
 import { fmtCount } from "../lib/format";
 import { Chip, CheckRow, SectionLabel } from "./ui";
 import type { DatePreset, DimsFilter, LibraryView, PhotoKind } from "../lib/types";
+import type { MessageKey } from "../lib/i18n";
+import { useT } from "../lib/i18n/useT";
 
-const DATE_PRESETS: { key: DatePreset; label: string }[] = [
-    { key: "today", label: "Today" },
-    { key: "week", label: "This week" },
-    { key: "month", label: "This month" },
-    { key: "year", label: "This year" },
+const DATE_PRESETS: { key: DatePreset; label: MessageKey }[] = [
+    { key: "today", label: "filters.today" },
+    { key: "week", label: "filters.week" },
+    { key: "month", label: "filters.month" },
+    { key: "year", label: "filters.year" },
 ];
 
 const TYPES: PhotoKind[] = ["Photo", "Screenshot"];
+const TYPE_LABELS: Record<PhotoKind, MessageKey> = {
+    Photo: "filters.photo",
+    Screenshot: "filters.screenshot",
+};
 
-const DIMS: { key: DimsFilter; label: string }[] = [
-    { key: "large", label: "Large" },
-    { key: "small", label: "Small" },
+const DIMS: { key: DimsFilter; label: MessageKey }[] = [
+    { key: "large", label: "filters.large" },
+    { key: "small", label: "filters.small" },
 ];
 
 /** Memoised for the same reason as `TopBar`: nothing here moves with the
  *  grid's scroll position, and `App` re-renders on every frame of it. */
 export const Sidebar = memo(function Sidebar(){
+    const t = useT();
     const collapsed = useStore((s) => s.sidebarCollapsed);
     const width = useStore((s) => s.sidebarWidth);
     const setWidth = useStore((s) => s.setSidebarWidth);
@@ -89,7 +96,7 @@ export const Sidebar = memo(function Sidebar(){
             {collapsed && !dragging ? null : (
                 <div
                     role="separator"
-                    aria-label="Resize sidebar"
+                    aria-label={t("sidebar.resize")}
                     aria-orientation="vertical"
                     onPointerDown={onPointerDown}
                     onPointerMove={onPointerMove}
@@ -138,6 +145,7 @@ function NavRow(props: {
 }
 
 function LibrarySection(){
+    const t = useT();
     const libraryView = useStore((s) => s.libraryView);
     const activeCollection = useStore((s) => s.activeCollection);
     const setLibraryView = useStore((s) => s.setLibraryView);
@@ -151,31 +159,31 @@ function LibrarySection(){
         <>
             <div className="flex items-center justify-between px-[calc(6px*var(--ui-scale))] pb-[calc(10px*var(--ui-scale))]">
                 <span className="text-[calc(11px*var(--ui-scale))] font-semibold tracking-[0.06em] text-fg-faint">
-                    LIBRARY
+                    {t("sidebar.library")}
                 </span>
                 <button
                     type="button"
                     onClick={toggleSidebar}
-                    aria-label="Collapse sidebar"
+                    aria-label={t("sidebar.collapse")}
                     className="cursor-pointer text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
                 >
                     ◀
                 </button>
             </div>
             <NavRow
-                label="All"
+                label={t("sidebar.all")}
                 active={isActive("all")}
                 count={counts.library}
                 onClick={() => setLibraryView("all")}
             />
             <NavRow
-                label="Recent"
+                label={t("sidebar.recent")}
                 active={isActive("recent")}
                 count={counts.recent}
                 onClick={() => setLibraryView("recent")}
             />
             <NavRow
-                label="Duplicates"
+                label={t("sidebar.duplicates")}
                 active={isActive("dupes")}
                 count={counts.dupes}
                 onClick={() => setLibraryView("dupes")}
@@ -185,6 +193,7 @@ function LibrarySection(){
 }
 
 function CollectionsSection(){
+    const t = useT();
     const collections = useStore((s) => s.collections);
     const counts = useStore((s) => s.counts.collections);
     const active = useStore((s) => s.activeCollection);
@@ -202,7 +211,7 @@ function CollectionsSection(){
 
     return (
         <>
-            <SectionLabel>COLLECTIONS</SectionLabel>
+            <SectionLabel>{t("sidebar.collections")}</SectionLabel>
             {collections.map((c) => (
                 <div
                     key={c.id}
@@ -237,7 +246,7 @@ function CollectionsSection(){
                         collection is cheap to recreate; its membership is not. */}
                     <button
                         type="button"
-                        title={pendingDelete === c.id ? "Click again to delete" : `Delete "${c.name}"`}
+                        title={pendingDelete === c.id ? t("sidebar.deleteCollectionConfirm") : t("sidebar.deleteCollection", { name: c.name })}
                         onClick={() => void remove(c.id)}
                         onBlur={cancelDelete}
                         className={
@@ -247,7 +256,7 @@ function CollectionsSection(){
                                 : "hidden text-[calc(13px*var(--ui-scale))] text-fg-faint hover:text-fg group-hover:block")
                         }
                     >
-                        {pendingDelete === c.id ? "Delete?" : "×"}
+                        {pendingDelete === c.id ? t("sidebar.deleteQuestion") : "×"}
                     </button>
                 </div>
             ))}
@@ -265,7 +274,7 @@ function CollectionsSection(){
                             cancel();
                         }
                     }}
-                    placeholder="Collection name"
+                    placeholder={t("sidebar.collectionNamePlaceholder")}
                     className="mt-px w-full rounded-md border border-accent bg-raised px-2 py-[calc(6px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg outline-none"
                 />
             ) : (
@@ -274,7 +283,7 @@ function CollectionsSection(){
                     onClick={start}
                     className="w-full cursor-pointer rounded-md px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
                 >
-                    + New collection
+                    {t("sidebar.newCollection")}
                 </button>
             )}
         </>
@@ -282,6 +291,7 @@ function CollectionsSection(){
 }
 
 function SavedSearchesSection(){
+    const t = useT();
     const saved = useStore((s) => s.savedSearches);
     const run = useStore((s) => s.runSavedSearch);
     const remove = useStore((s) => s.deleteSavedSearch);
@@ -290,7 +300,7 @@ function SavedSearchesSection(){
     }
     return (
         <>
-            <SectionLabel>SAVED SEARCHES</SectionLabel>
+            <SectionLabel>{t("sidebar.savedSearches")}</SectionLabel>
             {saved.map((s) => (
                 <div
                     key={s.id}
@@ -309,7 +319,7 @@ function SavedSearchesSection(){
                     </button>
                     <button
                         type="button"
-                        title="Delete saved search"
+                        title={t("sidebar.deleteSavedSearch")}
                         onClick={() => void remove(s.id)}
                         className="mr-1 hidden cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
                     >
@@ -358,8 +368,9 @@ function completeDay(v: string): boolean{
  * One end of the custom range. The draft is local so a half-typed date never
  * reaches the search; it commits the moment it is a whole date, or empty.
  */
-function DateField(props: { label: string; value: string | null; onCommit: (v: string | null) => void }){
-    const { label, value, onCommit } = props;
+function DateField(props: { label: string; clearLabel: string; value: string | null; onCommit: (v: string | null) => void }){
+    const t = useT();
+    const { label, clearLabel, value, onCommit } = props;
     const [draft, setDraft] = useState(value ?? "");
 
     // A preset click or "Clear all" empties the range from outside.
@@ -374,7 +385,7 @@ function DateField(props: { label: string; value: string | null; onCommit: (v: s
             <input
                 type="date"
                 value={draft}
-                placeholder="YYYY-MM-DD"
+                placeholder={t("sidebar.datePlaceholder")}
                 onChange={(e) => {
                     const v = e.target.value;
                     setDraft(v);
@@ -397,7 +408,7 @@ function DateField(props: { label: string; value: string | null; onCommit: (v: s
                         setDraft("");
                         onCommit(null);
                     }}
-                    aria-label={`Clear ${label.toLowerCase()} date`}
+                    aria-label={clearLabel}
                     className="cursor-pointer px-[calc(2px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
                 >
                     ✕
@@ -408,6 +419,7 @@ function DateField(props: { label: string; value: string | null; onCommit: (v: s
 }
 
 function FiltersSection(){
+    const t = useT();
     const filters = useStore((s) => s.filters);
     const open = useStore((s) => s.filtersOpen);
     const toggleSection = useStore((s) => s.toggleFilterSection);
@@ -436,20 +448,20 @@ function FiltersSection(){
                             onClick={clearAll}
                             className="cursor-pointer text-[calc(11px*var(--ui-scale))] text-accent-text hover:underline"
                         >
-                            Clear all ({activeCount})
+                            {t("sidebar.clearAll", { n: activeCount })}
                         </button>
                     ) : undefined
                 }
             >
-                FILTERS
+                {t("sidebar.filters")}
             </SectionLabel>
 
-            <FilterGroup title="Date taken" open={open.date} onToggle={() => toggleSection("date")}>
+            <FilterGroup title={t("sidebar.dateTaken")} open={open.date} onToggle={() => toggleSection("date")}>
                 <div className="flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
                     {DATE_PRESETS.map((d) => (
                         <Chip
                             key={d.key}
-                            label={d.label}
+                            label={t(d.label)}
                             active={filters.datePreset === d.key}
                             onClick={() => setDatePreset(d.key)}
                         />
@@ -457,24 +469,26 @@ function FiltersSection(){
                 </div>
                 <div className="mt-[calc(10px*var(--ui-scale))] flex flex-col gap-[calc(6px*var(--ui-scale))]">
                     <DateField
-                        label="From"
+                        label={t("sidebar.from")}
+                        clearLabel={t("sidebar.clearFromDate")}
                         value={filters.dateFrom}
                         onCommit={(v) => setDateRange(v, filters.dateTo)}
                     />
                     <DateField
-                        label="To"
+                        label={t("sidebar.to")}
+                        clearLabel={t("sidebar.clearToDate")}
                         value={filters.dateTo}
                         onCommit={(v) => setDateRange(filters.dateFrom, v)}
                     />
                     {filters.dateFrom !== null && filters.dateTo !== null && filters.dateFrom > filters.dateTo ? (
-                        <div className="text-[calc(11px*var(--ui-scale))] text-fg-faint">From is after To — nothing can match.</div>
+                        <div className="text-[calc(11px*var(--ui-scale))] text-fg-faint">{t("sidebar.dateOrderWarning")}</div>
                     ) : null}
                 </div>
             </FilterGroup>
 
-            <FilterGroup title="Source folder" open={open.folder} onToggle={() => toggleSection("folder")}>
+            <FilterGroup title={t("sidebar.sourceFolder")} open={open.folder} onToggle={() => toggleSection("folder")}>
                 {folders.length === 0 ? (
-                    <div className="text-[calc(12px*var(--ui-scale))] text-fg-faint">No folders watched yet.</div>
+                    <div className="text-[calc(12px*var(--ui-scale))] text-fg-faint">{t("sidebar.noFolders")}</div>
                 ) : (
                     folders.map((f) => (
                         <CheckRow
@@ -488,25 +502,25 @@ function FiltersSection(){
                 )}
             </FilterGroup>
 
-            <FilterGroup title="File type" open={open.type} onToggle={() => toggleSection("type")}>
-                <div className="flex gap-[calc(6px*var(--ui-scale))]">
-                    {TYPES.map((t) => (
+            <FilterGroup title={t("sidebar.fileType")} open={open.type} onToggle={() => toggleSection("type")}>
+                <div className="flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
+                    {TYPES.map((ty) => (
                         <Chip
-                            key={t}
-                            label={t}
-                            active={filters.types.includes(t)}
-                            onClick={() => toggleType(t)}
+                            key={ty}
+                            label={t(TYPE_LABELS[ty])}
+                            active={filters.types.includes(ty)}
+                            onClick={() => toggleType(ty)}
                         />
                     ))}
                 </div>
             </FilterGroup>
 
-            <FilterGroup title="Dimensions" open={open.dims} onToggle={() => toggleSection("dims")}>
+            <FilterGroup title={t("sidebar.dimensions")} open={open.dims} onToggle={() => toggleSection("dims")}>
                 <div className="flex gap-[calc(6px*var(--ui-scale))]">
                     {DIMS.map((d) => (
                         <Chip
                             key={d.key}
-                            label={d.label}
+                            label={t(d.label)}
                             active={filters.dims === d.key}
                             onClick={() => setDims(d.key)}
                         />

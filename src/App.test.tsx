@@ -5,6 +5,8 @@ import { act } from "react";
 import App from "./App";
 import { useStore } from "./lib/store";
 import { api } from "./lib/api";
+import { en } from "./lib/i18n/en";
+import { tr } from "./lib/i18n/tr";
 
 /**
  * Mount tests. These are the only checks that prove the app *renders* rather
@@ -704,5 +706,60 @@ describe("App", () => {
             fireEvent.click(screen.getByRole("button", { name: "Remove" }));
         });
         expect(remove).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("Turkish interface", () => {
+    const KEYS = new Set<string>(Object.keys(en));
+
+    /** Every visible string on screen: text nodes plus the attributes a screen
+     *  reader or a tooltip shows. */
+    function visibleStrings(): string[]{
+        const out: string[] = [];
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        for(let n = walker.nextNode(); n !== null; n = walker.nextNode()){
+            out.push((n.textContent ?? "").trim());
+        }
+        for(const el of Array.from(document.body.querySelectorAll("[aria-label],[title],[placeholder]"))){
+            for(const a of ["aria-label", "title", "placeholder"]){
+                const v = el.getAttribute(a);
+                if(v !== null){
+                    out.push(v.trim());
+                }
+            }
+        }
+        return out.filter((s) => s !== "");
+    }
+
+    it("shows no raw key name anywhere, and says so in the page language", async () => {
+        await mountApp();
+        await act(async () => {
+            useStore.getState().setLanguage("tr");
+        });
+        expect(document.documentElement.getAttribute("lang")).toBe("tr");
+        const leaks = new Set(visibleStrings().filter((s) => KEYS.has(s)));
+        expect([...leaks]).toEqual([]);
+
+        // The library actually speaks Turkish, not English with Turkish settings.
+        expect(screen.getByText("KİTAPLIK")).toBeTruthy();
+
+        await act(async () => {
+            useStore.getState().setView("settings");
+        });
+        for(const section of [
+            "settings.section.folders", "settings.section.model", "settings.section.ocr",
+            "settings.section.search", "settings.section.order", "settings.section.appearance",
+            "settings.section.accessibility", "settings.section.gestures",
+            "settings.section.shortcuts", "settings.section.storage",
+        ] as const){
+            await act(async () => {
+                fireEvent.click(screen.getByRole("button", { name: tr[section] as string }));
+            });
+            const bad = visibleStrings().filter((s) => KEYS.has(s));
+            expect({ section, bad }).toEqual({ section, bad: [] });
+        }
+        await act(async () => {
+            useStore.getState().setLanguage("en");
+        });
     });
 });

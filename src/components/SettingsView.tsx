@@ -21,10 +21,12 @@ import {
     modelById,
     tintPresetFor,
 } from "../lib/catalog";
-import { fmtCount, fmtEta, fmtGb } from "../lib/format";
+import { fmtCount, fmtDecimal, fmtEta, fmtGb } from "../lib/format";
 import { isFontAvailable } from "../lib/fontProbe";
 import { isMockMode } from "../lib/api";
 import { fmtBytes, fmtTransfer } from "../lib/transfer";
+import { currentLocale, LANGUAGES, type MessageKey } from "../lib/i18n";
+import { useT } from "../lib/i18n/useT";
 import { Box, Button, Chip, Radio, Slider, Toggle } from "./ui";
 import type { Density, SortKey, ThemePref } from "../lib/types";
 
@@ -33,10 +35,10 @@ import type { Density, SortKey, ThemePref } from "../lib/types";
 const PREFLIGHT_IMG_PER_SEC = 25;
 
 const THEMES: ThemePref[] = ["dark", "light", "system"];
-const DENSITIES: { v: Density; label: string }[] = [
-    { v: 0, label: "Compact" },
-    { v: 1, label: "Comfortable" },
-    { v: 2, label: "Large" },
+const DENSITIES: { v: Density; label: MessageKey }[] = [
+    { v: 0, label: "density.compact" },
+    { v: 1, label: "density.comfortable" },
+    { v: 2, label: "density.large" },
 ];
 
 type SectionId =
@@ -49,31 +51,33 @@ type SectionId =
  * "font" and "zoom" all have to find something, and matching only on titles
  * makes the box look broken the first time it is used.
  */
-const SECTIONS: { id: SectionId; label: string; keywords: string }[] = [
-    { id: "folders", label: "Folders", keywords: "watched folder path recursive scan index add remove screenshots" },
-    { id: "model", label: "Search model", keywords: "embedding siglip jina clip openclip vector re-index reindex turkish multilingual vram gpu" },
-    { id: "ocr", label: "Text in images", keywords: "ocr tesseract rapidocr easyocr language turkish english screenshot text recognition" },
-    { id: "search", label: "Search behaviour", keywords: "results page size limit how many debounce delay typing wait weight balance text visual ocr rrf fusion hybrid" },
-    { id: "order", label: "Dates & order", keywords: "sort order date newest oldest name size group month day year header timeline scrubber undated taken modified" },
-    { id: "appearance", label: "Appearance", keywords: "theme dark light system font jetbrains mono typeface density grid size look colour color accent hue tint warm cool border radius corner selection" },
-    { id: "accessibility", label: "Accessibility", keywords: "scale zoom bigger larger text size contrast motion animation reduce focus keyboard a11y" },
-    { id: "gestures", label: "Mouse & gestures", keywords: "hold press long delay select drag slop threshold click paint sweep pointer shaky" },
-    { id: "shortcuts", label: "Shortcuts", keywords: "keyboard key mouse gesture shift ctrl select paint drag hold escape arrow" },
-    { id: "storage", label: "Storage", keywords: "cache thumbnail disk space index size clear delete" },
+const SECTIONS: { id: SectionId; label: MessageKey; keywords: MessageKey }[] = [
+    { id: "folders", label: "settings.section.folders", keywords: "settings.keywords.folders" },
+    { id: "model", label: "settings.section.model", keywords: "settings.keywords.model" },
+    { id: "ocr", label: "settings.section.ocr", keywords: "settings.keywords.ocr" },
+    { id: "search", label: "settings.section.search", keywords: "settings.keywords.search" },
+    { id: "order", label: "settings.section.order", keywords: "settings.keywords.order" },
+    { id: "appearance", label: "settings.section.appearance", keywords: "settings.keywords.appearance" },
+    { id: "accessibility", label: "settings.section.accessibility", keywords: "settings.keywords.accessibility" },
+    { id: "gestures", label: "settings.section.gestures", keywords: "settings.keywords.gestures" },
+    { id: "shortcuts", label: "settings.section.shortcuts", keywords: "settings.keywords.shortcuts" },
+    { id: "storage", label: "settings.section.storage", keywords: "settings.keywords.storage" },
 ];
 
 function matchesFilter(section: { label: string; keywords: string }, q: string): boolean{
-    const needle = q.trim().toLowerCase();
+    const locale = currentLocale();
+    const needle = q.trim().toLocaleLowerCase(locale);
     if(needle === ""){
         return true;
     }
-    const hay = `${section.label} ${section.keywords}`.toLowerCase();
+    const hay = `${section.label} ${section.keywords}`.toLocaleLowerCase(locale);
     // Every word has to hit something, so "font size" narrows rather than
     // widening the way an any-word match would.
     return needle.split(/\s+/).every((word) => hay.includes(word));
 }
 
 export const SettingsView = memo(function SettingsView(){
+    const t = useT();
     const setView = useStore((s) => s.setView);
     const loadStorage = useStore((s) => s.loadStorage);
     const [active, setActive] = useState<SectionId>("folders");
@@ -84,8 +88,8 @@ export const SettingsView = memo(function SettingsView(){
     }, [loadStorage]);
 
     const hits = useMemo(
-        () => SECTIONS.filter((s) => matchesFilter(s, filter)),
-        [filter],
+        () => SECTIONS.filter((s) => matchesFilter({ label: t(s.label), keywords: t(s.keywords) }, filter)),
+        [filter, t],
     );
     // A filter shows everything it matched, in nav order; with the box empty
     // the rail is a tab bar. One section at a time is what makes the rail worth
@@ -101,14 +105,14 @@ export const SettingsView = memo(function SettingsView(){
                     onClick={() => setView("library")}
                     className="mb-2 cursor-pointer rounded-md px-2 py-[calc(6px*var(--ui-scale))] text-left text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
                 >
-                    ← Back to library
+                    {t("settings.back")}
                 </button>
 
                 <input
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
-                    placeholder="Filter settings…"
-                    aria-label="Filter settings"
+                    placeholder={t("settings.filterPlaceholder")}
+                    aria-label={t("settings.filterAria")}
                     className="mb-2 w-full rounded-md border border-edge bg-raised px-2 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg outline-none placeholder:text-fg-faint focus:border-accent"
                 />
 
@@ -133,7 +137,7 @@ export const SettingsView = memo(function SettingsView(){
                                         : "text-fg-dim hover:bg-hover hover:text-fg")
                             }
                         >
-                            {s.label}
+                            {t(s.label)}
                         </button>
                     );
                 })}
@@ -143,14 +147,13 @@ export const SettingsView = memo(function SettingsView(){
                 <div className="mx-auto max-w-[calc(640px*var(--ui-scale))] px-6 pt-7 pb-20">
                     {isMockMode ? (
                         <div className="mb-7 rounded-lg border border-edge bg-raised p-3 text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim">
-                            Running against the built-in fixture library — the Python sidecar is not
-                            connected, so folder picking and re-indexing are simulated.
+                            {t("settings.mockNotice")}
                         </div>
                     ) : null}
 
                     {searching && shown.length === 0 ? (
                         <div className="text-[calc(12.5px*var(--ui-scale))] text-fg-faint">
-                            Nothing matches “{filter}”.
+                            {t("settings.noMatch", { filter })}
                         </div>
                     ) : null}
 
@@ -183,6 +186,7 @@ function Group(props: { title: string; hint?: string; children: React.ReactNode 
 }
 
 function FoldersSection(){
+    const t = useT();
     const folders = useStore((s) => s.folders);
     const toggleRecursive = useStore((s) => s.toggleRecursive);
     const removeFolder = useStore((s) => s.removeFolder);
@@ -193,8 +197,8 @@ function FoldersSection(){
 
     return (
         <Group
-            title="Watched folders"
-            hint="Folders indexed for search. Screenshots are detected automatically and get an OCR pass. Removing a folder takes its photos out of the library; the files on disk are never touched."
+            title={t("folders.title")}
+            hint={t("folders.hint")}
         >
             {folders.map((f) => (
                 <div key={f.path} className="flex items-center gap-[calc(10px*var(--ui-scale))] border-b border-edge py-[calc(10px*var(--ui-scale))]">
@@ -203,20 +207,20 @@ function FoldersSection(){
                             {f.path}
                         </div>
                         <div className="mt-[calc(2px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] text-fg-faint">
-                            {fmtCount(f.count)} images
+                            {t("folders.imageCount", { n: f.count, count: fmtCount(f.count) })}
                         </div>
                     </div>
                     {confirming === f.path ? (
                         <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2">
                             <span className="max-w-[calc(260px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim">
-                                Remove {fmtCount(f.count)} images from the library? The files stay on disk.
+                                {t("folders.removeQuestion", { n: f.count, count: fmtCount(f.count) })}
                             </span>
                             <button
                                 type="button"
                                 onClick={() => void removeFolder(f.path)}
                                 className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-white hover:opacity-90"
                             >
-                                Remove
+                                {t("folders.remove")}
                             </button>
                             <button
                                 type="button"
@@ -224,21 +228,21 @@ function FoldersSection(){
                                 onClick={cancelRemove}
                                 className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
                             >
-                                Cancel
+                                {t("folders.cancel")}
                             </button>
                         </div>
                     ) : (
                         <>
                             <Toggle
-                                label="Recursive"
+                                label={t("folders.recursive")}
                                 on={f.recursive}
                                 onClick={() => void toggleRecursive(f.path)}
                             />
                             <button
                                 type="button"
                                 onClick={() => requestRemove(f.path)}
-                                aria-label={`Stop watching ${f.path}`}
-                                title="Stop watching and remove its photos from the library (files stay on disk)"
+                                aria-label={t("folders.stopWatching", { path: f.path })}
+                                title={t("folders.stopWatchingTitle")}
                                 className="flex-shrink-0 cursor-pointer px-1 py-[calc(2px*var(--ui-scale))] text-[calc(14px*var(--ui-scale))] text-fg-faint hover:text-danger"
                             >
                                 ✕
@@ -247,7 +251,7 @@ function FoldersSection(){
                     )}
                 </div>
             ))}
-            <Button onClick={() => void addFolder()} className="mt-3">+ Add folder</Button>
+            <Button onClick={() => void addFolder()} className="mt-3">{t("folders.add")}</Button>
         </Group>
     );
 }
@@ -271,6 +275,7 @@ function TrashIcon(){
 }
 
 function ModelSection(){
+    const t = useT();
     const modelId = useStore((s) => s.settings.modelId);
     const pendingId = useStore((s) => s.pendingModelId);
     const reindex = useStore((s) => s.reindex);
@@ -306,8 +311,8 @@ function ModelSection(){
 
     return (
         <Group
-            title="Search model"
-            hint="The embedding model used to understand your images. Changing it requires re-embedding every image — old vectors are kept, so switching back is instant."
+            title={t("models.title")}
+            hint={t("models.hint")}
         >
             {EMBEDDING_MODELS.map((m) => {
                 const selected = m.id === modelId;
@@ -340,19 +345,19 @@ function ModelSection(){
                                         {m.name}
                                         {!m.multilingual ? (
                                             <span
-                                                title="Cannot answer Turkish queries"
+                                                title={t("models.enOnlyTitle")}
                                                 className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px text-[calc(10px*var(--ui-scale))] font-normal text-fg-faint"
                                             >
-                                                EN only
+                                                {t("models.enOnly")}
                                             </span>
                                         ) : null}
                                     </div>
-                                    <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{m.desc}</div>
+                                    <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t(m.desc)}</div>
                                     {info !== undefined ? (
                                         <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-dim">
                                             {info.downloaded
-                                                ? `${selected ? "In use · " : ""}Downloaded · ${fmtBytes(info.sizeBytes)}`
-                                                : "Not downloaded"}
+                                                ? t(selected ? "models.statusInUse" : "models.statusDownloaded", { size: fmtBytes(info.sizeBytes) })
+                                                : t("models.notDownloaded")}
                                         </div>
                                     ) : null}
                                 </div>
@@ -363,11 +368,11 @@ function ModelSection(){
                                         type="button"
                                         onClick={() => askDelete(m.id)}
                                         disabled={inUse || busy}
-                                        title={inUse ? "In use. Switch to another model first." : "Delete this model's files from disk"}
+                                        title={t(inUse ? "models.deleteTitleInUse" : "models.deleteTitle")}
                                         className="flex flex-shrink-0 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] border border-danger bg-danger-muted px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-danger hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:opacity-40"
                                     >
                                         <TrashIcon />
-                                        Delete
+                                        {t("models.delete")}
                                     </button>
                                 ) : (
                                     <button
@@ -376,7 +381,7 @@ function ModelSection(){
                                         disabled={busy}
                                         className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
                                     >
-                                        Download
+                                        {t("models.download")}
                                     </button>
                                 )
                             ) : null}
@@ -385,11 +390,12 @@ function ModelSection(){
                             <div className="mt-[calc(10px*var(--ui-scale))]">
                                 <div className="mb-[calc(6px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
                                     <span>
-                                        Downloading
-                                        {fraction !== null ? ` · ${Math.round(fraction * 100)}%` : ""}
+                                        {fraction !== null
+                                            ? t("models.downloadingPercent", { percent: Math.round(fraction * 100) })
+                                            : t("models.downloading")}
                                     </span>
                                     <span className="text-fg-faint">
-                                        {download.total > 0 ? `${fmtBytes(download.done)} of ${fmtBytes(download.total)}` : fmtBytes(download.done)}
+                                        {download.total > 0 ? t("format.bytesOf", { done: fmtBytes(download.done), total: fmtBytes(download.total) }) : fmtBytes(download.done)}
                                     </span>
                                 </div>
                                 <div className="relative h-[calc(6px*var(--ui-scale))] overflow-hidden rounded-full bg-hover">
@@ -419,12 +425,10 @@ function ModelSection(){
             {deleting !== null ? (
                 <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-danger-muted p-[calc(14px*var(--ui-scale))]">
                     <div className="mb-1 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg">
-                        Delete {deleting.name}?
+                        {t("models.deleteQuestion", { name: deleting.name })}
                     </div>
                     <div className="mb-[calc(10px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim">
-                        This frees {fmtBytes(deletingSize)}. Your photos stay indexed for this
-                        model, so switching back only needs a download, not a re-index. Other apps
-                        that share the HuggingFace cache will have to download it again.
+                        {t("models.deleteBody", { size: fmtBytes(deletingSize) })}
                     </div>
                     <div className="flex gap-2">
                         <button
@@ -432,14 +436,14 @@ function ModelSection(){
                             onClick={() => void confirmDelete()}
                             className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-white hover:opacity-90"
                         >
-                            Delete files
+                            {t("models.deleteFiles")}
                         </button>
                         <button
                             type="button"
                             onClick={cancelDelete}
                             className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg hover:bg-hover"
                         >
-                            Cancel
+                            {t("common.cancel")}
                         </button>
                     </div>
                 </div>
@@ -447,13 +451,11 @@ function ModelSection(){
 
             {pending !== null && !reindex.active ? (
                 <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-danger-muted p-[calc(14px*var(--ui-scale))]">
-                    <div className="mb-1 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg">Re-index required</div>
+                    <div className="mb-1 text-[calc(12.5px*var(--ui-scale))] font-semibold text-fg">{t("models.reindexTitle")}</div>
                     <div className="mb-[calc(10px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim">
-                        Switching to {pending.name} means every image needs to be re-embedded —
-                        the two models produce incompatible vectors. Roughly ~{etaMin} minute
-                        {etaMin === 1 ? "" : "s"} for {fmtCount(libraryTotal)} images.{" "}
-                        <span className="text-fg">Search keeps working</span> the whole time —
-                        {" "}{activeName} answers queries until the new model is ready.
+                        {t("models.reindexBody", { name: pending.name, n: etaMin, minutes: etaMin, count: fmtCount(libraryTotal) })}{" "}
+                        <span className="text-fg">{t("models.searchKeepsWorking")}</span>{" "}
+                        {t("models.activeAnswers", { active: activeName })}
                     </div>
                     <div className="flex gap-2">
                         <button
@@ -461,14 +463,14 @@ function ModelSection(){
                             onClick={confirm}
                             className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-white hover:opacity-90"
                         >
-                            Re-index now
+                            {t("models.reindexNow")}
                         </button>
                         <button
                             type="button"
                             onClick={cancel}
                             className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(14px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg hover:bg-hover"
                         >
-                            Cancel
+                            {t("common.cancel")}
                         </button>
                     </div>
                 </div>
@@ -478,10 +480,10 @@ function ModelSection(){
                 <div className="mt-[calc(10px*var(--ui-scale))] rounded-lg border border-edge bg-raised p-[calc(14px*var(--ui-scale))]">
                     <div className="mb-2 text-[calc(12.5px*var(--ui-scale))] text-fg">
                         {download !== null ? (
-                            `Downloading ${reindex.modelName}, then re-indexing starts. The download bar is on its card above.`
+                            t("models.waitingDownload", { model: reindex.modelName })
                         ) : (
                             <>
-                                Re-indexing with {reindex.modelName}… {Math.round(reindex.progress)}%
+                                {t("models.reindexing", { model: reindex.modelName, percent: Math.round(reindex.progress) })}
                                 {reindex.total > 0 ? (
                                     <span className="text-fg-faint">
                                         {" "}({fmtCount(reindex.current)} / {fmtCount(reindex.total)})
@@ -499,8 +501,10 @@ function ModelSection(){
                     {/* Not "unavailable": the outgoing model keeps every vector
                         it had until the incoming one has full coverage. */}
                     <div className="text-[calc(11.5px*var(--ui-scale))] text-fg-faint">
-                        Still searching with {activeName}
-                        {reindex.rate > 0 ? ` · ${reindex.rate.toFixed(1)} img/s · ${fmtEta(reindex.etaSec)} left` : ""}
+                        {t("models.stillSearching", { active: activeName })}
+                        {reindex.rate > 0
+                            ? ` · ${t("models.rateEta", { rate: fmtDecimal(reindex.rate, 1), time: fmtEta(reindex.etaSec) })}`
+                            : ""}
                     </div>
                 </div>
             ) : null}
@@ -509,6 +513,7 @@ function ModelSection(){
 }
 
 function OcrSection(){
+    const t = useT();
     const engineId = useStore((s) => s.settings.ocrEngineId);
     const langs = useStore((s) => s.settings.ocrLangs);
     const setEngine = useStore((s) => s.setOcrEngine);
@@ -522,8 +527,8 @@ function OcrSection(){
 
     return (
         <Group
-            title="OCR engine and languages"
-            hint="Extracts text from screenshots so words printed inside them become searchable."
+            title={t("ocr.title")}
+            hint={t("ocr.hint")}
         >
             {hint !== null ? (
                 <div className="mb-[calc(12px*var(--ui-scale))] rounded-lg border border-edge bg-raised px-3 py-[calc(9px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim" data-selectable>
@@ -545,13 +550,13 @@ function OcrSection(){
                         <Radio selected={selected} />
                         <div>
                             <div className="text-[calc(12.5px*var(--ui-scale))]">{e.label}</div>
-                            <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{e.desc}</div>
+                            <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t(e.desc)}</div>
                         </div>
                     </button>
                 );
             })}
 
-            <div className="mt-[calc(14px*var(--ui-scale))] mb-2 text-[calc(11.5px*var(--ui-scale))] text-fg-faint">LANGUAGES</div>
+            <div className="mt-[calc(14px*var(--ui-scale))] mb-2 text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t("ocr.languages")}</div>
             <div className="flex flex-wrap gap-2">
                 {OCR_LANGUAGES.map((l) => (
                     <button
@@ -561,7 +566,7 @@ function OcrSection(){
                         className="flex cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] border border-edge bg-raised px-[calc(10px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] hover:bg-hover"
                     >
                         <Box checked={langs.includes(l.code)} />
-                        <span className="text-[calc(12px*var(--ui-scale))]">{l.label}</span>
+                        <span className="text-[calc(12px*var(--ui-scale))]">{t(l.label)}</span>
                     </button>
                 ))}
             </div>
@@ -601,6 +606,7 @@ function Swatch(props: { hue: number; active: boolean; label: string; onClick: (
 }
 
 function ColourSection(){
+    const t = useT();
     const accentHue = useStore((s) => s.settings.accentHue);
     const tintHue = useStore((s) => s.settings.tintHue);
     const tintStrength = useStore((s) => s.settings.tintStrength);
@@ -610,13 +616,13 @@ function ColourSection(){
 
     return (
         <>
-            <Label>ACCENT</Label>
+            <Label>{t("colour.accent")}</Label>
             <div className="mb-[calc(8px*var(--ui-scale))] flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
                 {ACCENT_PRESETS.map((a) => (
                     <Swatch
                         key={a.id}
                         hue={a.hue}
-                        label={a.label}
+                        label={t(a.label)}
                         active={activeAccent === a.id}
                         onClick={() => set("accentHue", a.hue)}
                     />
@@ -624,7 +630,7 @@ function ColourSection(){
             </div>
             <div className="mb-5">
                 <Slider
-                    label="Accent hue"
+                    label={t("colour.accentHue")}
                     value={accentHue}
                     min={0}
                     max={359}
@@ -632,29 +638,27 @@ function ColourSection(){
                     onChange={(v) => set("accentHue", v)}
                 />
                 <div className="mt-[calc(6px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                    A hue, not a colour: every theme keeps its own lightness and chroma for
-                    the accent, so the same choice stays readable in light, dark and high
-                    contrast. Delete stays red — it is a warning, not a preference.
+                    {t("colour.accentNote")}
                 </div>
             </div>
 
-            <Label>SURFACE TINT</Label>
+            <Label>{t("colour.tint")}</Label>
             <div className="mb-[calc(8px*var(--ui-scale))] flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
-                {TINT_PRESETS.map((t) => (
+                {TINT_PRESETS.map((tp) => (
                     <Chip
-                        key={t.id}
-                        label={t.label}
-                        active={activeTint === t.id}
+                        key={tp.id}
+                        label={t(tp.label)}
+                        active={activeTint === tp.id}
                         onClick={() => {
-                            set("tintHue", t.hue);
-                            set("tintStrength", t.strength);
+                            set("tintHue", tp.hue);
+                            set("tintStrength", tp.strength);
                         }}
                     />
                 ))}
             </div>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Tint hue"
+                    label={t("colour.tintHue")}
                     value={tintHue}
                     min={0}
                     max={359}
@@ -664,54 +668,51 @@ function ColourSection(){
             </div>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Tint strength"
+                    label={t("colour.tintStrength")}
                     value={tintStrength}
                     min={0}
                     max={300}
                     step={10}
-                    readout={`${tintStrength}%`}
+                    readout={t("unit.percent", { n: tintStrength })}
                     onChange={(v) => set("tintStrength", v)}
                 />
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                The greys are not grey — every panel, border and label carries a trace of
-                colour, and this is where it points. 100% is the shipped slate, 0% is a
-                true neutral. High contrast ignores it on purpose.
+                {t("colour.tintNote")}
             </div>
         </>
     );
 }
 
 function GridLookSection(){
+    const t = useT();
     const selectionBorder = useStore((s) => s.settings.selectionBorder);
     const cellRadius = useStore((s) => s.settings.cellRadius);
     const set = useStore((s) => s.setSetting);
 
     return (
         <>
-            <Label>SELECTION BORDER</Label>
+            <Label>{t("grid.selectionBorder")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {SELECTION_BORDERS.map((b) => (
                     <Chip
                         key={b.v}
-                        label={b.label}
+                        label={t(b.label)}
                         active={selectionBorder === b.v}
                         onClick={() => set("selectionBorder", b.v)}
                     />
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                The accent frame a selected photo pulls in behind. It stops at the width of
-                the grid gutter: any wider and a swept row reads as one block of accent
-                with photos floating in it.
+                {t("grid.selectionBorderNote")}
             </div>
 
-            <Label>PHOTO CORNERS</Label>
+            <Label>{t("grid.photoCorners")}</Label>
             <div className="mb-5 flex gap-[calc(6px*var(--ui-scale))]">
                 {CELL_RADII.map((r) => (
                     <Chip
                         key={r.v}
-                        label={r.label}
+                        label={t(r.label)}
                         active={cellRadius === r.v}
                         onClick={() => set("cellRadius", r.v)}
                     />
@@ -722,6 +723,7 @@ function GridLookSection(){
 }
 
 function SearchSection(){
+    const t = useT();
     const pageSize = useStore((s) => s.settings.pageSize);
     const debounce = useStore((s) => s.settings.searchDebounceMs);
     const textWeight = useStore((s) => s.settings.textWeight);
@@ -730,10 +732,10 @@ function SearchSection(){
 
     return (
         <Group
-            title="Search behaviour"
-            hint="How much comes back, how quickly a query fires, and what the two halves of a hybrid search are worth against each other."
+            title={t("search.title")}
+            hint={t("search.hint")}
         >
-            <Label>RESULTS PER QUERY</Label>
+            <Label>{t("search.resultsPerQuery")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {PAGE_SIZES.map((n) => (
                     <Chip
@@ -745,70 +747,62 @@ function SearchSection(){
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Rows fetched per request. The grid loads the next page as you near the end,
-                so this trades a few larger requests against more smaller ones — it no
-                longer caps what you can reach.
+                {t("search.resultsNote")}
             </div>
 
-            <Label>TYPING DELAY</Label>
+            <Label>{t("search.typingDelay")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Search debounce"
+                    label={t("search.debounce")}
                     value={debounce}
                     min={SEARCH_DEBOUNCE_RANGE.min}
                     max={SEARCH_DEBOUNCE_RANGE.max}
                     step={20}
-                    readout={`${debounce} ms`}
+                    readout={t("unit.ms", { n: debounce })}
                     onChange={(v) => set("searchDebounceMs", v)}
                 />
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                How long typing has to stop before the query is sent. 0 embeds the query on
-                every keystroke — the GPU can take it; a slow disk under a cold cache may
-                not.
+                {t("search.typingNote")}
             </div>
 
-            <Label>MATCH STRICTNESS</Label>
+            <Label>{t("search.strictness")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Match strictness"
+                    label={t("search.strictnessLabel")}
                     value={strictness}
                     min={0}
                     max={100}
                     step={5}
-                    readout={strictness === 0 ? "off" : strictness === 50 ? "balanced" : `${strictness}%`}
+                    readout={strictness === 0 ? t("search.strictnessOff") : strictness === 50 ? t("search.balanced") : t("unit.percent", { n: strictness })}
                     onChange={(v) => set("matchStrictness", v)}
                 />
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                How far above the rest of your library a photo has to score to count as a
-                match. Higher shows fewer, closer results; off ranks every photo. What is
-                held back is one click away under the results. Photos whose text matches the
-                query are always kept.
+                {t("search.strictnessNote")}
             </div>
 
-            <Label>TEXT VS VISUAL</Label>
+            <Label>{t("search.textVsVisual")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Text versus visual weighting"
+                    label={t("search.textVsVisualLabel")}
                     value={textWeight}
                     min={0}
                     max={100}
                     step={5}
-                    readout={textWeight === 50 ? "balanced" : `${textWeight}%`}
+                    readout={textWeight === 50 ? t("search.balanced") : t("unit.percent", { n: textWeight })}
                     onChange={(v) => set("textWeight", v)}
                 />
             </div>
             <div className="text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Left favours what the photo <em>looks</em> like, right favours words read out
-                of it by OCR. This weights the two ranked lists, never their scores — cosine
-                and BM25 share no scale, and blending them directly is noise.
+                {t("search.textVsVisualNote")}
             </div>
         </Group>
     );
 }
 
 function OrderSection(){
+    const t = useT();
     const sort = useStore((s) => s.settings.sort);
     const groupBy = useStore((s) => s.settings.groupBy);
     const keep = useStore((s) => s.settings.sortedSearchKeep);
@@ -818,15 +812,15 @@ function OrderSection(){
 
     return (
         <Group
-            title="Dates and order"
-            hint="How the library is ordered, how date headers group it, and what a sorted search keeps."
+            title={t("order.title")}
+            hint={t("order.hint")}
         >
-            <Label>LIBRARY ORDER</Label>
+            <Label>{t("order.libraryOrder")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex flex-wrap gap-[calc(6px*var(--ui-scale))]">
                 {SORT_OPTIONS.filter((o) => o.key !== "relevance").map((o) => (
                     <Chip
                         key={o.key}
-                        label={o.short}
+                        label={t(o.short)}
                         active={sort === o.key}
                         onClick={() => {
                             // Here it always means the *library* order. With a
@@ -843,93 +837,90 @@ function OrderSection(){
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Also in the top bar. A date comes from the photo&apos;s EXIF, then from a date in its
-                filename (<span className="font-mono">Screenshot_20260530_213645.png</span>), then
-                from when the file was last modified — the viewer says &ldquo;Modified&rdquo;
-                rather than &ldquo;Taken&rdquo; for those. Photos with none sort last.
+                {t("order.note", { modified: t("format.dateModified"), taken: t("format.dateTaken") })}
             </div>
 
-            <Label>GROUP DATE HEADERS BY</Label>
+            <Label>{t("order.groupBy")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {GROUP_BY_OPTIONS.map((g) => (
                     <Chip
                         key={g.key}
-                        label={g.label}
+                        label={t(g.label)}
                         active={groupBy === g.key}
                         onClick={() => set("groupBy", g.key)}
                     />
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Headers appear whenever the grid is sorted by date — browsing or searching.
-                The scrubber on the right edge always jumps by month.
+                {t("order.groupNote")}
             </div>
 
-            <Label>SORTED SEARCH KEEPS</Label>
+            <Label>{t("order.keeps")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {SORTED_SEARCH_KEEPS.map((n) => (
                     <Chip
                         key={n}
-                        label={`Top ${n}`}
+                        label={t("order.top", { n })}
                         active={keep === n}
                         onClick={() => set("sortedSearchKeep", n)}
                     />
                 ))}
             </div>
             <div className="text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Search ranks every photo in the library, so sorting a query by date, name or
-                size first keeps this many of the best matches, then reorders them.
+                {t("order.keepsNote")}
             </div>
         </Group>
     );
 }
 
 function GestureSection(){
+    const t = useT();
     const holdMs = useStore((s) => s.settings.holdMs);
     const dragSlop = useStore((s) => s.settings.dragSlop);
     const set = useStore((s) => s.setSetting);
 
     return (
         <Group
-            title="Mouse and gestures"
-            hint="The two numbers that decide what a press on a photo means."
+            title={t("gestures.title")}
+            hint={t("gestures.hint")}
         >
-            <Label>HOLD TO SELECT</Label>
+            <Label>{t("gestures.hold")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {HOLD_TIMES.map((h) => (
                     <Chip
                         key={h.v}
-                        label={`${h.label} · ${h.v} ms`}
+                        label={t("gestures.holdChip", { label: t(h.label), ms: h.v })}
                         active={holdMs === h.v}
                         onClick={() => set("holdMs", h.v)}
                     />
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Press and keep holding for this long and the photo is selected instead of
-                opened. Keep moving and the hold flows straight into a paint sweep.
+                {t("gestures.holdNote")}
             </div>
 
-            <Label>DRAG THRESHOLD</Label>
+            <Label>{t("gestures.drag")}</Label>
             <div className="mb-[calc(6px*var(--ui-scale))]">
                 <Slider
-                    label="Drag threshold"
+                    label={t("gestures.dragLabel")}
                     value={dragSlop}
                     min={DRAG_SLOP_RANGE.min}
                     max={DRAG_SLOP_RANGE.max}
-                    readout={`${dragSlop} px`}
+                    readout={t("unit.px", { n: dragSlop })}
                     onChange={(v) => set("dragSlop", v)}
                 />
             </div>
             <div className="text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                How far the pointer may drift and still count as a click. Raise it if a
-                photo starts a selection sweep when you meant to open it.
+                {t("gestures.dragNote")}
             </div>
         </Group>
     );
 }
 
 function AppearanceSection(){
+    const t = useT();
+    const language = useStore((s) => s.settings.language);
+    const setLanguage = useStore((s) => s.setLanguage);
     const theme = useStore((s) => s.settings.theme);
     const setTheme = useStore((s) => s.setTheme);
     const density = useStore((s) => s.density);
@@ -945,23 +936,38 @@ function AppearanceSection(){
     );
 
     return (
-        <Group title="Appearance">
-            <Label>THEME</Label>
-            <div className="mb-5 flex gap-[calc(6px*var(--ui-scale))]">
-                {THEMES.map((t) => (
+        <Group title={t("appearance.title")}>
+            <Label>{t("language.heading")}</Label>
+            <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
+                <Chip label={t("language.auto")} active={language === "auto"} onClick={() => setLanguage("auto")} />
+                {LANGUAGES.map((l) => (
                     <Chip
-                        key={t}
-                        label={t[0]!.toUpperCase() + t.slice(1)}
-                        active={theme === t}
-                        onClick={() => setTheme(t)}
+                        key={l.code}
+                        label={l.label}
+                        active={language === l.code}
+                        onClick={() => setLanguage(l.code)}
+                    />
+                ))}
+            </div>
+            <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                {t("language.note")}
+            </div>
+
+            <Label>{t("appearance.theme")}</Label>
+            <div className="mb-5 flex gap-[calc(6px*var(--ui-scale))]">
+                {THEMES.map((th) => (
+                    <Chip
+                        key={th}
+                        label={t(`theme.${th}` as MessageKey)}
+                        active={theme === th}
+                        onClick={() => setTheme(th)}
                     />
                 ))}
             </div>
 
-            <Label>FONT</Label>
+            <Label>{t("appearance.font")}</Label>
             <div className="mb-[calc(10px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                No font is bundled — nothing is ever downloaded — so these are the families
-                installed on this machine. A missing one falls back to the system monospace.
+                {t("appearance.fontNote")}
             </div>
             <div className="mb-5">
                 {FONTS.map((f) => {
@@ -983,15 +989,15 @@ function AppearanceSection(){
                                     className="flex items-center gap-2 text-[calc(12.5px*var(--ui-scale))]"
                                     style={{ fontFamily: here ? f.stack : undefined }}
                                 >
-                                    {f.label}
+                                    {f.labelKey === undefined ? f.label : t(f.labelKey)}
                                     {!here ? (
                                         <span className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px font-sans text-[calc(10px*var(--ui-scale))] text-fg-faint">
-                                            not installed
+                                            {t("appearance.notInstalled")}
                                         </span>
                                     ) : null}
                                 </div>
                                 <div className="mt-px font-mono text-[calc(11px*var(--ui-scale))] text-fg-faint">
-                                    {here ? f.desc : `Install: ${f.desc}`}
+                                    {f.descKey !== undefined ? t(f.descKey) : here ? f.desc : t("appearance.installCommand", { command: f.desc })}
                                 </div>
                             </div>
                         </button>
@@ -1001,19 +1007,19 @@ function AppearanceSection(){
 
             <ColourSection />
 
-            <Label>DEFAULT GRID DENSITY</Label>
+            <Label>{t("appearance.density")}</Label>
             <div className="flex gap-[calc(6px*var(--ui-scale))]">
                 {DENSITIES.map((d) => (
                     <Chip
                         key={d.v}
-                        label={d.label}
+                        label={t(d.label)}
                         active={density === d.v}
                         onClick={() => setDensity(d.v)}
                     />
                 ))}
             </div>
             <div className="mt-2 mb-5 text-[calc(11.5px*var(--ui-scale))] text-fg-faint">
-                Ctrl + scroll over the grid changes this without coming here.
+                {t("appearance.densityNote")}
             </div>
 
             <GridLookSection />
@@ -1022,6 +1028,7 @@ function AppearanceSection(){
 }
 
 function AccessibilitySection(){
+    const t = useT();
     const uiScale = useStore((s) => s.settings.uiScale);
     const setUiScale = useStore((s) => s.setUiScale);
     const reduceMotion = useStore((s) => s.settings.reduceMotion);
@@ -1033,38 +1040,36 @@ function AccessibilitySection(){
 
     return (
         <Group
-            title="Accessibility"
-            hint="These apply to the whole app and persist across restarts."
+            title={t("accessibility.title")}
+            hint={t("accessibility.hint")}
         >
-            <Label>INTERFACE SIZE</Label>
+            <Label>{t("accessibility.size")}</Label>
             <div className="mb-[calc(10px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
                 {UI_SCALES.map((s) => (
                     <Chip
                         key={s}
-                        label={`${s}%`}
+                        label={t("unit.percent", { n: s })}
                         active={uiScale === s}
                         onClick={() => setUiScale(s)}
                     />
                 ))}
             </div>
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Text, controls, month headers and photo rows all grow together — the grid's
-                row heights are computed in JavaScript, so they take the same factor the
-                stylesheet does. Currently {uiScale}% of the base size
-                {font !== undefined ? `, in ${font.label}` : ""}.
+                {font !== undefined
+                    ? t("accessibility.sizeNoteFont", { scale: uiScale, font: font.labelKey === undefined ? font.label : t(font.labelKey) })
+                    : t("accessibility.sizeNote", { scale: uiScale })}
             </div>
 
             <div className="mb-[calc(10px*var(--ui-scale))] flex items-center justify-between border-b border-edge pb-[calc(10px*var(--ui-scale))]">
                 <div className="min-w-0 pr-4">
-                    <div className="text-[calc(12.5px*var(--ui-scale))]">High contrast</div>
+                    <div className="text-[calc(12.5px*var(--ui-scale))]">{t("accessibility.highContrast")}</div>
                     <div className="mt-px text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                        Stronger borders and brighter text, on top of whichever theme is
-                        showing — light and dark both have one.
+                        {t("accessibility.highContrastNote")}
                     </div>
                 </div>
                 <Toggle
                     label=""
-                    ariaLabel="High contrast"
+                    ariaLabel={t("accessibility.highContrast")}
                     on={highContrast}
                     onClick={() => setHighContrast(!highContrast)}
                 />
@@ -1072,88 +1077,90 @@ function AccessibilitySection(){
 
             <div className="mb-[calc(10px*var(--ui-scale))] flex items-center justify-between border-b border-edge pb-[calc(10px*var(--ui-scale))]">
                 <div className="min-w-0 pr-4">
-                    <div className="text-[calc(12.5px*var(--ui-scale))]">Reduce motion</div>
+                    <div className="text-[calc(12.5px*var(--ui-scale))]">{t("accessibility.reduceMotion")}</div>
                     <div className="mt-px text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                        Stops the loading shimmer, the spinners and every transition.
-                        Off follows the system preference; on forces it here.
+                        {t("accessibility.reduceMotionNote")}
                     </div>
                 </div>
                 <Toggle
                     label=""
-                    ariaLabel="Reduce motion"
+                    ariaLabel={t("accessibility.reduceMotion")}
                     on={reduceMotion}
                     onClick={() => setReduceMotion(!reduceMotion)}
                 />
             </div>
 
             <div className="text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                Keyboard focus is always drawn with a visible ring — arrow keys move it
-                through the grid, Space selects, Enter opens. See Shortcuts.
+                {t("accessibility.focusNote")}
             </div>
         </Group>
     );
 }
 
-const SHORTCUTS: { group: string; rows: { keys: string; what: string }[] }[] = [
+const SHORTCUTS: { group: MessageKey; rows: { keys: MessageKey; what: MessageKey }[] }[] = [
     {
-        group: "Search and navigation",
+        group: "shortcuts.search.group",
         rows: [
-            { keys: "/", what: "Focus the search box" },
-            { keys: "Esc", what: "Leave fullscreen, close the lightbox, clear the query, then the selection" },
-            { keys: "← → ↑ ↓", what: "Move focus through the grid" },
-            { keys: "Enter", what: "Open the focused photo" },
-            { keys: "Space", what: "Select or deselect the focused photo" },
+            { keys: "shortcuts.search.focus.keys", what: "shortcuts.search.focus.what" },
+            { keys: "shortcuts.search.escape.keys", what: "shortcuts.search.escape.what" },
+            { keys: "shortcuts.search.arrows.keys", what: "shortcuts.search.arrows.what" },
+            { keys: "shortcuts.search.enter.keys", what: "shortcuts.search.enter.what" },
+            { keys: "shortcuts.search.space.keys", what: "shortcuts.search.space.what" },
         ],
     },
     {
-        group: "Zoom",
+        group: "shortcuts.zoom.group",
         rows: [
-            { keys: "Ctrl + scroll", what: "Grid density, or the photo in the lightbox" },
-            { keys: "Ctrl + = / −", what: "Same, from the keyboard" },
-            { keys: "Ctrl + 0", what: "Back to the default density" },
+            { keys: "shortcuts.zoom.scroll.keys", what: "shortcuts.zoom.scroll.what" },
+            { keys: "shortcuts.zoom.keys.keys", what: "shortcuts.zoom.keys.what" },
+            { keys: "shortcuts.zoom.reset.keys", what: "shortcuts.zoom.reset.what" },
         ],
     },
     {
-        group: "Lightbox",
+        group: "shortcuts.lightbox.group",
         rows: [
-            { keys: "← →", what: "Previous / next photo" },
-            { keys: "F", what: "Fullscreen — image only, no chrome" },
-            { keys: "Double-click", what: "Zoom in on the point under the pointer" },
+            { keys: "shortcuts.lightbox.step.keys", what: "shortcuts.lightbox.step.what" },
+            { keys: "shortcuts.lightbox.fullscreen.keys", what: "shortcuts.lightbox.fullscreen.what" },
+            { keys: "shortcuts.lightbox.doubleClick.keys", what: "shortcuts.lightbox.doubleClick.what" },
         ],
     },
     {
-        group: "Selecting with the mouse",
+        group: "shortcuts.mouse.group",
         rows: [
-            { keys: "Click", what: "Open the photo" },
-            { keys: "Hold 0.4s", what: "Select it instead of opening" },
-            { keys: "Drag", what: "Paint-select everything the pointer crosses" },
-            { keys: "Ctrl + drag", what: "Paint in reverse — deselect what it crosses" },
-            { keys: "Shift + click", what: "Select the range from the last photo touched" },
-            { keys: "Shift during a drag", what: "Everything from where the press started to here" },
-            { keys: "Drag a selected photo", what: "Carry the selection onto a collection, or out to the desktop" },
+            { keys: "shortcuts.mouse.click.keys", what: "shortcuts.mouse.click.what" },
+            { keys: "shortcuts.mouse.hold.keys", what: "shortcuts.mouse.hold.what" },
+            { keys: "shortcuts.mouse.drag.keys", what: "shortcuts.mouse.drag.what" },
+            { keys: "shortcuts.mouse.ctrlDrag.keys", what: "shortcuts.mouse.ctrlDrag.what" },
+            { keys: "shortcuts.mouse.shiftClick.keys", what: "shortcuts.mouse.shiftClick.what" },
+            { keys: "shortcuts.mouse.shiftDrag.keys", what: "shortcuts.mouse.shiftDrag.what" },
+            { keys: "shortcuts.mouse.carry.keys", what: "shortcuts.mouse.carry.what" },
         ],
     },
 ];
 
 function ShortcutsSection(){
+    const t = useT();
+    // The hold-to-select time is a setting, so the row cannot hard-code 0.4 s.
+    const holdMs = useStore((s) => s.settings.holdMs);
+    const seconds = (holdMs / 1000).toLocaleString(currentLocale());
     return (
         <Group
-            title="Shortcuts"
-            hint="Everything the app responds to. The keys themselves are fixed; the two timings behind the mouse gestures are in Mouse & gestures."
+            title={t("shortcuts.title")}
+            hint={t("shortcuts.hint")}
         >
             {SHORTCUTS.map((g) => (
                 <div key={g.group} className="mb-5">
-                    <Label>{g.group.toUpperCase()}</Label>
+                    <Label>{t(g.group).toLocaleUpperCase(currentLocale())}</Label>
                     {g.rows.map((r) => (
                         <div
                             key={r.keys}
                             className="flex items-baseline gap-3 border-b border-edge py-[calc(7px*var(--ui-scale))]"
                         >
                             <span className="w-[calc(150px*var(--ui-scale))] flex-shrink-0 font-mono text-[calc(11.5px*var(--ui-scale))] text-accent-text">
-                                {r.keys}
+                                {t(r.keys, { seconds })}
                             </span>
                             <span className="text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim">
-                                {r.what}
+                                {t(r.what)}
                             </span>
                         </div>
                     ))}
@@ -1164,44 +1171,44 @@ function ShortcutsSection(){
 }
 
 function StorageSection(){
+    const t = useT();
     const storage = useStore((s) => s.storage);
     const confirm = useStore((s) => s.clearCacheConfirm);
     const clearCache = useStore((s) => s.clearCache);
     const cancel = useStore((s) => s.cancelClearCache);
 
     return (
-        <Group title="Storage">
+        <Group title={t("storage.title")}>
             <div className="flex justify-between py-[calc(6px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
-                <span>Thumbnail cache</span>
+                <span>{t("storage.thumbnailCache")}</span>
                 <span className="tabular-nums">{fmtGb(storage.thumbnailCacheGb)}</span>
             </div>
             <div className="mb-3 flex justify-between border-b border-edge py-[calc(6px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
-                <span>Search index</span>
+                <span>{t("storage.searchIndex")}</span>
                 <span className="tabular-nums">{fmtGb(storage.indexGb)}</span>
             </div>
             {confirm ? (
                 <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[calc(12px*var(--ui-scale))] text-fg-dim">
-                        Clear {fmtGb(storage.thumbnailCacheGb)} of cached thumbnails? They will be
-                        regenerated on demand.
+                        {t("storage.clearQuestion", { size: fmtGb(storage.thumbnailCacheGb) })}
                     </span>
                     <button
                         type="button"
                         onClick={() => void clearCache()}
                         className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border-none bg-danger px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-white hover:opacity-90"
                     >
-                        Confirm
+                        {t("storage.confirm")}
                     </button>
                     <button
                         type="button"
                         onClick={cancel}
                         className="cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-3 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
                     >
-                        Cancel
+                        {t("common.cancel")}
                     </button>
                 </div>
             ) : (
-                <Button onClick={() => void clearCache()}>Clear thumbnail cache</Button>
+                <Button onClick={() => void clearCache()}>{t("storage.clear")}</Button>
             )}
         </Group>
     );

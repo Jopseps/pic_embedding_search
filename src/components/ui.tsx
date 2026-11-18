@@ -13,7 +13,7 @@ export function Chip(props: {
             onClick={onClick}
             aria-pressed={active}
             className={
-                "cursor-pointer rounded-xl border px-[calc(9px*var(--ui-scale))] py-[calc(4px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] transition-colors " +
+                "cursor-pointer rounded-xl border px-[calc(9px*var(--ui-scale))] py-[calc(4px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] whitespace-nowrap transition-colors " +
                 (active
                     ? "border-accent bg-accent-muted text-accent-text"
                     : "border-edge bg-raised text-fg-dim hover:bg-hover")

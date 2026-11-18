@@ -1,7 +1,16 @@
+import { currentLocale, t } from "./i18n";
 import type { DateSource, GroupBy } from "./types";
 
 export function fmtCount(n: number): string{
-    return n.toLocaleString("en-US");
+    return n.toLocaleString(currentLocale());
+}
+
+/** `n` with exactly `digits` decimals, in the language's own separators. */
+export function fmtDecimal(n: number, digits: number, minDigits: number = digits): string{
+    return n.toLocaleString(currentLocale(), {
+        minimumFractionDigits: minDigits,
+        maximumFractionDigits: digits,
+    });
 }
 
 export function fmtEta(sec: number): string{
@@ -9,21 +18,21 @@ export function fmtEta(sec: number): string{
         return "—";
     }
     if(sec < 60){
-        return `${Math.round(sec)}s`;
+        return t("format.seconds", { n: Math.round(sec) });
     }
     const m = Math.floor(sec / 60);
     const s = Math.round(sec % 60);
-    return `${m}m ${s}s`;
+    return t("format.minutesSeconds", { m, s });
 }
 
 export function fmtGb(gb: number): string{
     if(gb < 0.01){
-        return "0 MB";
+        return t("format.megabytes", { n: 0 });
     }
     if(gb < 1){
-        return `${Math.round(gb * 1024)} MB`;
+        return t("format.megabytes", { n: fmtCount(Math.round(gb * 1024)) });
     }
-    return `${gb.toFixed(1)} GB`;
+    return t("format.gigabytes", { n: fmtDecimal(gb, 1) });
 }
 
 /** A wire date, or null when it is missing or unparseable. The wire form is
@@ -43,7 +52,7 @@ export function fmtDate(iso: string | null): string{
     if(d === null){
         return "—";
     }
-    return d.toLocaleString("en-US", { day: "numeric", month: "short", year: "numeric" });
+    return d.toLocaleString(currentLocale(), { day: "numeric", month: "short", year: "numeric" });
 }
 
 export function fmtDateTime(iso: string | null): string{
@@ -51,15 +60,15 @@ export function fmtDateTime(iso: string | null): string{
     if(d === null){
         return "—";
     }
-    return d.toLocaleString("en-US", {
+    return d.toLocaleString(currentLocale(), {
         day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
     });
 }
 
 /** "Taken" for a real capture date, "Modified" for one that is only the
  *  file's mtime — the lightbox does not pass a guess off as a fact. */
-export function dateVerb(source: DateSource | null): string{
-    return source === "mtime" ? "Modified" : "Taken";
+export function dateLabel(source: DateSource | null, iso: string): string{
+    return t(source === "mtime" ? "format.dateModifiedOn" : "format.dateTakenOn", { date: fmtDateTime(iso) });
 }
 
 export function monthLabel(iso: string | null): string{
@@ -70,17 +79,17 @@ export function monthLabel(iso: string | null): string{
 export function groupLabel(iso: string | null, by: GroupBy): string{
     const d = parse(iso);
     if(d === null){
-        return "Undated";
+        return t("format.undated");
     }
     if(by === "year"){
         return String(d.getFullYear());
     }
     if(by === "day"){
-        return d.toLocaleString("en-US", {
+        return d.toLocaleString(currentLocale(), {
             weekday: "short", day: "numeric", month: "long", year: "numeric",
         });
     }
-    return d.toLocaleString("en-US", { month: "long", year: "numeric" });
+    return d.toLocaleString(currentLocale(), { month: "long", year: "numeric" });
 }
 
 /** `2026-05` → "May 2026", for the scrubber's bubble. */
