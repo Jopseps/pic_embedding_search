@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from "react";
 import { useStore } from "../lib/store";
+import { useT } from "../lib/i18n/useT";
 
 /**
  * The confirm step before "Move to trash". It states the real consequence and
@@ -10,6 +11,7 @@ import { useStore } from "../lib/store";
  * Mounted in App, which re-renders every scroll frame, hence `memo`.
  */
 export const TrashDialog = memo(function TrashDialog(){
+    const t = useT();
     const open = useStore((s) => s.deleteConfirm);
     const count = useStore((s) => s.selectedIds.size);
     const cancel = useStore((s) => s.cancelDelete);
@@ -29,8 +31,6 @@ export const TrashDialog = memo(function TrashDialog(){
     if(!shown){
         return null;
     }
-
-    const noun = count === 1 ? "photo" : "photos";
 
     return (
         <div
@@ -63,16 +63,13 @@ export const TrashDialog = memo(function TrashDialog(){
                     id="trash-title"
                     className="mb-[calc(8px*var(--ui-scale))] text-[calc(15px*var(--ui-scale))] font-semibold text-fg"
                 >
-                    Move {count} {noun} to the trash?
+                    {t("trash.title", { n: count })}
                 </div>
                 <div
                     id="trash-body"
                     className="mb-[calc(18px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] leading-[1.5] text-fg-dim"
                 >
-                    The {count === 1 ? "file leaves its folder" : "files leave their folders"} and
-                    {" "}{count === 1 ? "goes" : "go"} to the system trash, and
-                    {" "}{count === 1 ? "it disappears" : "they disappear"} from the library.
-                    You can restore {count === 1 ? "it" : "them"} from the trash.
+                    {t("trash.body", { n: count })}
                 </div>
                 <div className="flex justify-end gap-[calc(8px*var(--ui-scale))]">
                     <button
@@ -82,7 +79,7 @@ export const TrashDialog = memo(function TrashDialog(){
                         onClick={cancel}
                         className="cursor-pointer rounded-lg border border-edge bg-transparent px-[calc(14px*var(--ui-scale))] py-[calc(8px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg hover:bg-hover"
                     >
-                        Cancel
+                        {t("trash.cancel")}
                     </button>
                     <button
                         ref={confirmRef}
@@ -90,7 +87,7 @@ export const TrashDialog = memo(function TrashDialog(){
                         onClick={() => void confirm()}
                         className="cursor-pointer rounded-lg border-none bg-danger px-[calc(14px*var(--ui-scale))] py-[calc(8px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] font-semibold text-white hover:opacity-90"
                     >
-                        Move to trash
+                        {t("trash.confirm")}
                     </button>
                 </div>
             </div>

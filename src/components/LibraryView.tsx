@@ -6,6 +6,8 @@ import { buildMarks } from "../lib/timeline";
 import { GRID_PAD_X, type GridLayoutHandle } from "../lib/useGridLayout";
 import { useGridGesture } from "../lib/useGridGesture";
 import { fmtCount } from "../lib/format";
+import { currentLocale } from "../lib/i18n";
+import { useT } from "../lib/i18n/useT";
 import { GridCell, SkeletonCell } from "./GridCell";
 import { Scrubber } from "./Scrubber";
 import { Button } from "./ui";
@@ -16,6 +18,7 @@ const ZOOM_DOTS = [6, 9, 12];
 const LOAD_AHEAD_VIEWPORTS = 1.5;
 
 export function LibraryView(props: { grid: GridLayoutHandle }){
+    const t = useT();
     const { grid } = props;
     const { layout, mode, attachScroll, scrollTop, viewportHeight } = grid;
     const gesture = useGridGesture(grid);
@@ -46,20 +49,22 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const title = useMemo(() => {
         if(isSearch){
             if(similarTo === null){
-                return "Search results";
+                return t("library.searchResults");
             }
-            return similarTo.id === EXTERNAL_ID ? `Similar to ${similarTo.filename}` : "Visually similar";
+            return similarTo.id === EXTERNAL_ID
+                ? t("library.similarTo", { name: similarTo.filename })
+                : t("library.visuallySimilar");
         }
         if(activeCollection !== null){
-            return collections.find((c) => c.id === activeCollection)?.name ?? "Collection";
+            return collections.find((c) => c.id === activeCollection)?.name ?? t("library.collection");
         }
         const map: Record<string, string> = {
-            all: "All photos",
-            recent: "Recent",
-            dupes: "Duplicates",
+            all: t("library.allPhotos"),
+            recent: t("sidebar.recent"),
+            dupes: t("sidebar.duplicates"),
         };
-        return map[libraryView ?? "all"] ?? "All photos";
-    }, [isSearch, similarTo, activeCollection, collections, libraryView]);
+        return map[libraryView ?? "all"] ?? t("library.allPhotos");
+    }, [t, isSearch, similarTo, activeCollection, collections, libraryView]);
 
     const { start, end } = visibleRange(layout.blocks, scrollTop, viewportHeight);
     const blocks = layout.blocks.slice(start, end);
@@ -195,7 +200,11 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
     const everythingFits = cursor === null && layout.totalHeight <= viewportHeight;
     const showScrubber = byDate && canPage && marks !== null && marks.marks.length > 1 && !everythingFits;
 
-    const sortShort = SORT_OPTIONS.find((o) => o.key === sort)?.short ?? "";
+    const sortOption = SORT_OPTIONS.find((o) => o.key === sort);
+    // English reads "Top 100 matches, newest"; a Turkish label keeps its own
+    // casing, since lowercasing one is where "Ad A–Z" turned into "ad a–z".
+    const sortLabel = sortOption === undefined ? "" : t(sortOption.short);
+    const sortShort = currentLocale() === "en-US" ? sortLabel.toLowerCase() : sortLabel;
 
     return (
         <div className="relative flex min-w-0 flex-1 flex-col">
@@ -211,8 +220,8 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                                 // A re-sorted query keeps only its best matches;
                                 // saying so stops "100 results" reading as if
                                 // the rest of the library vanished.
-                                ? `${fmtCount(total)} result${total === 1 ? "" : "s"}`
-                                : `Top ${fmtCount(total)} match${total === 1 ? "" : "es"}, ${sortShort.toLowerCase()}`}
+                                ? t("library.resultCount", { n: total, count: fmtCount(total) })
+                                : t("library.topMatches", { n: total, count: fmtCount(total), sort: sortShort })}
                             {" "}· {tookMs} ms
                         </div>
                     ) : null}
@@ -222,7 +231,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                         <button
                             key={dot}
                             type="button"
-                            aria-label={`Grid density ${i + 1}`}
+                            aria-label={t("library.gridDensity", { n: i + 1 })}
                             onClick={() => setDensity(i as 0 | 1 | 2)}
                             className={
                                 "flex h-7 w-7 cursor-pointer items-center justify-center rounded-md transition-colors " +
@@ -330,7 +339,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                     ) : null}
 
                     {loadingMore ? (
-                        <div className="py-4 text-center text-[calc(12px*var(--ui-scale))] text-fg-faint">Loading more…</div>
+                        <div className="py-4 text-center text-[calc(12px*var(--ui-scale))] text-fg-faint">{t("library.loadingMore")}</div>
                     ) : null}
 
                     {mode === "results" && cursor === null && weak > 0 ? (
@@ -340,7 +349,7 @@ export function LibraryView(props: { grid: GridLayoutHandle }){
                                 onClick={showWeakMatches}
                                 className="rounded-md border border-edge px-3 py-1.5 text-[calc(12px*var(--ui-scale))] text-fg-dim hover:text-fg"
                             >
-                                Show {fmtCount(weak)} less relevant
+                                {t("library.showWeak", { n: fmtCount(weak) })}
                             </button>
                         </div>
                     ) : null}
@@ -418,34 +427,36 @@ const Cell = memo(function Cell(props: {
 });
 
 function EmptyLibrary(props: { onAddFolder: () => void }){
+    const t = useT();
     return (
         <div className="flex min-h-[calc(400px*var(--ui-scale))] flex-col items-center justify-center gap-[calc(14px*var(--ui-scale))] py-24 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-[calc(14px*var(--ui-scale))] border-[calc(1.5px*var(--ui-scale))] border-dashed border-edge text-[calc(22px*var(--ui-scale))] text-fg-faint">
                 +
             </div>
-            <div className="text-[calc(15px*var(--ui-scale))] font-semibold">No folders yet</div>
+            <div className="text-[calc(15px*var(--ui-scale))] font-semibold">{t("library.emptyTitle")}</div>
             <div className="max-w-[calc(320px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] leading-[1.5] text-fg-dim">
-                Add a photo or screenshot folder to start indexing. Everything stays on this machine.
+                {t("library.emptyBody")}
             </div>
             <Button variant="primary" onClick={props.onAddFolder} className="mt-[calc(6px*var(--ui-scale))]">
-                Add a folder
+                {t("library.addFolder")}
             </Button>
         </div>
     );
 }
 
 function EmptySearch(props: { query: string; similar: boolean; onClear: () => void }){
+    const t = useT();
     return (
         <div className="flex min-h-[calc(400px*var(--ui-scale))] flex-col items-center justify-center gap-[calc(10px*var(--ui-scale))] py-24 text-center">
             <div className="text-[calc(26px*var(--ui-scale))] text-fg-faint">⌕</div>
             <div className="text-[calc(15px*var(--ui-scale))] font-semibold">
-                {props.similar ? "No visually similar images" : `No results for "${props.query}"`}
+                {props.similar ? t("library.noSimilar") : t("library.noResults", { query: props.query })}
             </div>
             <div className="text-[calc(13px*var(--ui-scale))] text-fg-dim">
-                Try a broader term, or check another folder / filter.
+                {t("library.noResultsHint")}
             </div>
             <Button onClick={props.onClear} className="mt-[calc(6px*var(--ui-scale))]">
-                Clear search
+                {t("library.clearSearch")}
             </Button>
         </div>
     );
@@ -453,6 +464,7 @@ function EmptySearch(props: { query: string; similar: boolean; onClear: () => vo
 
 /** The collection picker that hangs off "Add to collection". */
 function CollectionMenu(){
+    const t = useT();
     const collections = useStore((s) => s.collections);
     const add = useStore((s) => s.addSelectionToCollection);
     const adding = useStore((s) => s.addingCollection);
@@ -491,7 +503,7 @@ function CollectionMenu(){
                             cancel();
                         }
                     }}
-                    placeholder="Collection name"
+                    placeholder={t("sidebar.collectionNamePlaceholder")}
                     className="w-full rounded border border-accent bg-raised px-2 py-[calc(5px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg outline-none"
                 />
             ) : (
@@ -500,7 +512,7 @@ function CollectionMenu(){
                     onClick={start}
                     className="w-full cursor-pointer rounded px-2 py-[calc(6px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
                 >
-                    + New collection
+                    {t("sidebar.newCollection")}
                 </button>
             )}
         </div>
@@ -508,6 +520,7 @@ function CollectionMenu(){
 }
 
 function SelectionBar(){
+    const t = useT();
     const count = useStore((s) => s.selectedIds.size);
     const clear = useStore((s) => s.clearSelection);
     const menuOpen = useStore((s) => s.collectionMenuOpen);
@@ -521,20 +534,20 @@ function SelectionBar(){
 
     return (
         <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 items-center gap-[calc(10px*var(--ui-scale))] rounded-xl border border-edge bg-raised py-2 pr-[calc(10px*var(--ui-scale))] pl-4 shadow-[var(--shadow-bar)]">
-            <span className="whitespace-nowrap text-[calc(12.5px*var(--ui-scale))] text-fg-dim">{count} selected</span>
+            <span className="whitespace-nowrap text-[calc(12.5px*var(--ui-scale))] text-fg-dim">{t("library.selected", { n: count })}</span>
             <div className="h-5 w-px bg-edge" />
             <div className="relative">
                 <Button variant="subtle" onClick={toggleMenu}>
-                    Add to collection {menuOpen ? "▴" : "▾"}
+                    {t("library.addToCollection")} {menuOpen ? "▴" : "▾"}
                 </Button>
                 {menuOpen ? <CollectionMenu /> : null}
             </div>
-            <Button variant="subtle" onClick={() => void reveal()}>Reveal in files</Button>
-            <Button variant="danger" onClick={del}>Move to trash</Button>
+            <Button variant="subtle" onClick={() => void reveal()}>{t("library.revealInFiles")}</Button>
+            <Button variant="danger" onClick={del}>{t("library.moveToTrash")}</Button>
             <button
                 type="button"
                 onClick={clear}
-                aria-label="Clear selection"
+                aria-label={t("library.clearSelection")}
                 className="cursor-pointer px-1 text-[calc(14px*var(--ui-scale))] text-fg-faint hover:text-fg"
             >
                 ✕

@@ -1,13 +1,15 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { activeSort, useStore } from "../lib/store";
 import { SORT_OPTIONS } from "../lib/catalog";
-import { fmtCount, fmtEta } from "../lib/format";
+import { fmtCount, fmtDecimal, fmtEta } from "../lib/format";
+import { useT } from "../lib/i18n/useT";
 
 const RING_CIRCUMFERENCE = 37.7;
 
 /** Memoised: `App` re-renders on every scroll frame — the grid's scroll
  *  position is state up there — and the top bar depends on none of it. */
 export const TopBar = memo(function TopBar(){
+    const t = useT();
     const query = useStore((s) => s.query);
     const searching = useStore((s) => s.searching);
     // A re-index no longer disables search: the outgoing model keeps answering
@@ -24,10 +26,10 @@ export const TopBar = memo(function TopBar(){
     useEffect(() => {
         const focus = () => inputRef.current?.focus();
         window.addEventListener("picsearch:focus-search", focus);
-        const t = setTimeout(focus, 60);
+        const timer = setTimeout(focus, 60);
         return () => {
             window.removeEventListener("picsearch:focus-search", focus);
-            clearTimeout(t);
+            clearTimeout(timer);
         };
     }, []);
 
@@ -39,11 +41,7 @@ export const TopBar = memo(function TopBar(){
                     ref={inputRef}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    placeholder={
-                        reindexActive
-                            ? "Search your photos — re-indexing in the background…"
-                            : "Search your photos and screenshots…"
-                    }
+                    placeholder={t(reindexActive ? "topbar.searchPlaceholderReindex" : "topbar.searchPlaceholder")}
                     className="min-w-0 flex-1 border-none bg-transparent text-[calc(13px*var(--ui-scale))] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
                 />
                 {searching ? (
@@ -57,7 +55,7 @@ export const TopBar = memo(function TopBar(){
                         type="button"
                         onClick={clearQuery}
                         className="cursor-pointer p-[calc(2px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-faint hover:text-fg"
-                        aria-label="Clear search"
+                        aria-label={t("topbar.clearSearch")}
                     >
                         ✕
                     </button>
@@ -70,11 +68,11 @@ export const TopBar = memo(function TopBar(){
                 <button
                     type="button"
                     onClick={() => void saveSearch()}
-                    title="Save this search, with its filters"
-                    aria-label="Save search"
+                    title={t("topbar.saveTitle")}
+                    aria-label={t("topbar.saveAria")}
                     className="h-[calc(30px*var(--ui-scale))] flex-shrink-0 cursor-pointer rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
                 >
-                    ☆ Save
+                    ☆ {t("topbar.save")}
                 </button>
             ) : null}
 
@@ -87,7 +85,7 @@ export const TopBar = memo(function TopBar(){
             <button
                 type="button"
                 onClick={() => setView(view === "settings" ? "library" : "settings")}
-                aria-label="Settings"
+                aria-label={t("topbar.settings")}
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-raised text-[calc(15px*var(--ui-scale))] text-fg-dim hover:bg-hover"
             >
                 ⚙
@@ -102,6 +100,7 @@ export const TopBar = memo(function TopBar(){
  * entry that exists while searching.
  */
 function SortMenu(){
+    const t = useT();
     const sort = useStore(activeSort);
     const searching = useStore((s) => s.query.trim() !== "");
     const similar = useStore((s) => s.similarTo !== null);
@@ -148,17 +147,17 @@ function SortMenu(){
                 onClick={() => setOpen((v) => !v)}
                 aria-haspopup="listbox"
                 aria-expanded={open}
-                title={searching ? "Order of these results" : "Order of the library"}
+                title={t(searching ? "topbar.sortResultsTitle" : "topbar.sortLibraryTitle")}
                 className="flex h-[calc(30px*var(--ui-scale))] cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg-dim hover:bg-hover hover:text-fg"
             >
-                <span className="text-fg-faint">Sort</span>
-                <span className="whitespace-nowrap text-fg">{current?.short}</span>
+                <span className="text-fg-faint">{t("topbar.sort")}</span>
+                <span className="whitespace-nowrap text-fg">{current === undefined ? "" : t(current.short)}</span>
                 <span className="text-[calc(10px*var(--ui-scale))] text-fg-faint">{open ? "▴" : "▾"}</span>
             </button>
             {open ? (
                 <div
                     role="listbox"
-                    aria-label="Sort order"
+                    aria-label={t("topbar.sortOrder")}
                     className="absolute top-[calc(36px*var(--ui-scale))] left-0 z-40 min-w-[calc(210px*var(--ui-scale))] rounded-[calc(10px*var(--ui-scale))] border border-edge bg-raised p-1 shadow-[var(--shadow-pop)]"
                 >
                     {options.map((o) => (
@@ -178,7 +177,7 @@ function SortMenu(){
                                 (o.key === sort ? "text-fg" : "text-fg-dim")
                             }
                         >
-                            <span className="whitespace-nowrap">{o.label}</span>
+                            <span className="whitespace-nowrap">{t(o.label)}</span>
                             {o.key === sort ? (
                                 <svg width="12" height="12" viewBox="0 0 12 12" className="flex-shrink-0 text-accent" aria-hidden="true">
                                     <path d="M2 6.5 5 9.5 10 3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -193,6 +192,7 @@ function SortMenu(){
 }
 
 function IndexingIndicator(){
+    const t = useT();
     const indexing = useStore((s) => s.indexing);
     const open = useStore((s) => s.indexingPanelOpen);
     const toggle = useStore((s) => s.toggleIndexingPanel);
@@ -229,16 +229,16 @@ function IndexingIndicator(){
                 )}
                 <span className="whitespace-nowrap text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
                     {indexing.paused
-                        ? "Indexing paused"
+                        ? t("indexing.paused")
                         : complete
-                        ? "Up to date"
-                        : `Indexing ${fmtCount(indexing.current)} / ${fmtCount(indexing.total)}`}
+                        ? t("indexing.upToDate")
+                        : t("indexing.progress", { current: fmtCount(indexing.current), total: fmtCount(indexing.total) })}
                 </span>
             </button>
 
             {open ? (
                 <div className="absolute top-[calc(42px*var(--ui-scale))] right-0 z-40 w-[calc(260px*var(--ui-scale))] rounded-[calc(10px*var(--ui-scale))] border border-edge bg-raised p-[calc(14px*var(--ui-scale))] shadow-[var(--shadow-pop)]">
-                    <div className="mb-2 text-[calc(12px*var(--ui-scale))] text-fg-faint">CURRENT FILE</div>
+                    <div className="mb-2 text-[calc(12px*var(--ui-scale))] text-fg-faint">{t("indexing.currentFile")}</div>
                     <div className="mb-3 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[calc(11.5px*var(--ui-scale))] text-fg">
                         {indexing.currentFile}
                     </div>
@@ -246,15 +246,15 @@ function IndexingIndicator(){
                         <div className="h-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
                     </div>
                     <div className="mb-[calc(14px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] text-fg-dim">
-                        <span>{indexing.rate} img/s</span>
-                        <span>ETA {fmtEta(indexing.etaSec)}</span>
+                        <span>{t("indexing.rate", { rate: fmtDecimal(indexing.rate, 2, 0) })}</span>
+                        <span>{t("indexing.eta", { time: fmtEta(indexing.etaSec) })}</span>
                     </div>
                     <button
                         type="button"
                         onClick={() => void togglePause()}
                         className="w-full cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-hover p-2 text-[calc(12.5px*var(--ui-scale))] text-fg hover:opacity-80"
                     >
-                        {indexing.paused ? "Resume indexing" : "Pause indexing"}
+                        {t(indexing.paused ? "indexing.resume" : "indexing.pause")}
                     </button>
                 </div>
             ) : null}

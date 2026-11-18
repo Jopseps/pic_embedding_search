@@ -9,8 +9,10 @@ import { SettingsView } from "./components/SettingsView";
 import { Lightbox } from "./components/Lightbox";
 import { TrashDialog } from "./components/TrashDialog";
 import { listenFileDrop } from "./lib/tauri";
+import { useT } from "./lib/i18n/useT";
 
 export default function App(){
+    const t = useT();
     const grid = useGridLayout();
     const view = useStore((s) => s.view);
     const resolvedTheme = useStore((s) => s.resolvedTheme);
@@ -405,7 +407,7 @@ export default function App(){
             {backendError !== null ? (
                 <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-danger-muted px-4 py-2">
                     <span className="text-[calc(12.5px*var(--ui-scale))] text-fg">
-                        Cannot reach the indexing service — {backendError}
+                        {t("app.backendError", { error: backendError })}
                     </span>
                     <button
                         type="button"
@@ -415,7 +417,7 @@ export default function App(){
                         }}
                         className="cursor-pointer rounded-md border border-edge bg-raised px-3 py-1 text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
                     >
-                        Retry
+                        {t("common.retry")}
                     </button>
                 </div>
             ) : null}
@@ -425,11 +427,15 @@ export default function App(){
             {reindex.active ? (
                 <div className="flex flex-shrink-0 items-center gap-3 border-b border-edge bg-raised px-4 py-2">
                     <span className="text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
-                        Re-indexing with {reindex.modelName} — {Math.round(reindex.progress)}%
                         {reindex.total > 0
-                            ? ` (${reindex.current} / ${reindex.total})`
-                            : ""}
-                        . Still searching with {activeModelName}.
+                            ? t("app.reindexBannerCounts", {
+                                model: reindex.modelName, percent: Math.round(reindex.progress),
+                                current: reindex.current, total: reindex.total, active: activeModelName,
+                            })
+                            : t("app.reindexBanner", {
+                                model: reindex.modelName, percent: Math.round(reindex.progress),
+                                active: activeModelName,
+                            })}
                     </span>
                     <div className="h-1 max-w-[calc(220px*var(--ui-scale))] flex-1 overflow-hidden rounded-sm bg-hover">
                         <div
@@ -447,7 +453,7 @@ export default function App(){
                     <button
                         type="button"
                         onClick={toggleSidebar}
-                        aria-label="Expand sidebar"
+                        aria-label={t("app.expandSidebar")}
                         className="absolute top-2 left-1 z-[5] flex h-[calc(22px*var(--ui-scale))] w-[calc(22px*var(--ui-scale))] cursor-pointer items-center justify-center rounded-[calc(5px*var(--ui-scale))] border border-edge bg-raised text-[calc(10px*var(--ui-scale))] text-fg-faint hover:text-fg"
                     >
                         ▶
@@ -464,10 +470,10 @@ export default function App(){
                 <div className="pointer-events-none fixed inset-0 z-[200] flex items-center justify-center border-[calc(3px*var(--ui-scale))] border-dashed border-accent bg-accent-muted/90">
                     <div className="text-center">
                         <div className="mb-[calc(6px*var(--ui-scale))] text-[calc(17px*var(--ui-scale))] font-semibold text-fg">
-                            Drop to find similar photos
+                            {t("app.dropTitle")}
                         </div>
                         <div className="text-[calc(12.5px*var(--ui-scale))] text-fg-dim">
-                            We'll search your library by visual similarity
+                            {t("app.dropBody")}
                         </div>
                     </div>
                 </div>
@@ -478,8 +484,7 @@ export default function App(){
                 which is the one thing a drag cannot afford. */}
             {dragOut.active ? (
                 <div className="pointer-events-none absolute bottom-6 left-1/2 z-[250] -translate-x-1/2 rounded-xl border border-accent bg-raised px-4 py-[calc(10px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-fg shadow-[var(--shadow-bar)]">
-                    Carrying {dragOut.count} photo{dragOut.count === 1 ? "" : "s"} —
-                    drop on a collection, or outside the window to export
+                    {t("app.carrying", { n: dragOut.count })}
                 </div>
             ) : null}
 

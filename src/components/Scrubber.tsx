@@ -1,5 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import { monthKeyLabel } from "../lib/format";
+import { useT } from "../lib/i18n/useT";
+import type { MessageKey, Params } from "../lib/i18n";
 import { markAt, markForIndex, yearTicks, type Mark, type Marks } from "../lib/timeline";
 
 /** Rail width, px at 100% UI scale. It sits in the grid's right gutter. */
@@ -10,11 +12,11 @@ const RAIL_PAD = 10;
  *  ticks says nothing about where a month is. */
 const MIN_TICK_GAP = 4;
 
-function markLabel(mark: Mark | null): string{
+function markLabel(mark: Mark | null, t: (key: MessageKey, params?: Params) => string): string{
     if(mark === null){
         return "";
     }
-    return mark.month === null ? "Undated" : monthKeyLabel(mark.month);
+    return mark.month === null ? t("format.undated") : monthKeyLabel(mark.month);
 }
 
 /** `top` for a rail fraction: the rail runs between the two pads. */
@@ -49,6 +51,7 @@ export const Scrubber = memo(function Scrubber(props: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
 }){
     const { marks, currentIndex, rightInset, onJump, scrollRef } = props;
+    const t = useT();
     const [hover, setHover] = useState<number | null>(null);
     const [dragging, setDragging] = useState(false);
     const [lastJump, setLastJump] = useState<number | null>(null);
@@ -200,7 +203,7 @@ export const Scrubber = memo(function Scrubber(props: {
                         right: `calc(${RAIL_W + 34}px*var(--ui-scale))`,
                     }}
                 >
-                    {markLabel(shown)}
+                    {markLabel(shown, t)}
                 </div>
             ) : null}
         </div>

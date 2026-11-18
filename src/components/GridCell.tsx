@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { Photo } from "../lib/types";
 import { api } from "../lib/api";
+import { useT } from "../lib/i18n/useT";
 
 /** Diagonal hatch stands in for image bytes when no thumbnail exists yet
  *  (mock mode, or a file the sidecar has not thumbnailed). */
@@ -33,6 +34,7 @@ export interface GridCellProps{
 }
 
 export const GridCell = memo(function GridCell(props: GridCellProps){
+    const t = useT();
     const {
         photo, width, height, selected, focused, hovered, anySelected,
         onOpen, onToggleSelect, onHover,
@@ -91,10 +93,10 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
 
                 {photo.isScreenshot && photo.hasOcr ? (
                     <div
-                        title="Text inside this screenshot is searchable"
+                        title={t("grid.textBadgeTitle")}
                         className="absolute top-[calc(6px*var(--ui-scale))] right-[calc(6px*var(--ui-scale))] rounded-[calc(3px*var(--ui-scale))] bg-black/50 px-[calc(6px*var(--ui-scale))] py-[calc(3px*var(--ui-scale))] font-mono text-[calc(10px*var(--ui-scale))] leading-none tracking-[0.05em] text-white"
                     >
-                        TEXT
+                        {t("grid.textBadge")}
                     </div>
                 ) : null}
 
@@ -135,7 +137,7 @@ export const GridCell = memo(function GridCell(props: GridCellProps){
 
                 <button
                     type="button"
-                    aria-label={selected ? "Deselect" : "Select"}
+                    aria-label={t(selected ? "grid.deselect" : "grid.select")}
                     onClick={(e) => {
                         e.stopPropagation();
                         onToggleSelect();

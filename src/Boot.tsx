@@ -8,6 +8,21 @@ import {
 import type { SidecarHandshake } from "./lib/api";
 import { Button } from "./components/ui";
 import { fmtBytes, fmtTransfer, RateTracker } from "./lib/transfer";
+import { t, type MessageKey } from "./lib/i18n";
+
+/** Texts the Rust shell sends in English, by exact string. One it does not know
+ *  (a newer shell, a log line) is shown as it came. */
+const SHELL_TEXT: Record<string, MessageKey> = {
+    "Installing Python and packages": "boot.stepInstall",
+    "Downloading the search model": "boot.stepModel",
+    "NVIDIA GPU found — installing CUDA PyTorch (about 3 GB)": "boot.noteGpu",
+    "No usable NVIDIA GPU — installing CPU PyTorch (about 200 MB). Indexing is slower without a GPU.": "boot.noteCpu",
+};
+
+function fromShell(text: string): string{
+    const key = SHELL_TEXT[text];
+    return key === undefined ? text : t(key);
+}
 
 /**
  * What the desktop app shows until the sidecar has handed over a port.
@@ -97,7 +112,7 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
     if(quiet && pollError === null){
         return (
             <div className="flex h-full items-center justify-center bg-canvas text-[calc(12.5px*var(--ui-scale))] text-fg-faint">
-                Starting PicSearch…
+                {t("boot.starting")}
             </div>
         );
     }
@@ -115,31 +130,31 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
         void backendReset().catch((err: unknown) => setPollError(String(err)));
     };
 
-    let title = "Setting up PicSearch";
-    let detail = "One-time setup. PicSearch downloads Python, PyTorch and the search model, then works fully offline.";
+    let title = t("boot.title");
+    let detail = t("boot.detail");
     let step: string | null = null;
     let fraction: number | null = null;
     let bytes: string | null = null;
     if(status !== null){
         if(status.phase === "installing"){
-            step = status.step;
+            step = fromShell(status.step);
             if(status.total > 0){
                 fraction = Math.min(1, status.done / status.total);
-                bytes = `${fmtBytes(status.done)} of ${fmtBytes(status.total)}`;
+                bytes = t("format.bytesOf", { done: fmtBytes(status.done), total: fmtBytes(status.total) });
             }else if(status.done > 0){
                 bytes = fmtBytes(status.done);
             }
         }else if(status.phase === "starting"){
-            step = "Starting the search service";
+            step = t("boot.startingService");
         }else if(status.phase === "checking"){
-            step = "Checking the environment";
+            step = t("boot.checking");
         }else if(status.phase === "failed"){
-            title = "PicSearch could not start";
+            title = t("boot.couldNotStart");
             detail = status.message.split("\n")[0] ?? status.message;
         }
     }
     if(pollError !== null){
-        title = "PicSearch could not start";
+        title = t("boot.couldNotStart");
         detail = pollError;
     }
 
@@ -191,7 +206,7 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
                                 className="rounded-lg border border-edge bg-raised px-3 py-[calc(8px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] leading-[1.5] text-fg-dim"
                                 data-selectable
                             >
-                                {note}
+                                {fromShell(note)}
                             </li>
                         ))}
                     </ul>
@@ -211,15 +226,15 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
                 <div className="flex items-center gap-2">
                     {failed || pollError !== null ? (
                         <>
-                            <Button variant="primary" onClick={retry}>Retry</Button>
+                            <Button variant="primary" onClick={retry}>{t("common.retry")}</Button>
                             <Button variant={confirmReset ? "danger" : "ghost"} onClick={reset}>
-                                {confirmReset ? "Delete and reinstall?" : "Reinstall environment"}
+                                {confirmReset ? t("boot.reinstallConfirm") : t("boot.reinstall")}
                             </Button>
                         </>
                     ) : null}
                     {!failed ? (
                         <Button variant="subtle" onClick={() => setShowLog((v) => !v)}>
-                            {showLog ? "Hide details" : "Show details"}
+                            {showLog ? t("boot.hideDetails") : t("boot.showDetails")}
                         </Button>
                     ) : null}
                 </div>

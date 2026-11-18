@@ -1,7 +1,8 @@
+import { useT } from "../lib/i18n/useT";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { describeError, useStore } from "../lib/store";
 import { api } from "../lib/api";
-import { dateVerb, fmtDateTime } from "../lib/format";
+import { dateLabel } from "../lib/format";
 import type { Photo } from "../lib/types";
 
 const MAX_W = 1100;
@@ -66,6 +67,7 @@ function isHeld(t: EventTarget | null): boolean{
 /** Memoised: `App` owns the grid's scroll position, so it re-renders on
  *  every scroll frame, and `flat` only changes when the layout does. */
 export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
+    const t = useT();
     const index = useStore((s) => s.lightboxIndex);
     const stripVisible = useStore((s) => s.lightboxStripVisible);
     const fullscreen = useStore((s) => s.lightboxFullscreen);
@@ -359,7 +361,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
             ref={rootRef}
             role="dialog"
             aria-modal="true"
-            aria-label="Photo viewer"
+            aria-label={t("lightbox.viewer")}
             onPointerDown={onRootPointerDown}
             onClick={onRootClick}
             className="fixed inset-0 z-[100] flex flex-col bg-black/[0.97]"
@@ -372,7 +374,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                     <button
                         type="button"
                         onClick={close}
-                        aria-label="Close"
+                        aria-label={t("lightbox.close")}
                         className="cursor-pointer text-[calc(18px*var(--ui-scale))] text-white opacity-85 hover:opacity-100"
                     >
                         ✕
@@ -390,8 +392,8 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         <button
                             type="button"
                             onClick={toggleFullscreen}
-                            title="Fullscreen (F)"
-                            aria-label="Fullscreen"
+                            title={t("lightbox.fullscreenTitle")}
+                            aria-label={t("lightbox.fullscreen")}
                             className="cursor-pointer text-[calc(14px*var(--ui-scale))] text-white/60 hover:text-white"
                         >
                             ⛶
@@ -408,7 +410,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                     <button
                         type="button"
                         onClick={() => step(-1, props.flat.length)}
-                        aria-label="Previous"
+                        aria-label={t("lightbox.previous")}
                         className="flex-shrink-0 cursor-pointer p-[calc(10px*var(--ui-scale))] text-[calc(26px*var(--ui-scale))] text-white opacity-70 hover:opacity-100"
                     >
                         ◀
@@ -479,7 +481,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                     <button
                         type="button"
                         onClick={() => step(1, props.flat.length)}
-                        aria-label="Next"
+                        aria-label={t("lightbox.next")}
                         className="flex-shrink-0 cursor-pointer p-[calc(10px*var(--ui-scale))] text-[calc(26px*var(--ui-scale))] text-white opacity-70 hover:opacity-100"
                     >
                         ▶
@@ -498,8 +500,8 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[calc(12.5px*var(--ui-scale))] text-white/85"
                         >
                             {photo.filename} · {natural?.w ?? photo.width}×{natural?.h ?? photo.height} ·{" "}
-                            <span title={photo.dateSource === "mtime" ? "No capture date in the file — this is when it was last modified" : undefined}>
-                                {photo.takenAt === null ? "Undated" : `${dateVerb(photo.dateSource)} ${fmtDateTime(photo.takenAt)}`}
+                            <span title={photo.dateSource === "mtime" ? t("lightbox.mtimeNote") : undefined}>
+                                {photo.takenAt === null ? t("format.undated") : dateLabel(photo.dateSource, photo.takenAt)}
                             </span>{" "}
                             · {photo.folder}
                         </div>
@@ -508,7 +510,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             onClick={toggleStrip}
                             className="flex-shrink-0 cursor-pointer text-[calc(11px*var(--ui-scale))] text-white/50 hover:text-white/80"
                         >
-                            Hide ▾
+                            {t("lightbox.hide")} ▾
                         </button>
                     </div>
 
@@ -516,11 +518,11 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         <button
                             type="button"
                             onClick={toggleOcr}
-                            title="Click to expand"
+                            title={t("lightbox.ocrTitle")}
                             className="mb-3 block max-w-[calc(720px*var(--ui-scale))] cursor-pointer overflow-hidden text-left font-mono text-[calc(12px*var(--ui-scale))] text-ellipsis text-white/55 hover:text-white/75"
                             style={{ whiteSpace: ocrExpanded ? "normal" : "nowrap" }}
                         >
-                            OCR: "{photo.ocrText}"
+                            {t("lightbox.ocrText", { text: photo.ocrText })}
                         </button>
                     ) : null}
 
@@ -530,36 +532,36 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             onClick={() => void findSimilar(photo)}
                             className="cursor-pointer rounded-lg border-none bg-accent px-4 py-[calc(9px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] font-semibold text-white hover:opacity-90"
                         >
-                            Find similar
+                            {t("lightbox.findSimilar")}
                         </button>
                         <GhostAction
-                            label="Open"
+                            label={t("lightbox.open")}
                             onClick={() => {
                                 api.openExternally(photo.id).then(
-                                    () => showToast("Opening in default viewer…"),
+                                    () => showToast(t("lightbox.openToast")),
                                     (err: unknown) => showToast(describeError(err)),
                                 );
                             }}
                         />
                         <GhostAction
-                            label="Reveal in files"
+                            label={t("lightbox.reveal")}
                             onClick={() => {
                                 api.revealInFiles([photo.id]).then(
-                                    () => showToast("Revealing in file manager…"),
+                                    () => showToast(t("lightbox.revealToast")),
                                     (err: unknown) => showToast(describeError(err)),
                                 );
                             }}
                         />
                         <div className="relative">
                             <GhostAction
-                                label={`Add to collection ${collectionsOpen ? "▾" : "▴"}`}
+                                label={`${t("lightbox.addToCollection")} ${collectionsOpen ? "▾" : "▴"}`}
                                 onClick={() => setCollectionsOpen((v) => !v)}
                             />
                             {collectionsOpen ? (
                                 <div className="absolute bottom-full left-0 z-10 mb-2 min-w-[calc(170px*var(--ui-scale))] rounded-lg border border-white/15 bg-[#1c1c1f] p-1">
                                     {collections.length === 0 ? (
                                         <div className="px-2 py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-white/40">
-                                            No collections yet
+                                            {t("lightbox.noCollections")}
                                         </div>
                                     ) : null}
                                     {collections.map((c) => (
@@ -580,7 +582,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             onClick={() => toggleSelect(photo.id)}
                             className="cursor-pointer text-[calc(11.5px*var(--ui-scale))] text-white/40 hover:text-white/70"
                         >
-                            {isSelected ? "Deselect" : "Select"}
+                            {t(isSelected ? "grid.deselect" : "grid.select")}
                         </button>
                     </div>
                 </div>
@@ -592,7 +594,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                     onClick={toggleStrip}
                     className="absolute bottom-4 left-1/2 -translate-x-1/2 cursor-pointer rounded-md bg-white/10 px-3 py-[calc(6px*var(--ui-scale))] text-[calc(11px*var(--ui-scale))] text-white/50 hover:text-white/80"
                 >
-                    Show info ▴
+                    {t("lightbox.showInfo")} ▴
                 </button>
             ) : null}
         </div>
