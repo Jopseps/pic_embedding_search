@@ -23,7 +23,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -186,7 +188,7 @@ impl Runtime{
 
     /// Builds (or updates) the venv and fetches the model weights. Blocks for
     /// as long as the downloads take; the caller runs it on its own thread.
-    pub fn install(&self, report: &dyn Fn(Progress), sink: Sink) -> Result<Launch, String>{
+    pub fn install(&self, report: &(dyn Fn(Progress) + Sync), sink: Sink) -> Result<Launch, String>{
         std::fs::create_dir_all(&self.root)
             .map_err(|e| format!("could not create {}: {e}", self.root.display()))?;
         // A half-written marker from an interrupted run must not survive it.
@@ -208,8 +210,35 @@ impl Runtime{
             // system Python would otherwise break the venv under the user's feet.
             .env("UV_PYTHON_INSTALL_DIR", self.root.join("python"))
             .env("UV_PYTHON_PREFERENCE", "only-managed")
-            .env("UV_NO_PROGRESS", "1");
-        run_streamed(uv, &sink, &mut |_| true)?;
+            .env("UV_NO_PROGRESS", "1")
+            .env("NO_COLOR", "1");
+        // uv's cache, in a folder of ours that starts empty: its growth is the
+        // only live sign of a multi-gigabyte download, because uv prints one
+        // "Downloading torch (2.3GiB)" line per package and then nothing until
+        // it is done. Deleted afterwards, since the venv does not need it.
+        let cache = self.root.join("uv-cache");
+        let _ = std::fs::remove_dir_all(&cache);
+        uv.env("UV_CACHE_DIR", &cache);
+        let announced = Arc::new(AtomicU64::new(0));
+        let finished = AtomicBool::new(false);
+        let counted = announced.clone();
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| watch_downloads(&cache, &announced, &finished, report));
+            let result = run_streamed(
+                uv,
+                &sink,
+                &mut |_| true,
+                Some(Arc::new(move |line: &str| {
+                    if let Some(bytes) = announced_download(line){
+                        counted.fetch_add(bytes, Ordering::SeqCst);
+                    }
+                })),
+            );
+            finished.store(true, Ordering::SeqCst);
+            result
+        });
+        let _ = std::fs::remove_dir_all(&cache);
+        outcome?;
 
         report(Progress::Step("Downloading the search model".into()));
         let launch = self.launch();
@@ -235,7 +264,7 @@ impl Runtime{
                 report(Progress::Note(note.to_string()));
             }
             true
-        })?;
+        }, None)?;
 
         let state = State{ fingerprint: self.fingerprint()?, torch };
         let text = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
@@ -329,7 +358,15 @@ fn driver_major(line: &str) -> u32{
 /// Runs a setup step, feeding every line of stdout through `on_stdout` (which
 /// returns whether to also log it) and every line of stderr to the log. Fails
 /// with the last lines of output, so the boot screen can say *why*.
-fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn FnMut(&str) -> bool) -> Result<(), String>{
+/// Called with every line a setup step writes to stderr.
+type LineHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+fn run_streamed(
+    mut cmd: std::process::Command,
+    sink: &Sink,
+    on_stdout: &mut dyn FnMut(&str) -> bool,
+    on_stderr: Option<LineHook>,
+) -> Result<(), String>{
     if stopping(){
         return Err("PicSearch is closing".into());
     }
@@ -348,6 +385,9 @@ fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn
     if let Some(stderr) = child.stderr.take(){
         let (tail, sink) = (tail.clone(), sink.clone());
         drain(stderr, std::sync::Arc::new(move |line: String| {
+            if let Some(seen) = &on_stderr{
+                seen(&line);
+            }
             if let Ok(mut t) = tail.lock(){
                 t.push(line.clone());
                 let len = t.len();
@@ -377,9 +417,111 @@ fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn
     Err(format!("{:?} exited with {status}\n{why}", cmd.get_program()))
 }
 
+/// The size in a line like `Downloading torch (502.1MiB)`, in bytes. uv prints
+/// one per package it has to fetch, as soon as it starts, so the sum is the
+/// exact download for this machine. The Python interpreter (`cpython-...`) is
+/// unpacked outside the cache and is left out.
+fn announced_download(line: &str) -> Option<u64>{
+    let rest = line.trim().strip_prefix("Downloading ")?;
+    if rest.starts_with("cpython-"){
+        return None;
+    }
+    let size = rest.trim_end().strip_suffix(')')?.rsplit_once('(')?.1;
+    let split = size.find(|c: char| c.is_alphabetic())?;
+    let value: f64 = size[..split].trim().parse().ok()?;
+    let unit: f64 = match &size[split..]{
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "B" => 1.0,
+        _ => return None,
+    };
+    Some((value * unit) as u64)
+}
+
+/// How big uv's cache ends up for `announced` bytes of downloads. Wheels unpack
+/// bigger than they download, and the pure-Python packages that print no
+/// download line add a fixed amount. Two real installs fit it: CPU torch, 246
+/// MiB announced -> 918 MiB cache; CUDA torch, 2655 MiB -> 4715 MiB.
+fn expected_cache_bytes(announced: u64) -> u64{
+    530 * 1024 * 1024 + announced / 10 * 16
+}
+
+/// Total size of the regular files under `root`. Symlinks are not followed.
+fn dir_size(root: &Path) -> u64{
+    let mut total = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop(){
+        let Ok(entries) = std::fs::read_dir(&dir) else{
+            continue;
+        };
+        for entry in entries.flatten(){
+            let Ok(meta) = entry.metadata() else{
+                continue;
+            };
+            if meta.is_dir(){
+                stack.push(entry.path());
+            }else if meta.is_file(){
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// While uv runs, turns the cache's growth into download progress for the boot
+/// screen: `done` of the announced `total`, never past 99% until uv exits.
+fn watch_downloads(cache: &Path, announced: &AtomicU64, finished: &AtomicBool, report: &(dyn Fn(Progress) + Sync)){
+    while !finished.load(Ordering::SeqCst){
+        std::thread::sleep(Duration::from_millis(500));
+        let total = announced.load(Ordering::SeqCst);
+        if total == 0{
+            continue;
+        }
+        let fraction = (dir_size(cache) as f64 / expected_cache_bytes(total) as f64).min(0.99);
+        report(Progress::Bytes{ done: (total as f64 * fraction) as u64, total });
+    }
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
+
+    #[test]
+    fn uv_download_lines_are_summed_in_bytes(){
+        assert_eq!(announced_download("Downloading torch (502.1MiB)"), Some((502.1 * 1024.0 * 1024.0) as u64));
+        assert_eq!(announced_download("  Downloading nvidia-cublas (1.5GiB)  "), Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64));
+        assert_eq!(announced_download("Downloading hf-xet (4.3KiB)"), Some((4.3 * 1024.0) as u64));
+    }
+
+    #[test]
+    fn lines_that_are_not_package_downloads_are_ignored(){
+        assert_eq!(announced_download("Downloading cpython-3.14.5-windows-x86_64-none (download) (34.4MiB)"), None);
+        assert_eq!(announced_download(" Downloaded torch"), None);
+        assert_eq!(announced_download("Downloading torch"), None);
+        assert_eq!(announced_download("Resolved 83 packages in 2ms"), None);
+        assert_eq!(announced_download("Downloading x (12.0 parsecs)"), None);
+    }
+
+    #[test]
+    fn the_cache_estimate_matches_the_two_measured_installs(){
+        let mib = 1024 * 1024;
+        let within = |got: u64, want: u64| (got as f64 - want as f64).abs() / (want as f64) < 0.05;
+        assert!(within(expected_cache_bytes(246 * mib), 918 * mib));
+        assert!(within(expected_cache_bytes(2655 * mib), 4715 * mib));
+    }
+
+    #[test]
+    fn dir_size_counts_files_in_subfolders(){
+        let dir = std::env::temp_dir().join(format!("picsearch-dirsize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("one"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("a/b/two"), vec![0u8; 250]).unwrap();
+        assert_eq!(dir_size(&dir), 350);
+        assert_eq!(dir_size(&dir.join("missing")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A scratch source + runtime pair under the temp dir, removed on drop.
     struct Scratch(PathBuf);
