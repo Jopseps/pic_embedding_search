@@ -252,6 +252,24 @@ function FoldersSection(){
     );
 }
 
+/** Outline trash can in the button's own colour, so it turns red with the text. */
+function TrashIcon(){
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className="h-[calc(14px*var(--ui-scale))] w-[calc(14px*var(--ui-scale))]"
+        >
+            <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9h6.6L12 4M6.5 6.5v4M9.5 6.5v4" />
+        </svg>
+    );
+}
+
 function ModelSection(){
     const modelId = useStore((s) => s.settings.modelId);
     const pendingId = useStore((s) => s.pendingModelId);
@@ -346,8 +364,9 @@ function ModelSection(){
                                         onClick={() => askDelete(m.id)}
                                         disabled={inUse || busy}
                                         title={inUse ? "In use. Switch to another model first." : "Delete this model's files from disk"}
-                                        className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                        className="flex flex-shrink-0 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] border border-danger bg-danger-muted px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-danger hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:opacity-40"
                                     >
+                                        <TrashIcon />
                                         Delete
                                     </button>
                                 ) : (
