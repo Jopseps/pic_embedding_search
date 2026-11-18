@@ -12,7 +12,8 @@ Runs entirely on your machine. No cloud, no account, no telemetry. Images never 
 - **Text inside screenshots** — an OCR pass makes printed words searchable, fused with visual similarity
 - **English and Turkish** — multilingual model and `tur+eng` OCR by default
 - **Find visually similar** — from any photo, or by dropping an image onto the window
-- **Swappable models** — change the embedding model and search keeps working while the library re-embeds
+- **Swappable models** — change the embedding model and search keeps working while the library re-embeds; Settings shows what each model takes on disk and can download or delete its files
+- **Light by default** — the default model needs about 0.5 GB of VRAM; the larger SigLIP 2 is one click away
 - **Filters, collections, saved searches** — a saved search restores its filters, not just its words
 - **Stays in sync** — watched folders update live; deleting in the app moves the file to the system trash
 - **Near-duplicate detection** — perceptual hashing, so two photos of the same thing group and two screenshots of the same app do not
