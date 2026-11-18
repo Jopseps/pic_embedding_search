@@ -515,7 +515,7 @@ def create_app(state: AppState) -> FastAPI:
             state.watcher.stop()
 
     app = FastAPI(
-        title="picsearch sidecar", version="1.0.4",
+        title="picsearch sidecar", version="1.0.5",
         docs_url=None, redoc_url=None, lifespan=lifespan,
     )
     app.state.picsearch = state

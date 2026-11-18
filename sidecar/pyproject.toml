@@ -1,6 +1,6 @@
 [project]
 name = "picsearch"
-version = "1.0.4"
+version = "1.0.5"
 description = "Local offline semantic photo search sidecar"
 # PLAN.md verified torch + CUDA 13 wheels resolve here. 3.12/3.13 also work if
 # a dep regresses — drop this pin rather than vendoring a workaround.
