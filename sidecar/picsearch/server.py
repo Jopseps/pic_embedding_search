@@ -492,7 +492,7 @@ def create_app(state: AppState) -> FastAPI:
             state.watcher.stop()
 
     app = FastAPI(
-        title="picsearch sidecar", version="1.0.2",
+        title="picsearch sidecar", version="1.0.3",
         docs_url=None, redoc_url=None, lifespan=lifespan,
     )
     app.state.picsearch = state
@@ -1020,6 +1020,49 @@ def _bind(host: str, port: int) -> socket.socket:
 LOG_FILE = "sidecar.log"
 
 
+class _TolerantStream:
+    """A text stream whose write and flush never raise OSError.
+
+    stderr here is a pipe somebody else reads. When that reader goes away,
+    Windows answers the next flush with `OSError: [Errno 22]`, and tqdm, which
+    flushes stderr from inside `from_pretrained`, turned a closed pipe into a
+    model that could not load. Logging goes to `sidecar.log` as well, so a dead
+    stderr loses nothing that matters.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, text):
+        try:
+            return self._inner.write(text)
+        except OSError:
+            return len(text)
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _harden_stdio() -> None:
+    """UTF-8 on both streams, and a stderr that cannot break the process.
+
+    The code page of a Windows console (cp1254 on a Turkish one) is not UTF-8,
+    and the shell reads these pipes as UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # not a TextIOWrapper: a test's capture, or already replaced
+    sys.stderr = _TolerantStream(sys.stderr)
+
+
 def _setup_logging(level: str) -> None:
     """stderr as always, plus `sidecar.log` in the data dir.
 
@@ -1084,6 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scan-on-start", action="store_true")
     args = parser.parse_args(argv)
 
+    _harden_stdio()
     _setup_logging(args.log_level)
 
     state = AppState(model_id=args.model)
