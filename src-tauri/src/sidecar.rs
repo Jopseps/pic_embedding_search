@@ -235,11 +235,27 @@ pub fn install_panic_hook(){
 }
 
 pub fn drain<R: std::io::Read + Send + 'static>(stream: R, sink: Sink){
-    std::thread::spawn(move || {
-        for line in BufReader::new(stream).lines().map_while(Result::ok){
-            sink(line);
+    std::thread::spawn(move || for_each_line(stream, |line| sink(line)));
+}
+
+/// Every line of `stream`, until it really ends.
+///
+/// Not `BufReader::lines().map_while(Result::ok)`: `lines()` fails on a line
+/// that is not valid UTF-8, `map_while` stops at the first failure, and the
+/// thread then drops the pipe — so the child's next write to it errors. On a
+/// Turkish Windows Python writes an em dash in the ANSI code page, which is
+/// not UTF-8, and the sidecar lost its stderr seconds after starting; the model
+/// load then died flushing it. Invalid bytes become U+FFFD instead.
+pub fn for_each_line<R: std::io::Read>(stream: R, mut f: impl FnMut(String)){
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    loop{
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf){
+            Ok(0) | Err(_) => break,
+            Ok(_) => f(String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string()),
         }
-    });
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -287,6 +303,14 @@ mod tests{
     fn a_garbled_handshake_is_an_error_and_the_child_is_killed(){
         let err = Sidecar::spawn(&sh("echo hello; exec sleep 60".into()), quiet()).err().unwrap();
         assert!(err.contains("unparseable"), "{err}");
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_does_not_end_the_stream(){
+        let mut seen = Vec::new();
+        let bytes: &[u8] = b"first\r\nbad \x97 dash\nlast";
+        for_each_line(bytes, |l| seen.push(l));
+        assert_eq!(seen, vec!["first".to_string(), "bad \u{FFFD} dash".to_string(), "last".to_string()]);
     }
 
     #[test]

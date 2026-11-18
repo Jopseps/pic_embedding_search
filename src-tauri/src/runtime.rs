@@ -21,7 +21,6 @@
 //! changes neither starts straight away; one that changes either re-syncs, and
 //! uv only touches the packages that moved.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
@@ -360,11 +359,11 @@ fn run_streamed(mut cmd: std::process::Command, sink: &Sink, on_stdout: &mut dyn
         }));
     }
     if let Some(stdout) = child.stdout.take(){
-        for line in BufReader::new(stdout).lines().map_while(Result::ok){
+        crate::sidecar::for_each_line(stdout, |line| {
             if on_stdout(&line){
                 sink(line);
             }
-        }
+        });
     }
     let status = child.wait().map_err(|e| e.to_string());
     SETUP_PID.store(0, Ordering::SeqCst);
