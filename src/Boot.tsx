@@ -7,6 +7,7 @@ import {
 } from "./lib/tauri";
 import type { SidecarHandshake } from "./lib/api";
 import { Button } from "./components/ui";
+import { fmtBytes, fmtTransfer, RateTracker } from "./lib/transfer";
 
 /**
  * What the desktop app shows until the sidecar has handed over a port.
@@ -24,19 +25,15 @@ import { Button } from "./components/ui";
 
 const POLL_MS = 250;
 
-function fmtBytes(n: number): string{
-    if(n >= 1024 ** 3){
-        return `${(n / 1024 ** 3).toFixed(2)} GB`;
-    }
-    return `${Math.round(n / 1024 ** 2)} MB`;
-}
-
 export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
     const [status, setStatus] = useState<BackendStatus | null>(null);
     const [pollError, setPollError] = useState<string | null>(null);
     const [showLog, setShowLog] = useState(false);
     const [confirmReset, setConfirmReset] = useState(false);
     const logRef = useRef<HTMLPreElement>(null);
+    const rate = useRef(new RateTracker());
+    const rateStep = useRef<string | null>(null);
+    const [speed, setSpeed] = useState<string | null>(null);
     const { onReady } = props;
 
     useEffect(() => {
@@ -50,6 +47,19 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
                 }
                 setStatus(next);
                 setPollError(null);
+                // Speed and time left, measured per step: a new step is a new
+                // transfer, and its bytes start from zero.
+                if(next.phase === "installing" && next.total > 0){
+                    if(rateStep.current !== next.step){
+                        rateStep.current = next.step;
+                        rate.current.reset();
+                    }
+                    const t = rate.current.push(next.done, next.total);
+                    setSpeed(t === null ? null : fmtTransfer(t));
+                }else{
+                    rateStep.current = null;
+                    setSpeed(null);
+                }
                 if(next.phase === "ready"){
                     onReady(next.handshake);
                     return;
@@ -165,6 +175,11 @@ export function Boot(props: { onReady: (handshake: SidecarHandshake) => void }){
                                 />
                             )}
                         </div>
+                        {speed !== null ? (
+                            <div className="mt-[calc(6px*var(--ui-scale))] text-right text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-faint">
+                                {speed}
+                            </div>
+                        ) : null}
                     </div>
                 ) : null}
 
