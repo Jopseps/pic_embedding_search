@@ -49,8 +49,8 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from . import config, imaging, ocr, paths, system
-from .embed import Embedder, spec_for
+from . import config, imaging, models, ocr, paths, system
+from .embed import REGISTRY, Embedder, spec_for
 from .index import EMBED_MAX_EDGE, Indexer
 from .search import (
     DEFAULT_LIMIT,
@@ -215,7 +215,11 @@ class AppState:
         model_id: str | None = None,
         embedder: Any | None = None,
         embedder_factory: Any | None = None,
+        weights_present: Any | None = None,
     ):
+        # Injectable like the embedders: a test has no HuggingFace cache and must
+        # not start a real download to switch models.
+        self.weights_present = weights_present or models.has_weights
         self.token = secrets.token_urlsafe(32)
         self.store = Store(db)
         self.settings = config.load()
@@ -239,6 +243,7 @@ class AppState:
         # afterwards has to leave the *new* index.
         self.store.add_delete_listener(lambda ids: self.vectors.remove(ids))
         self.events = EventBus()
+        self.downloads = models.Downloads(self.events.publish)
         # resolve() never raises: an OCR engine that is not installed degrades
         # to no OCR with a warning, rather than a sidecar that will not boot.
         self.ocr = ocr.resolve(self.settings.get("ocrEngineId"), self.settings.get("ocrLangs"))
@@ -329,13 +334,31 @@ class AppState:
         if(model_id == self.model_id):
             self.clear_pending()
             return False
-        done, total = self.coverage(model_id)
         self.pending_model_id = model_id
         # `modelId` is written explicitly rather than left to the merge: it must
         # name the model that is *actually serving*, so a sidecar that dies mid
         # swap comes back searching. A `--model` override on the command line
         # would otherwise leave config naming something else entirely.
         self.settings = config.save({"modelId": self.model_id, "pendingModelId": model_id})
+        if(not self.weights_present(model_id)):
+            # Weights first, with a progress bar, instead of a silent download
+            # buried in the backfill. The swap carries on when they land, and a
+            # restart mid-download resumes it from `pendingModelId`.
+            started = self.downloads.start(
+                model_id, then=lambda: self._continue_swap(model_id), failed=self.clear_pending
+            )
+            if(not started):
+                self.clear_pending()
+                raise RuntimeError("another model is downloading")
+            return True
+        return self._continue_swap(model_id)
+
+    def _continue_swap(self, model_id: str) -> bool:
+        """The swap once the weights are on disk: promote at once when the
+        library is already fully embedded, otherwise start the backfill."""
+        if(self.pending_model_id != model_id):
+            return False  # cancelled, or replaced by another choice, while downloading
+        done, total = self.coverage(model_id)
         if(total > 0 and done >= total):
             # Switching back to a model that is already fully embedded, which
             # is what keeping the old rows buys. No GPU work at all.
@@ -910,7 +933,10 @@ def create_app(state: AppState) -> FastAPI:
             # `modelId` is deliberately *not* written here. It moves in
             # `promote_model`, once the incoming model can actually answer a
             # query — until then search keeps running on the outgoing one.
-            state.begin_model_swap(wanted)
+            try:
+                state.begin_model_swap(wanted)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         if(touches_ocr):
             changed = state.switch_ocr(
                 state.settings.get("ocrEngineId"), state.settings.get("ocrLangs")
@@ -921,6 +947,61 @@ def create_app(state: AppState) -> FastAPI:
             if(changed):
                 state.indexer.start_ocr_backfill()
         return settings_payload()
+
+    # -- model files -------------------------------------------------------
+
+    def _known_model(model_id: str) -> None:
+        try:
+            spec_for(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown model {model_id!r}") from exc
+
+    @app.get("/models", dependencies=[guard])
+    def list_models() -> dict:
+        """What is on disk for every model in the registry, and the download in
+        flight if there is one."""
+        return {
+            "models": [
+                {
+                    **models.status(model_id),
+                    "active": model_id == state.model_id,
+                    "pending": model_id == state.pending_model_id,
+                }
+                for model_id in REGISTRY
+            ],
+            "download": state.downloads.current,
+        }
+
+    @app.post("/models/{model_id}/download", dependencies=[guard])
+    def download_model(model_id: str) -> dict:
+        _known_model(model_id)
+        if(state.weights_present(model_id)):
+            return {"started": False}
+        if(not state.downloads.start(model_id)):
+            raise HTTPException(status_code=409, detail="another model is downloading")
+        return {"started": True}
+
+    @app.delete("/models/{model_id}", dependencies=[guard])
+    def delete_model(model_id: str) -> dict:
+        """Delete a model's files. Its vectors stay in the library, so switching
+        back costs a download and no re-index."""
+        _known_model(model_id)
+        if(model_id == state.model_id):
+            raise HTTPException(
+                status_code=409, detail="this model is in use; switch to another first"
+            )
+        if(model_id == state.pending_model_id):
+            raise HTTPException(status_code=409, detail="this model is being switched to")
+        if(state.downloads.active(model_id)):
+            raise HTTPException(status_code=409, detail="this model is downloading")
+        try:
+            freed = models.delete(model_id)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"could not delete the files: {exc}"
+            ) from exc
+        state.events.publish("model-deleted", {"modelId": model_id})
+        return {"freed": freed}
 
     # -- storage -----------------------------------------------------------
 

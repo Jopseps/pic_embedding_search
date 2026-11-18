@@ -22,44 +22,16 @@ import sys
 import threading
 import time
 
-from . import config, embed, ocr, paths, system
-from .doctor import hf_cache_dir, weights_dir
+from . import config, embed, ocr, system
+from .doctor import weights_dir
+from .models import expected_bytes, repo_bytes
 
 log = logging.getLogger(__name__)
-
-# What `from_pretrained` actually fetches. A repo that also carries .bin,
-# .onnx or .msgpack copies would otherwise inflate the total and the bar would
-# stop at 40%.
-FETCHED_SUFFIXES = (".safetensors", ".json", ".model", ".txt", ".py", ".tiktoken")
 
 
 def say(line: str) -> None:
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
-
-
-def expected_bytes(hf_id: str) -> int:
-    """The download size, or 0 when the hub cannot be asked."""
-    try:
-        from huggingface_hub import HfApi
-
-        info = HfApi().model_info(hf_id, files_metadata=True)
-    except Exception as exc:
-        log.warning("could not size %s: %s", hf_id, exc)
-        return 0
-    total = 0
-    for sibling in info.siblings or []:
-        if(sibling.rfilename.endswith(FETCHED_SUFFIXES) and sibling.size):
-            total += sibling.size
-    return total
-
-
-def repo_bytes(hf_id: str) -> int:
-    # `blobs/` only: `snapshots/` is symlinks into it, and getsize follows
-    # them, so measuring the whole repo dir counts every byte twice.
-    # In-flight downloads land in `blobs/` too, as `*.incomplete`.
-    repo = hf_cache_dir() / ("models--" + hf_id.replace("/", "--"))
-    return paths.dir_size_bytes(repo / "blobs")
 
 
 def report_progress(hf_id: str, total: int, stop: threading.Event) -> None:

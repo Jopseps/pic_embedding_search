@@ -38,3 +38,13 @@ def _no_real_trash(monkeypatch):
         raise AssertionError(f"a test tried to trash {path} for real")
 
     monkeypatch.setattr(system, "move_to_trash", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _weights_are_present(monkeypatch):
+    """Tests have no HuggingFace cache. Without this a model switch would start
+    a real multi-gigabyte download. A test of the download path itself replaces
+    `models.has_weights` and `snapshot_download` on its own."""
+    from picsearch import models
+
+    monkeypatch.setattr(models, "has_weights", lambda model_id: True)
