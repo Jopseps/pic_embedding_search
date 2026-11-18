@@ -28,6 +28,9 @@ DEFAULTS: dict[str, Any] = {
     "ocrEngineId": "tesseract",
     "ocrLangs": ["en", "tr"],
     "theme": "dark",
+    # Interface language: "auto" follows the system, or "en" / "tr". The sidecar
+    # never reads it; config.toml is what keeps it across restarts.
+    "language": "auto",
     "density": 1,
     # Appearance and accessibility. The sidecar never reads these — they are
     # here because config.toml is the only thing that survives a restart, and a

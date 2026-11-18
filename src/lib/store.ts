@@ -2,11 +2,19 @@ import { create } from "zustand";
 import { api, isMockMode } from "./api";
 import { RateTracker, type Transfer } from "./transfer";
 import {
+    resolveLanguage,
+    setCurrentLanguage,
+    systemLanguage,
+    t,
+    type Lang,
+} from "./i18n";
+import {
     DEFAULT_ACCENT_HUE,
     DEFAULT_CELL_RADIUS,
     DEFAULT_DRAG_SLOP,
     DEFAULT_FONT_ID,
     DEFAULT_HOLD_MS,
+    DEFAULT_LANGUAGE,
     DEFAULT_MODEL_ID,
     DEFAULT_OCR_ENGINE_ID,
     DEFAULT_OCR_LANGS,
@@ -33,6 +41,7 @@ import type {
     GridMode,
     IndexingStatus,
     LibraryCounts,
+    LanguagePref,
     LibraryView,
     Photo,
     PhotoKind,
@@ -187,6 +196,8 @@ interface State{
 
     settings: Settings;
     resolvedTheme: ResolvedTheme;
+    /** The language on screen: the setting resolved against the system's. */
+    lang: Lang;
     folders: WatchedFolder[];
     /** False until the first folder load resolves. Without this the empty-library
      *  state flashes on every launch, before we know whether folders exist. */
@@ -303,6 +314,8 @@ interface Actions{
     toggleOcrLang(code: string): void;
     setTheme(t: ThemePref): void;
     resolveTheme(): void;
+    setLanguage(pref: LanguagePref): void;
+    resolveLanguage(): void;
     setFont(id: string): void;
     setUiScale(scale: UiScale): void;
     setReduceMotion(on: boolean): void;
@@ -431,7 +444,7 @@ function simulateReindex(
                 reindex: { ...s.reindex, active: false, progress: 0 },
                 settings: { ...s.settings, modelId },
             }));
-            get().showToast(`Now searching with ${modelById(modelId)?.name ?? modelId}`);
+            get().showToast(t("toast.nowSearching", { model: modelById(modelId)?.name ?? modelId }));
             void get().runSearch();
             return;
         }
@@ -544,6 +557,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         ocrEngineId: DEFAULT_OCR_ENGINE_ID,
         ocrLangs: [...DEFAULT_OCR_LANGS],
         theme: "dark",
+        language: DEFAULT_LANGUAGE,
         density: 1,
         fontId: DEFAULT_FONT_ID,
         uiScale: DEFAULT_UI_SCALE,
@@ -565,6 +579,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
     },
     resolvedTheme: "dark",
+    lang: resolveLanguage("auto", systemLanguage()),
     folders: [],
     foldersLoaded: false,
     backendError: null,
@@ -766,7 +781,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             searching: false,
             focusedIndex: -1,
         });
-        get().showToast(`Showing images visually similar to ${photo.filename}`);
+        get().showToast(t("toast.similarTo", { name: photo.filename }));
     },
 
     async findSimilarToFile(path){
@@ -781,7 +796,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         }
         await get().findSimilarToFile(first);
         if(paths.length > 1){
-            get().showToast(`Using ${externalPhoto(first).filename}; ${paths.length - 1} other file${paths.length === 2 ? " was" : "s were"} ignored`);
+            get().showToast(t("toast.usingFile", { name: externalPhoto(first).filename, n: paths.length - 1, other: paths.length - 1 }));
         }
     },
 
@@ -847,10 +862,10 @@ export const useStore = create<State & Actions>((set, get) => ({
                 set({ collectionMenuOpen: false, selectedIds: new Set() });
                 await get().loadCounts();
                 await get().runSearch({ keepLoaded: true });
-                get().showToast(`${ids.length} added to "${name}"`);
+                get().showToast(t("toast.addedToCollection", { n: ids.length, name }));
                 return;
             }
-            get().showToast(`Collection "${name}" created`);
+            get().showToast(t("toast.collectionCreated", { name }));
         }catch(err){
             get().showToast(describeError(err));
         }
@@ -890,7 +905,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         await get().loadCollections();
         await get().loadCounts();
         await get().runSearch();
-        get().showToast("Collection deleted");
+        get().showToast(t("toast.collectionDeleted"));
     },
 
     cancelDeleteCollection(){
@@ -927,7 +942,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         const s = get();
         const query = s.query.trim();
         if(query === ""){
-            get().showToast("Nothing to save — type a search first");
+            get().showToast(t("toast.nothingToSave"));
             return;
         }
         try{
@@ -938,7 +953,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 filters: s.filters,
             });
             await get().loadSavedSearches();
-            get().showToast(`Saved "${query}"`);
+            get().showToast(t("toast.saved", { query }));
         }catch(err){
             get().showToast(describeError(err));
         }
@@ -1263,7 +1278,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     if(event.state === "error"){
                         // A swap that was waiting on these files will not happen.
                         set((s) => ({ pendingModelId: null, reindex: { ...s.reindex, active: false } }));
-                        get().showToast(`Download failed: ${event.message ?? "unknown error"}`);
+                        get().showToast(t("toast.downloadFailed", { message: event.message ?? t("toast.unknownError") }));
                     }
                 }
             }else if(event.type === "model-deleted"){
@@ -1277,7 +1292,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     pendingModelId: null,
                     reindex: { ...s.reindex, active: false, progress: 0 },
                 }));
-                get().showToast(`Now searching with ${modelById(event.modelId)?.name ?? event.modelId}`);
+                get().showToast(t("toast.nowSearching", { model: modelById(event.modelId)?.name ?? event.modelId }));
                 void get().loadModels();
                 void get().runSearch();
             }else if(event.type === "dates-refreshed"){
@@ -1306,7 +1321,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             }else if(event.type === "error"){
                 // An ingest failure is not "cannot reach the service": the
                 // banner says that and stays until a request succeeds.
-                get().showToast(`Indexing error: ${event.message}`);
+                get().showToast(t("toast.indexingError", { message: event.message }));
             }
         });
     },
@@ -1467,6 +1482,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                 density: settings.density ?? st.density,
             }));
             get().resolveTheme();
+            get().resolveLanguage();
             // The boot search ran before this landed, with the default order.
             // A saved "Name A–Z" has to show as that, not as newest-first.
             if(before.query.trim() === "" && before.settings.sort !== get().settings.sort){
@@ -1526,6 +1542,25 @@ export const useStore = create<State & Actions>((set, get) => ({
         set((s) => ({ settings: { ...s.settings, theme: t } }));
         get().resolveTheme();
         void get().persistSettings({ theme: t });
+    },
+
+    setLanguage(pref){
+        set((s) => ({ settings: { ...s.settings, language: pref } }));
+        get().resolveLanguage();
+        void get().persistSettings({ language: pref });
+    },
+
+    /** The setting against the system's language. Also moves what the global
+     *  `t()` answers in, which toasts and other non-React code read. */
+    resolveLanguage(){
+        const lang = resolveLanguage(get().settings.language, systemLanguage());
+        setCurrentLanguage(lang);
+        // Screen readers pick the pronunciation rules from this, and Turkish
+        // casing (i to İ) depends on it too.
+        if(typeof document !== "undefined"){
+            document.documentElement.setAttribute("lang", lang);
+        }
+        set({ lang });
     },
 
     setFont(id){
@@ -1603,12 +1638,12 @@ export const useStore = create<State & Actions>((set, get) => ({
         if(added === null){
             // Outside the browser a null is the user cancelling the picker.
             if(isMockMode){
-                get().showToast("Folder picker requires the desktop shell");
+                get().showToast(t("toast.pickerNeedsShell"));
             }
             return;
         }
         await get().loadFolders();
-        get().showToast(`Watching ${added.path}`);
+        get().showToast(t("toast.watching", { path: added.path }));
     },
 
     requestRemoveFolder(path){
@@ -1633,7 +1668,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         // The folder's photos left the library: results, counts and the timeline
         // (which `runSearch` reloads) all moved.
         await get().runSearch({ keepLoaded: true });
-        get().showToast("Folder removed — its photos left the library, the files stay on disk");
+        get().showToast(t("toast.folderRemoved"));
     },
 
     async toggleRecursive(path){
@@ -1679,7 +1714,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             return;
         }
         await get().loadStorage();
-        get().showToast("Thumbnail cache cleared");
+        get().showToast(t("toast.thumbsCleared"));
     },
 
     cancelClearCache(){
@@ -1729,9 +1764,9 @@ export const useStore = create<State & Actions>((set, get) => ({
         await get().loadCounts();
         // Deleting around row 400 must not collapse the grid to page one.
         await get().runSearch({ keepLoaded: true });
-        const moved = `${res.removed} photo${res.removed === 1 ? "" : "s"} moved to the trash`;
+        const moved = t("toast.trashed", { n: res.removed });
         get().showToast(
-            failed.size > 0 ? `${moved}; ${failed.size} could not be moved` : moved,
+            failed.size > 0 ? t("toast.trashedPartial", { moved, failed: failed.size }) : moved,
         );
     },
 
@@ -1743,7 +1778,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             get().showToast(describeError(err));
             return;
         }
-        get().showToast("Revealing in file manager…");
+        get().showToast(t("toast.revealing"));
     },
 
     toggleCollectionMenu(){
@@ -1782,7 +1817,7 @@ export const useStore = create<State & Actions>((set, get) => ({
         // The rows carry `collections`, so the grid is stale until it refetches.
         await get().loadCounts();
         await get().runSearch({ keepLoaded: true });
-        get().showToast(`${ids.length} item${ids.length === 1 ? "" : "s"} added to "${name}"`);
+        get().showToast(t("toast.itemsAdded", { n: ids.length, name }));
     },
 }));
 

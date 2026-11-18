@@ -3,6 +3,8 @@
  * ARCHITECTURE.md — the mock adapter and the real sidecar both satisfy them, so
  * swapping one for the other is a one-line change in api.ts.
  */
+import type { MessageKey } from "./i18n";
+
 
 export interface Photo{
     id: number;
@@ -102,7 +104,7 @@ export interface WatchedFolder{
 export interface EmbeddingModel{
     id: string;
     name: string;
-    desc: string;
+    desc: MessageKey;
     /** Multilingual models are the only ones that answer Turkish queries.
      *  See CLAUDE.md — do not offer an English-only model as the default. */
     multilingual: boolean;
@@ -112,12 +114,12 @@ export interface EmbeddingModel{
 export interface OcrEngine{
     id: string;
     label: string;
-    desc: string;
+    desc: MessageKey;
 }
 
 export interface OcrLanguage{
     code: string;
-    label: string;
+    label: MessageKey;
 }
 
 export interface IndexingStatus{
@@ -209,6 +211,10 @@ export interface EditorFont{
      *  proportional choice leaves them on the system monospace. */
     mono: boolean;
     desc: string;
+    /** Set on the two system stacks, whose name and description are prose
+     *  rather than a package name; the others are shown as they are. */
+    labelKey?: MessageKey;
+    descKey?: MessageKey;
 }
 
 export interface Settings{
@@ -218,6 +224,8 @@ export interface Settings{
     ocrEngineId: string;
     ocrLangs: string[];
     theme: ThemePref;
+    /** The interface language. */
+    language: LanguagePref;
     density: Density;
     /** Id in `FONTS`. Nothing is bundled: the font has to be installed on the
      *  machine, and the picker says so when it is not. */
@@ -279,6 +287,9 @@ export interface Settings{
      *  "sorted results" would be the whole library. */
     sortedSearchKeep: number;
 }
+
+/** The interface language. "auto" follows the system. */
+export type LanguagePref = "auto" | "en" | "tr";
 
 /** One embedding model's files on disk, from `GET /models`. */
 export interface ModelStatus{
