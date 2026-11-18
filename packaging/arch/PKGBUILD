@@ -3,10 +3,10 @@
 #
 # From a release:     download PKGBUILD into an empty folder, `makepkg -si`
 # From this checkout: npm run package, then in this folder
-#                     PICSEARCH_DEB=../../src-tauri/target/release/bundle/deb/PicSearch_1.0.3_amd64.deb makepkg -si
+#                     PICSEARCH_DEB=../../src-tauri/target/release/bundle/deb/PicSearch_1.0.4_amd64.deb makepkg -si
 
 pkgname=picsearch-bin
-pkgver=1.0.3
+pkgver=1.0.4
 pkgrel=1
 _deb_sha256='SKIP'
 pkgdesc="Local semantic photo and screenshot search (SigLIP 2 + Tesseract, fully offline)"
