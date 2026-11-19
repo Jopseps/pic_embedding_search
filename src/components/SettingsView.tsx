@@ -518,60 +518,179 @@ function OcrSection(){
     const langs = useStore((s) => s.settings.ocrLangs);
     const setEngine = useStore((s) => s.setOcrEngine);
     const toggleLang = useStore((s) => s.toggleOcrLang);
-    const hint = useStore((s) => s.ocrStatus?.hint ?? null);
+    const status = useStore((s) => s.ocrStatus);
     const loadOcrStatus = useStore((s) => s.loadOcrStatus);
+    const refreshOcr = useStore((s) => s.refreshOcr);
+    const showToast = useStore((s) => s.showToast);
+    const [openCommand, setOpenCommand] = useState<string | null>(null);
+    const [checking, setChecking] = useState(false);
 
     useEffect(() => {
         void loadOcrStatus();
     }, [loadOcrStatus]);
+
+    const checkAgain = async () => {
+        setChecking(true);
+        await refreshOcr();
+        setChecking(false);
+    };
+    const copy = (text: string) => {
+        void copyText(text).then((ok) => showToast(t(ok ? "ocr.copied" : "ocr.copyFailed")));
+    };
+    const missingLangs = status?.missingLangs ?? {};
+    // Language data only matters to tesseract; the other engines bring their own.
+    const tesseract = engineId === "tesseract";
+    const langCommand = tesseract
+        ? langs.filter((c) => missingLangs[c] !== undefined).map((c) => missingLangs[c]).join(" && ")
+        : "";
 
     return (
         <Group
             title={t("ocr.title")}
             hint={t("ocr.hint")}
         >
-            {hint !== null ? (
-                <div className="mb-[calc(12px*var(--ui-scale))] rounded-lg border border-edge bg-raised px-3 py-[calc(9px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim" data-selectable>
-                    {hint}
-                </div>
-            ) : null}
             {OCR_ENGINES.map((e) => {
                 const selected = e.id === engineId;
+                const info = status?.engines.find((x) => x.id === e.id);
+                const command = info?.command ?? null;
+                const showing = openCommand === e.id && command !== null;
                 return (
-                    <button
+                    <div
                         key={e.id}
-                        type="button"
-                        onClick={() => setEngine(e.id)}
                         className={
-                            "mb-[calc(5px*var(--ui-scale))] flex w-full cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] rounded-lg px-3 py-[calc(9px*var(--ui-scale))] text-left transition-colors " +
-                            (selected ? "bg-accent-muted" : "hover:bg-hover")
+                            "mb-[calc(6px*var(--ui-scale))] rounded-lg border px-3 py-[calc(11px*var(--ui-scale))] transition-colors " +
+                            (selected ? "border-accent bg-accent-muted" : "border-edge bg-raised")
                         }
                     >
-                        <Radio selected={selected} />
-                        <div>
-                            <div className="text-[calc(12.5px*var(--ui-scale))]">{e.label}</div>
-                            <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t(e.desc)}</div>
+                        <div className="flex items-center gap-[calc(10px*var(--ui-scale))]">
+                            <button
+                                type="button"
+                                onClick={() => setEngine(e.id)}
+                                className="flex min-w-0 flex-1 cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] border-none bg-transparent p-0 text-left text-fg"
+                            >
+                                <Radio selected={selected} />
+                                <div className="min-w-0">
+                                    <div className="text-[calc(13px*var(--ui-scale))] font-medium">{e.label}</div>
+                                    <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t(e.desc)}</div>
+                                    {info !== undefined ? (
+                                        <div className="mt-px text-[calc(11.5px*var(--ui-scale))] text-fg-dim">
+                                            {info.installed
+                                                ? t(selected ? "ocr.statusInUse" : "ocr.statusInstalled")
+                                                : t(selected ? "ocr.statusSelectedMissing" : "ocr.statusMissing")}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            </button>
+                            {command !== null ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setOpenCommand(showing ? null : e.id)}
+                                    className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover"
+                                >
+                                    {t(showing ? "ocr.hideInstall" : "ocr.howToInstall")}
+                                </button>
+                            ) : null}
                         </div>
-                    </button>
+                        {showing ? (
+                            <CommandBox
+                                command={command}
+                                note={t(e.id === "tesseract" ? "ocr.installNoteSystem" : "ocr.installNotePython")}
+                                checking={checking}
+                                onCopy={() => copy(command)}
+                                onCheck={() => void checkAgain()}
+                            />
+                        ) : null}
+                    </div>
                 );
             })}
 
             <div className="mt-[calc(14px*var(--ui-scale))] mb-2 text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{t("ocr.languages")}</div>
             <div className="flex flex-wrap gap-2">
-                {OCR_LANGUAGES.map((l) => (
-                    <button
-                        key={l.code}
-                        type="button"
-                        onClick={() => toggleLang(l.code)}
-                        className="flex cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] border border-edge bg-raised px-[calc(10px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] hover:bg-hover"
-                    >
-                        <Box checked={langs.includes(l.code)} />
-                        <span className="text-[calc(12px*var(--ui-scale))]">{t(l.label)}</span>
-                    </button>
-                ))}
+                {OCR_LANGUAGES.map((l) => {
+                    const on = langs.includes(l.code);
+                    const missing = tesseract ? missingLangs[l.code] : undefined;
+                    return (
+                        <button
+                            key={l.code}
+                            type="button"
+                            onClick={() => toggleLang(l.code)}
+                            title={missing === undefined ? undefined : t("ocr.langMissingTitle", { command: missing })}
+                            className={
+                                "flex cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-lg border px-[calc(10px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] transition-colors " +
+                                (on ? "border-accent bg-accent-muted" : "border-edge bg-raised hover:bg-hover")
+                            }
+                        >
+                            <Box checked={on} />
+                            <span className="text-[calc(12px*var(--ui-scale))]">{t(l.label)}</span>
+                            {missing !== undefined ? (
+                                <span className="text-[calc(10.5px*var(--ui-scale))] text-danger">{t("ocr.langMissing")}</span>
+                            ) : null}
+                        </button>
+                    );
+                })}
             </div>
+            {/* The commands for checked languages without data, so the warning is actionable. */}
+            {langCommand !== "" ? (
+                <CommandBox
+                    command={langCommand}
+                    note={t("ocr.langNote")}
+                    checking={checking}
+                    onCopy={() => copy(langCommand)}
+                    onCheck={() => void checkAgain()}
+                />
+            ) : null}
         </Group>
     );
+}
+
+/** An install command the user runs themselves, with Copy and "Check again". */
+function CommandBox(props: { command: string; note: string; checking: boolean; onCopy: () => void; onCheck: () => void }){
+    const t = useT();
+    return (
+        <div className="mt-[calc(10px*var(--ui-scale))]">
+            <div className="flex items-center gap-2 rounded-[calc(7px*var(--ui-scale))] border border-edge bg-panel px-[calc(10px*var(--ui-scale))] py-[calc(7px*var(--ui-scale))]">
+                <code data-selectable className="min-w-0 flex-1 break-all font-mono text-[calc(11.5px*var(--ui-scale))] text-fg">
+                    {props.command}
+                </code>
+                <button
+                    type="button"
+                    onClick={props.onCopy}
+                    className="flex-shrink-0 cursor-pointer rounded-[calc(6px*var(--ui-scale))] border border-edge px-[calc(9px*var(--ui-scale))] py-[calc(3px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] text-fg hover:bg-hover"
+                >
+                    {t("ocr.copy")}
+                </button>
+            </div>
+            <div className="mt-[calc(6px*var(--ui-scale))] flex items-center justify-between gap-3">
+                <span className="text-[calc(11.5px*var(--ui-scale))] text-fg-faint">{props.note}</span>
+                <button
+                    type="button"
+                    onClick={props.onCheck}
+                    disabled={props.checking}
+                    className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(5px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-wait disabled:opacity-60"
+                >
+                    {t(props.checking ? "ocr.checking" : "ocr.checkAgain")}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+/** The async clipboard API, then the old selection copy WebKitGTK still honours. */
+async function copyText(text: string): Promise<boolean>{
+    try{
+        await navigator.clipboard.writeText(text);
+        return true;
+    }catch{
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand("copy");
+        area.remove();
+        return ok;
+    }
 }
 
 function Label(props: { children: React.ReactNode }){

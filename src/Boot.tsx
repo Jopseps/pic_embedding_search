@@ -14,7 +14,7 @@ import { t, type MessageKey } from "./lib/i18n";
  *  (a newer shell, a log line) is shown as it came. */
 const SHELL_TEXT: Record<string, MessageKey> = {
     "Installing Python and packages": "boot.stepInstall",
-    "Downloading the search model": "boot.stepModel",
+    "Checking the installation": "boot.stepModel",
     "NVIDIA GPU found — installing CUDA PyTorch (about 3 GB)": "boot.noteGpu",
     "No usable NVIDIA GPU — installing CPU PyTorch (about 200 MB). Indexing is slower without a GPU.": "boot.noteCpu",
 };

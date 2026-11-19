@@ -89,6 +89,8 @@ export interface PhotoSearchApi{
     deleteSavedSearch(id: string): Promise<void>;
     storage(): Promise<StorageUsage>;
     ocrStatus(): Promise<OcrStatus>;
+    /** Re-read installed engines and language data ("Check again"). */
+    refreshOcr(): Promise<OcrStatus>;
     clearThumbnailCache(): Promise<void>;
     revealInFiles(ids: number[]): Promise<void>;
     openExternally(id: number): Promise<void>;
@@ -427,6 +429,10 @@ export class MockApi implements PhotoSearchApi{
     async putSettings(patch: Partial<Settings>): Promise<SettingsResponse>{
         // A swap is instant here: there is no GPU and no coverage to reach.
         this.settings = { ...this.settings, ...patch };
+        // The sidecar downloads a missing model before it swaps to it.
+        if(patch.modelId !== undefined && !this.modelFiles.has(patch.modelId)){
+            this.modelFiles.set(patch.modelId, 1.6 * 1024 ** 3);
+        }
         return this.getSettings();
     }
 
@@ -526,7 +532,21 @@ export class MockApi implements PhotoSearchApi{
     }
 
     async ocrStatus(): Promise<OcrStatus>{
-        return { engine: this.settings.ocrEngineId, langs: "eng+tur", hint: null };
+        return {
+            engine: this.settings.ocrEngineId,
+            langs: "eng+tur",
+            hint: null,
+            engines: [
+                { id: "tesseract", installed: true, command: null },
+                { id: "rapidocr", installed: false, command: "uv pip install rapidocr-onnxruntime" },
+                { id: "easyocr", installed: false, command: "uv pip install easyocr" },
+            ],
+            missingLangs: { ja: "sudo pacman -S tesseract-data-jpn" },
+        };
+    }
+
+    refreshOcr(): Promise<OcrStatus>{
+        return this.ocrStatus();
     }
 
     async clearThumbnailCache(): Promise<void>{
@@ -791,6 +811,10 @@ export class HttpApi implements PhotoSearchApi{
 
     ocrStatus(): Promise<OcrStatus>{
         return this.req<OcrStatus>("/ocr");
+    }
+
+    refreshOcr(): Promise<OcrStatus>{
+        return this.req<OcrStatus>("/ocr/refresh", { method: "POST" });
     }
 
     async clearThumbnailCache(): Promise<void>{

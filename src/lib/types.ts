@@ -130,6 +130,9 @@ export interface IndexingStatus{
     etaSec: number;
     paused: boolean;
     currentFile: string;
+    /** Work in flight. `current >= total` alone reads "done" while the batch
+     *  is still being embedded and OCR'd, and before a scan's walk has a total. */
+    running: boolean;
 }
 
 export interface ReindexStatus{
@@ -173,6 +176,10 @@ export interface OcrStatus{
     engine: string | null;
     langs: string | null;
     hint: string | null;
+    /** Per engine: is it on this machine, and the command that installs it. */
+    engines: { id: string; installed: boolean; command: string | null }[];
+    /** UI language code -> the command that adds its tesseract data. */
+    missingLangs: Record<string, string>;
 }
 
 export interface Collection{
@@ -329,7 +336,7 @@ export interface SettingsResponse extends Settings{
  * the store can apply them without translation.
  */
 export type SidecarEvent =
-    | ({ type: "index"; running: boolean } & IndexingStatus)
+    | ({ type: "index" } & IndexingStatus)
     | ({ type: "reindex" } & ReindexStatus)
     | {
         type: "scan-complete";

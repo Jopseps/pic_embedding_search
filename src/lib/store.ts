@@ -335,6 +335,7 @@ interface Actions{
     toggleRecursive(path: string): Promise<void>;
     loadStorage(): Promise<void>;
     loadOcrStatus(): Promise<void>;
+    refreshOcr(): Promise<void>;
     clearCache(): Promise<void>;
     cancelClearCache(): void;
 
@@ -542,8 +543,9 @@ export const useStore = create<State & Actions>((set, get) => ({
             etaSec: 154,
             paused: false,
             currentFile: "IMG_9931.heic",
+            running: true,
         }
-        : { current: 0, total: 0, rate: 0, etaSec: 0, paused: false, currentFile: "" },
+        : { current: 0, total: 0, rate: 0, etaSec: 0, paused: false, currentFile: "", running: false },
     indexingPanelOpen: false,
     reindex: { active: false, progress: 0, modelName: "", current: 0, total: 0, rate: 0, etaSec: 0 },
     pendingModelId: null,
@@ -1251,6 +1253,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                         etaSec: event.etaSec,
                         paused: event.paused,
                         currentFile: event.currentFile,
+                        running: event.running,
                     },
                 });
             }else if(event.type === "reindex"){
@@ -1349,6 +1352,7 @@ export const useStore = create<State & Actions>((set, get) => ({
                     rate: Math.round(rate * 10) / 10,
                     etaSec: Math.round((s.indexing.total - current) / rate),
                     currentFile: files[current % files.length] as string,
+                    running: current < s.indexing.total,
                 },
             };
         });
@@ -1698,6 +1702,14 @@ export const useStore = create<State & Actions>((set, get) => ({
             set({ ocrStatus: await api.ocrStatus() });
         }catch{
             // Advisory only. Settings simply shows no hint.
+        }
+    },
+
+    async refreshOcr(){
+        try{
+            set({ ocrStatus: await api.refreshOcr() });
+        }catch(err){
+            get().showToast(describeError(err));
         }
     },
 
