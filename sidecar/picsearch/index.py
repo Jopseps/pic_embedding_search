@@ -174,9 +174,13 @@ class Indexer:
         ocr: OcrEngine | None = None,
         on_event: EventSink | None = None,
         on_vector: Callable[[int, "object"], None] | None = None,
+        model_ready: Callable[[], bool] = lambda: True,
     ):
         self.store = store
         self.embedder = embedder
+        # False only on a first run while the serving model's weights download.
+        # Rows, thumbnails and OCR go ahead; `embed_missing` catches them up.
+        self.model_ready = model_ready
         self.ocr = ocr
         self.on_event = on_event
         self.on_vector = on_vector
@@ -281,25 +285,28 @@ class Indexer:
         """Synchronous full walk. Safe to call directly; tests do."""
         targets = list(targets) if targets is not None else self._enabled_folders()
         report = ScanReport()
-
-        candidates: list[Path] = []
-        seen: set[str] = set()
-        for root, recursive in targets:
-            for p in walk_images(Path(root), recursive):
-                key = str(p)
-                if(key in seen):
-                    continue
-                seen.add(key)
-                candidates.append(p)
-
-        self.status = IndexStatus(
-            total=len(candidates), running=True, paused=self._pause.is_set()
-        )
+        # Before the walk: a big folder takes a while to list, and the UI read
+        # the previous run's finished status as "Up to date" the whole time.
+        self.status = IndexStatus(running=True, paused=self._pause.is_set())
         self._emit("index", self.status.as_wire())
         # `running` must come down however this ends: an exception out of the GPU
         # batch left it set, and every later scan, watcher flush and swap
         # then reported "busy" until the sidecar was restarted.
         try:
+            candidates: list[Path] = []
+            seen: set[str] = set()
+            for root, recursive in targets:
+                for p in walk_images(Path(root), recursive):
+                    key = str(p)
+                    if(key in seen):
+                        continue
+                    seen.add(key)
+                    candidates.append(p)
+
+            self.status = IndexStatus(
+                total=len(candidates), running=True, paused=self._pause.is_set()
+            )
+            self._emit("index", self.status.as_wire())
             self._ingest_many(candidates, report)
 
             if(prune and not self._stop.is_set()):
@@ -711,6 +718,10 @@ class Indexer:
         """
         if(not ids):
             return 0
+        if(embedder is None and not self.model_ready()):
+            for img in images:
+                img.close()
+            return 0
         engine = embedder if embedder is not None else self.embedder
         vectors = engine.embed_pil(images)
         self.store.put_embeddings(engine.model_id, zip(ids, vectors, strict=True))
@@ -781,6 +792,8 @@ class Indexer:
         the resident one — see `_flush`. One pass only; `run_model_backfill`
         is what loops until coverage is actually complete.
         """
+        if(embedder is None and not self.model_ready()):
+            return 0
         engine = embedder if embedder is not None else self.embedder
         model = model_id or engine.model_id
         ids = self.store.images_missing_embedding(model, limit=limit)

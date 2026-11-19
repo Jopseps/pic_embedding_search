@@ -169,3 +169,54 @@ def test_only_one_download_at_a_time(xdg_tmp, monkeypatch):
     assert downloads.start(BIG) is False
     assert downloads.active(SMALL) and not downloads.active(BIG)
     gate.set()
+
+
+# -- first run: the serving model downloads in the background ----------------
+
+def test_a_missing_serving_model_downloads_at_boot_and_catches_up(xdg_tmp, tmp_path, monkeypatch):
+    present = {"yes": False}
+    gate = threading.Event()
+
+    def fake_snapshot_download(hf_id, allow_patterns=None):
+        gate.wait(5)
+        present["yes"] = True
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(models, "expected_bytes", lambda hf_id: 0)
+    state = AppState(
+        model_id=MODEL, embedder=ColorEmbedder(), weights_present=lambda _m: present["yes"]
+    )
+    root = tmp_path / "pics"
+    root.mkdir()
+    from PIL import Image
+
+    for i in range(3):
+        Image.new("RGB", (64, 48), (i * 60, 90, 160)).save(root / f"p{i}.png")
+    state.store.add_folder(str(root), True)
+
+    with TestClient(create_app(state), headers={TOKEN_HEADER: state.token}) as client:
+        assert state.downloads.active(MODEL)
+        assert not state.model_ready()
+        # Usable while it downloads: rows and browse work, embedding waits.
+        state.indexer.scan()
+        assert state.store.image_count() == 3
+        assert state.store.embedding_count(MODEL) == 0
+        assert client.get("/search").status_code == 200
+        res = client.get("/search", params={"q": "table"})
+        assert res.status_code == 503 and "not downloaded" in res.json()["detail"]
+
+        gate.set()
+        for _ in range(100):
+            if(state.store.embedding_count(MODEL) == 3):
+                break
+            time.sleep(0.05)
+        assert state.model_ready()
+        assert state.store.embedding_count(MODEL) == 3, "the backlog was never embedded"
+        assert client.get("/search", params={"q": "table"}).status_code == 200
+
+
+def test_a_present_serving_model_starts_no_download(xdg_tmp):
+    state = AppState(model_id=MODEL, embedder=ColorEmbedder())
+    with TestClient(create_app(state), headers={TOKEN_HEADER: state.token}):
+        assert state.downloads.current is None
+        assert state.model_ready()

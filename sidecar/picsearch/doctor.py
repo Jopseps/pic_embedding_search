@@ -125,16 +125,18 @@ def hf_cache_dir() -> Path:
 def weights_dir(hf_id: str) -> Path | None:
     """Where `hf_id` is cached, or None if nothing has been downloaded.
 
-    A `snapshots/<rev>/` with anything in it is the marker. An empty repo dir
-    is what an interrupted download leaves behind, and it must not read as a
-    hit — the app would then look broken rather than "still downloading".
+    A weights file in `snapshots/<rev>/` is the marker. An interrupted
+    download leaves an empty repo dir, or only the small json files that land
+    first, and neither may read as a hit — the app would then load from a
+    half cache and start a silent download of its own.
     """
     repo = hf_cache_dir() / ("models--" + hf_id.replace("/", "--"))
     snapshots = repo / "snapshots"
     if(not snapshots.is_dir()):
         return None
     for snapshot in snapshots.iterdir():
-        if(snapshot.is_dir() and any(snapshot.iterdir())):
+        weights = (p for p in snapshot.rglob("*") if p.suffix in (".safetensors", ".bin"))
+        if(snapshot.is_dir() and any(weights)):
             return repo
     return None
 

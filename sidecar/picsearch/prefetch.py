@@ -1,9 +1,11 @@
-"""`python -m picsearch.prefetch` — download the active model's weights now.
+"""`python -m picsearch.prefetch` — the first-run setup's smoke test.
 
-Run by the packaged app's first-run setup, after the environment is built, so
-the first index does not stall for minutes on a silent 1.5 GB download. It is
-also the setup's smoke test: it imports torch and transformers and loads the
-model once, which is exactly what the sidecar will do later.
+Run by the packaged app's setup, after the environment is built. It imports
+torch and transformers, and loads the active model once if its weights are
+already cached, which is exactly what the sidecar will do later. It does not
+download them any more: the sidecar fetches a missing model in the background
+with a progress pill, so the app opens straight away instead of holding the
+setup screen for minutes.
 
 Talks to the Rust shell over stdout, one line at a time:
 
@@ -24,7 +26,7 @@ import time
 
 from . import config, embed, ocr, system
 from .doctor import weights_dir
-from .models import expected_bytes, repo_bytes
+from .models import repo_bytes
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +49,13 @@ def fetch(model_id: str) -> None:
     from transformers import AutoModel, AutoProcessor
 
     spec = embed.spec_for(model_id)
-    cached = weights_dir(spec.hf_id) is not None
-    say(f"{'Checking' if cached else 'Downloading'} {spec.hf_id}")
+    if(weights_dir(spec.hf_id) is None):
+        # The imports above are the smoke test; the weights come in the app.
+        say(f"torch {torch.__version__} ready; {spec.hf_id} downloads in the app")
+        return
+    say(f"Checking {spec.hf_id}")
 
-    total = 0 if cached else expected_bytes(spec.hf_id)
+    total = 0
     stop = threading.Event()
     watcher = threading.Thread(target=report_progress, args=(spec.hf_id, total, stop), daemon=True)
     watcher.start()

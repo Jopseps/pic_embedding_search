@@ -34,7 +34,6 @@ import os
 import secrets
 import shutil
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -253,6 +252,7 @@ class AppState:
             ocr=self.ocr,
             on_event=self._on_event,
             on_vector=self._on_vector,
+            model_ready=self.model_ready,
         )
         # Constructed, not started: `create_app`'s lifespan owns that, so the
         # tests that build an AppState per case do not each spawn inotify
@@ -291,6 +291,29 @@ class AppState:
         finally:
             self.dates_ready.set()
         self.events.publish("dates-refreshed", {"count": count})
+
+    def model_ready(self) -> bool:
+        """The serving model's weights are all on disk.
+
+        False only on a first run, while `fetch_serving_model` downloads them in
+        the background so the app is usable at once: ingest skips the embedding
+        step and a text search answers 503 until they land.
+        """
+        return not self.downloads.active(self.model_id) and self.weights_present(self.model_id)
+
+    def fetch_serving_model(self) -> bool:
+        """Start downloading the serving model if it is missing. True if started."""
+        if(self.weights_present(self.model_id) or self.downloads.active(self.model_id)):
+            return False
+        started = self.downloads.start(self.model_id, then=self._serving_model_landed)
+        if(started):
+            log.info("downloading %s in the background", self.model_id)
+        return started
+
+    def _serving_model_landed(self) -> None:
+        # Every row ingested meanwhile has no vector; a scan ends with
+        # `embed_missing`, and a busy slot remembers the request.
+        self.indexer.start_rescan()
 
     def _on_event(self, kind: str, payload: dict) -> None:
         self.events.publish(kind, payload)
@@ -509,6 +532,8 @@ def create_app(state: AppState) -> FastAPI:
         # A swap interrupted by a crash or a quit picks up where it stopped —
         # `embed_missing` is keyed on what is missing, so nothing is redone.
         state.resume_model_swap()
+        # First run: the setup screen no longer waits on this download.
+        state.fetch_serving_model()
         try:
             yield
         finally:
@@ -562,7 +587,18 @@ def create_app(state: AppState) -> FastAPI:
             "hint": ocr.install_hint(
                 state.settings.get("ocrEngineId"), state.settings.get("ocrLangs")
             ),
+            **ocr.engine_report(state.settings.get("ocrLangs")),
         }
+
+    @app.post("/ocr/refresh", dependencies=[guard])
+    def ocr_refresh() -> dict:
+        """"Check again" after installing an engine or language data: rebuild
+        the engine from the settings, and re-read screenshots if that changed it
+        — `tesseract-data-tur` arriving turns `eng` into `eng+tur`."""
+        ocr.forget_installs()
+        if(state.switch_ocr(state.settings.get("ocrEngineId"), state.settings.get("ocrLangs"))):
+            state.indexer.start_ocr_backfill()
+        return ocr_status()
 
     @app.get("/counts", dependencies=[guard])
     def counts() -> dict:
@@ -632,14 +668,24 @@ def create_app(state: AppState) -> FastAPI:
             strictness=_int_setting("matchStrictness", 50), weak=weak,
         )
 
+    def _require_model() -> None:
+        # Loading the model here would start a second, silent download of the
+        # same files into the same cache.
+        if(not state.model_ready()):
+            raise HTTPException(status_code=503, detail="the search model is not downloaded yet")
+
     @app.get("/search", dependencies=[guard])
     def search(params: SearchParams = Depends(_params)) -> dict:
+        if(params.q.strip()):
+            _require_model()
         return state.searcher.search(params)
 
     @app.get("/timeline", dependencies=[guard])
     def timeline(params: SearchParams = Depends(_params)) -> dict:
         """Photos per month for the same query `/search` would answer, so the
         scrubber can place months that are not loaded yet."""
+        if(params.q.strip()):
+            _require_model()
         return state.searcher.timeline(params)
 
     def _filter_params(body: SimilarFilters) -> SearchParams:
@@ -681,6 +727,7 @@ def create_app(state: AppState) -> FastAPI:
             raise HTTPException(
                 status_code=422, detail=f"cannot read {path.name} as an image: {exc}"
             ) from exc
+        _require_model()
         return state.searcher.similar_to_image(small, params=params)
 
     @app.get("/images/{image_id}", dependencies=[guard])
@@ -977,7 +1024,10 @@ def create_app(state: AppState) -> FastAPI:
         _known_model(model_id)
         if(state.weights_present(model_id)):
             return {"started": False}
-        if(not state.downloads.start(model_id)):
+        # The serving model is a first-run download that failed; its rows wait
+        # for vectors, so landing it has to start the catch-up scan.
+        then = state._serving_model_landed if model_id == state.model_id else None
+        if(not state.downloads.start(model_id, then=then)):
             raise HTTPException(status_code=409, detail="another model is downloading")
         return {"started": True}
 
@@ -1026,21 +1076,21 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.post("/reveal", dependencies=[guard])
     def reveal(body: IdsRequest) -> dict:
-        opened = 0
-        for image_id in body.ids[:8]:
+        files: list[Path] = []
+        for image_id in body.ids[:200]:
             row = state.store.image_by_id(image_id)
-            if(row is None):
-                continue
-            if(_spawn(["xdg-open", str(Path(row["path"]).parent)])):
-                opened += 1
-        return {"opened": opened}
+            if(row is not None):
+                files.append(Path(row["path"]))
+        # One window per folder, so the cap is on folders, not files.
+        folders = list(dict.fromkeys(f.parent for f in files))[:8]
+        return {"opened": system.reveal_files([f for f in files if f.parent in folders])}
 
     @app.post("/open", dependencies=[guard])
     def open_external(body: IdRequest) -> dict:
         row = state.store.image_by_id(body.id)
         if(row is None):
             raise HTTPException(status_code=404, detail="no such image")
-        return {"opened": _spawn(["xdg-open", row["path"]])}
+        return {"opened": system.open_file(Path(row["path"]))}
 
     # -- events ------------------------------------------------------------
 
@@ -1074,15 +1124,6 @@ def create_app(state: AppState) -> FastAPI:
         )
 
     return app
-
-
-def _spawn(argv: list[str]) -> bool:
-    try:
-        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except OSError as exc:
-        log.warning("failed to spawn %s: %s", argv, exc)
-        return False
 
 
 # ---------------------------------------------------------------------------
