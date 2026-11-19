@@ -48,6 +48,7 @@
         ],
         "linux": {
             "deb": {
+                "desktopTemplate": "packaging/picsearch.desktop",
                 "depends": [
                     "tesseract-ocr",
                     "tesseract-ocr-eng"

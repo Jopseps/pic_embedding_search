@@ -23,6 +23,12 @@ use backend::Backend;
 
 fn main(){
     sidecar::install_panic_hook();
+    // Wayland names a window by its app id, which GTK takes from the program
+    // name, and the shell finds the icon through the .desktop file of that
+    // name. The binary is `picsearch` and the file is `PicSearch.desktop`, so
+    // Alt+Tab showed the generic Wayland icon. Before GTK starts, or it is too late.
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("PicSearch"));
 
     let app = tauri::Builder::default()
         // First, as its docs require: a second launch must exit before `setup`

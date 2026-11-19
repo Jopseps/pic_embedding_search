@@ -240,7 +240,9 @@ impl Runtime{
         let _ = std::fs::remove_dir_all(&cache);
         outcome?;
 
-        report(Progress::Step("Downloading the search model".into()));
+        // The model itself downloads in the app, behind a progress pill; this
+        // is the smoke test that torch and transformers import.
+        report(Progress::Step("Checking the installation".into()));
         let launch = self.launch();
         let mut prefetch = hidden(&launch.program);
         prefetch
