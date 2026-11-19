@@ -31,10 +31,13 @@ Two decisions worth knowing:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from functools import lru_cache
 from io import BytesIO
@@ -311,6 +314,53 @@ def install_hint(engine_id: str | None, langs: Sequence[str] | None = None) -> s
             " Add it with: " + system.tesseract_langs_hint(missing)
         )
     return None
+
+
+# The pip names of the opt-in engines. Imported, not declared, by the engines.
+PYTHON_PACKAGES = {
+    "rapidocr": ("rapidocr_onnxruntime", "rapidocr-onnxruntime"),
+    "easyocr": ("easyocr", "easyocr"),
+}
+
+
+def engine_report(langs: Sequence[str] | None = None) -> dict:
+    """For Settings: is each engine installed, what installs it, and which UI
+    languages tesseract has no data for. Cheap — nothing is loaded."""
+    wanted = [
+        TesseractEngine.LANG_MAP[c] for c in canonical_langs(langs)
+        if c in TesseractEngine.LANG_MAP
+    ]
+    binary = system.find_tesseract()
+    # `uv pip` into this interpreter is what works in a checkout and in the
+    # packaged venv alike; the package ships uv as `picsearch-uv`.
+    uv = "uv" if shutil.which("uv") or not shutil.which("picsearch-uv") else "picsearch-uv"
+    engines = [{
+        "id": "tesseract",
+        "installed": binary is not None,
+        "command": None if binary is not None else system.tesseract_install_hint(wanted),
+    }]
+    for engine_id, (module, package) in PYTHON_PACKAGES.items():
+        installed = importlib.util.find_spec(module) is not None
+        engines.append({
+            "id": engine_id,
+            "installed": installed,
+            "command": (
+                None if installed else f'{uv} pip install --python "{sys.executable}" {package}'
+            ),
+        })
+    missing: dict[str, str] = {}
+    if(binary is not None):
+        have = tesseract_langs(binary)
+        for code, tess in TesseractEngine.LANG_MAP.items():
+            if(tess not in have):
+                missing[code] = system.tesseract_langs_hint([tess])
+    return {"engines": engines, "missingLangs": missing}
+
+
+def forget_installs() -> None:
+    """After the user installed something: re-read what is there."""
+    tesseract_langs.cache_clear()
+    importlib.invalidate_caches()
 
 
 def resolve(engine_id: str | None, langs: Sequence[str] | None = None) -> OcrEngine | None:

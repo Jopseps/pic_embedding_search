@@ -431,3 +431,40 @@ def test_the_embedder_loads_through_the_cache_first(monkeypatch):
         embed.Embedder("siglip2-base-patch16-224", device="cpu").load()
     assert seen == [(transformers.AutoModel, "google/siglip2-base-patch16-224")]
 
+
+
+# -- reveal in the file manager --------------------------------------------------
+
+def test_reveal_selects_every_file_over_dbus(monkeypatch):
+    calls = []
+    monkeypatch.setattr(system, "WINDOWS", False)
+    monkeypatch.setattr(system.shutil, "which", lambda name: "/usr/bin/gdbus")
+    def run(argv, **kw):
+        calls.append(argv)
+        return system.subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(system.subprocess, "run", run)
+    monkeypatch.setattr(system, "_spawn", lambda argv: pytest.fail(f"fell back to {argv}"))
+    files = [Path("/p/a/it's, here.png"), Path("/p/a/b.png"), Path("/p/c/d.png")]
+    assert system.reveal_files(files) == 2   # two folders, two windows
+    uris = calls[0][-2]
+    # Quote and comma are percent-encoded, so the GVariant literal stays intact.
+    assert uris == "['file:///p/a/it%27s%2C%20here.png', 'file:///p/a/b.png', 'file:///p/c/d.png']"
+
+
+def test_reveal_falls_back_to_opening_the_folders(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(system, "WINDOWS", False)
+    monkeypatch.setattr(system.shutil, "which", lambda name: None)
+    monkeypatch.setattr(system, "_spawn", lambda argv: spawned.append(argv) or True)
+    assert system.reveal_files([Path("/p/a/x.png"), Path("/p/a/y.png")]) == 1
+    assert spawned == [["xdg-open", str(Path("/p/a"))]]
+
+
+def test_reveal_on_windows_selects_the_first_file_per_folder(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(system, "WINDOWS", True)
+    monkeypatch.setattr(system, "_spawn", lambda argv: spawned.append(argv) or True)
+    a, b, c = Path("/p/a/x.png"), Path("/p/a/y.png"), Path("/p/c/z.png")
+    assert system.reveal_files([a, b, c]) == 2
+    assert spawned == [f'explorer /select,"{a}"', f'explorer /select,"{c}"']

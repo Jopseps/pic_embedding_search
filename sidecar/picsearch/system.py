@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -128,6 +129,65 @@ def move_to_trash(path: Path) -> None:
     moved. One function so tests can replace it.
     """
     trash_backend()(str(path))
+
+
+# ---------------------------------------------------------------------------
+# File manager
+# ---------------------------------------------------------------------------
+
+def _spawn(argv: list[str] | str) -> bool:
+    try:
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError as exc:
+        log.warning("failed to spawn %s: %s", argv, exc)
+        return False
+
+
+def open_file(path: Path) -> bool:
+    """Open a file in its default app."""
+    if(WINDOWS):
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]  # Windows only
+            return True
+        except OSError as exc:
+            log.warning("failed to open %s: %s", path, exc)
+            return False
+    return _spawn(["xdg-open", str(path)])
+
+
+def reveal_files(files: list[Path]) -> int:
+    """Show files in the file manager with them selected. Returns windows opened.
+
+    Linux asks the file manager over D-Bus (`FileManager1.ShowItems`), which
+    Dolphin, Nautilus, Nemo and Thunar all answer: one call, every file
+    highlighted, one window per folder. Without that service it falls back to
+    opening the folders, unselected. Windows Explorer selects one file per
+    window, so it gets the first file of each folder.
+    """
+    by_dir: dict[Path, list[Path]] = {}
+    for f in files:
+        by_dir.setdefault(f.parent, []).append(f)
+    if(WINDOWS):
+        # One string, not a list: explorer parses its own command line and
+        # does not understand the quoting `subprocess.list2cmdline` produces.
+        return sum(_spawn(f'explorer /select,"{group[0]}"') for group in by_dir.values())
+    gdbus = shutil.which("gdbus")
+    if(gdbus is not None and files):
+        # as_uri percent-encodes quotes and commas, so no name can break the literal.
+        uris = "[" + ", ".join(f"'{f.as_uri()}'" for f in files) + "]"
+        try:
+            done = subprocess.run(
+                [gdbus, "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                 "--object-path", "/org/freedesktop/FileManager1",
+                 "--method", "org.freedesktop.FileManager1.ShowItems", uris, ""],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            )
+            if(done.returncode == 0):
+                return len(by_dir)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("FileManager1.ShowItems failed: %s", exc)
+    return sum(_spawn(["xdg-open", str(d)]) for d in by_dir)
 
 
 # ---------------------------------------------------------------------------

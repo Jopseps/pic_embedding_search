@@ -236,3 +236,33 @@ def test_tesseract_runs_with_the_callers_environment(monkeypatch):
     assert engine.read(Image.new("L", (8, 8))) == "hello"
     assert seen["TESSDATA_PREFIX"] == "/somewhere/tessdata"
     assert seen["OMP_THREAD_LIMIT"] == "1"
+
+
+# -- the Settings report -----------------------------------------------------------
+
+def test_engine_report_names_what_is_missing_and_how_to_get_it(monkeypatch):
+    from picsearch import ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module.system, "find_tesseract", lambda binary="x": "/bin/tesseract")
+    monkeypatch.setattr(ocr_module, "tesseract_langs", lambda binary: frozenset({"eng", "osd"}))
+    monkeypatch.setattr(ocr_module.importlib.util, "find_spec", lambda name: None)
+    report = ocr_module.engine_report(["en", "tr"])
+    rows = {e["id"]: e for e in report["engines"]}
+    assert rows["tesseract"] == {"id": "tesseract", "installed": True, "command": None}
+    assert rows["rapidocr"]["installed"] is False
+    command = rows["rapidocr"]["command"]
+    assert "pip install" in command and "rapidocr-onnxruntime" in command
+    # Every UI language without data is listed, checked or not; English has it.
+    assert "en" not in report["missingLangs"]
+    assert set(report["missingLangs"]) == {"tr", "de", "es", "fr", "ja"}
+    assert "tur" in report["missingLangs"]["tr"]
+
+
+def test_engine_report_without_tesseract_gives_the_install_command(monkeypatch):
+    from picsearch import ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module.system, "find_tesseract", lambda binary="tesseract": None)
+    report = ocr_module.engine_report(["en", "tr"])
+    tess = next(e for e in report["engines"] if e["id"] == "tesseract")
+    assert tess["installed"] is False and "tesseract" in tess["command"]
+    assert report["missingLangs"] == {}
