@@ -5,6 +5,7 @@ import { Chip, CheckRow, SectionLabel } from "./ui";
 import type { DatePreset, DimsFilter, LibraryView, PhotoKind } from "../lib/types";
 import type { MessageKey } from "../lib/i18n";
 import { useT } from "../lib/i18n/useT";
+import { Icon, type IconName } from "./Icon";
 
 const DATE_PRESETS: { key: DatePreset; label: MessageKey }[] = [
     { key: "today", label: "filters.today" },
@@ -114,12 +115,13 @@ export const Sidebar = memo(function Sidebar(){
 });
 
 function NavRow(props: {
+    icon: IconName;
     label: string;
     active: boolean;
     count?: number;
     onClick: () => void;
 }){
-    const { label, active, count, onClick } = props;
+    const { icon, label, active, count, onClick } = props;
     return (
         <button
             type="button"
@@ -129,7 +131,10 @@ function NavRow(props: {
                 (active ? "bg-accent-muted text-accent-text" : "text-fg-dim hover:bg-hover")
             }
         >
-            <span>{label}</span>
+            <span className="flex items-center gap-[calc(10px*var(--ui-scale))]">
+                <Icon name={icon} />
+                {label}
+            </span>
             {count !== undefined ? (
                 <span
                     className={
@@ -165,24 +170,28 @@ function LibrarySection(){
                     type="button"
                     onClick={toggleSidebar}
                     aria-label={t("sidebar.collapse")}
-                    className="cursor-pointer text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
+                    title={t("sidebar.collapse")}
+                    className="flex cursor-pointer rounded-full p-[calc(3px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg"
                 >
-                    ◀
+                    <Icon name="left_panel_close" size={18} />
                 </button>
             </div>
             <NavRow
+                icon="photo_library"
                 label={t("sidebar.all")}
                 active={isActive("all")}
                 count={counts.library}
                 onClick={() => setLibraryView("all")}
             />
             <NavRow
+                icon="schedule"
                 label={t("sidebar.recent")}
                 active={isActive("recent")}
                 count={counts.recent}
                 onClick={() => setLibraryView("recent")}
             />
             <NavRow
+                icon="filter_none"
                 label={t("sidebar.duplicates")}
                 active={isActive("dupes")}
                 count={counts.dupes}
@@ -235,7 +244,10 @@ function CollectionsSection(){
                         onClick={() => setActive(c.id)}
                         className="flex flex-1 cursor-pointer items-center justify-between gap-2 overflow-hidden px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))]"
                     >
-                        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{c.name}</span>
+                        <span className="flex min-w-0 items-center gap-[calc(10px*var(--ui-scale))]">
+                            <Icon name="photo_album" />
+                            <span className="overflow-hidden text-ellipsis whitespace-nowrap">{c.name}</span>
+                        </span>
                         {counts[c.id] !== undefined && counts[c.id]! > 0 ? (
                             <span className="shrink-0 text-[calc(11px*var(--ui-scale))] tabular-nums text-fg-faint">
                                 {fmtCount(counts[c.id]!)}
@@ -253,10 +265,10 @@ function CollectionsSection(){
                             "mr-1 cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-[calc(11px*var(--ui-scale))] hover:bg-hover " +
                             (pendingDelete === c.id
                                 ? "block text-danger"
-                                : "hidden text-[calc(13px*var(--ui-scale))] text-fg-faint hover:text-fg group-hover:block")
+                                : "hidden text-fg-faint hover:text-fg group-hover:flex")
                         }
                     >
-                        {pendingDelete === c.id ? t("sidebar.deleteQuestion") : "×"}
+                        {pendingDelete === c.id ? t("sidebar.deleteQuestion") : <Icon name="close" size={16} />}
                     </button>
                 </div>
             ))}
@@ -281,8 +293,9 @@ function CollectionsSection(){
                 <button
                     type="button"
                     onClick={start}
-                    className="w-full cursor-pointer rounded-md px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
+                    className="flex w-full cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] rounded-md px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg-dim"
                 >
+                    <Icon name="add" />
                     {t("sidebar.newCollection")}
                 </button>
             )}
@@ -314,16 +327,17 @@ function SavedSearchesSection(){
                         title={s.query}
                         className="flex flex-1 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] overflow-hidden px-2 py-[calc(7px*var(--ui-scale))] text-left text-[calc(13px*var(--ui-scale))]"
                     >
-                        <span className="text-[calc(11px*var(--ui-scale))] text-fg-faint">⌕</span>
+                        <Icon name="search" className="text-fg-faint" />
                         <span className="overflow-hidden text-ellipsis whitespace-nowrap">{s.query}</span>
                     </button>
                     <button
                         type="button"
                         title={t("sidebar.deleteSavedSearch")}
                         onClick={() => void remove(s.id)}
-                        className="mr-1 hidden cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg group-hover:block"
+                        aria-label={t("sidebar.deleteSavedSearch")}
+                        className="mr-1 hidden cursor-pointer rounded px-[calc(6px*var(--ui-scale))] py-[calc(2px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg group-hover:flex"
                     >
-                        ×
+                        <Icon name="close" size={16} />
                     </button>
                 </div>
             ))}
@@ -345,7 +359,7 @@ function FilterGroup(props: {
                 className="flex w-full cursor-pointer items-center justify-between px-2 py-[calc(6px*var(--ui-scale))] text-[calc(13px*var(--ui-scale))] text-fg-dim hover:text-fg"
             >
                 <span>{props.title}</span>
-                <span className="text-[calc(10px*var(--ui-scale))] text-fg-faint">{props.open ? "▾" : "▸"}</span>
+                <Icon name={props.open ? "keyboard_arrow_down" : "chevron_right"} size={18} className="text-fg-faint" />
             </button>
             {props.open ? <div className="px-2 pt-1 pb-[calc(10px*var(--ui-scale))]">{props.children}</div> : null}
         </div>
@@ -409,9 +423,10 @@ function DateField(props: { label: string; clearLabel: string; value: string | n
                         onCommit(null);
                     }}
                     aria-label={clearLabel}
-                    className="cursor-pointer px-[calc(2px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-faint hover:text-fg"
+                    title={clearLabel}
+                    className="flex cursor-pointer px-[calc(2px*var(--ui-scale))] text-fg-faint hover:text-fg"
                 >
-                    ✕
+                    <Icon name="close" size={16} />
                 </button>
             ) : null}
         </label>

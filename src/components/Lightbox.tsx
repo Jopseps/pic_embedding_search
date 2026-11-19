@@ -4,6 +4,7 @@ import { describeError, useStore } from "../lib/store";
 import { api } from "../lib/api";
 import { dateLabel } from "../lib/format";
 import type { Photo } from "../lib/types";
+import { Icon, type IconName } from "./Icon";
 
 const MAX_W = 1100;
 const MAX_H = 720;
@@ -375,9 +376,10 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         type="button"
                         onClick={close}
                         aria-label={t("lightbox.close")}
-                        className="cursor-pointer text-[calc(18px*var(--ui-scale))] text-white opacity-85 hover:opacity-100"
+                        title={t("lightbox.close")}
+                        className="flex cursor-pointer rounded-full p-[calc(8px*var(--ui-scale))] text-white opacity-85 hover:bg-white/10 hover:opacity-100"
                     >
-                        ✕
+                        <Icon name="close" size={24} />
                     </button>
                     <div className="flex items-center gap-4">
                         {zoomed ? (
@@ -394,9 +396,9 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             onClick={toggleFullscreen}
                             title={t("lightbox.fullscreenTitle")}
                             aria-label={t("lightbox.fullscreen")}
-                            className="cursor-pointer text-[calc(14px*var(--ui-scale))] text-white/60 hover:text-white"
+                            className="flex cursor-pointer rounded-full p-[calc(8px*var(--ui-scale))] text-white/60 hover:bg-white/10 hover:text-white"
                         >
-                            ⛶
+                            <Icon name="fullscreen" size={22} />
                         </button>
                         <span className="text-[calc(12.5px*var(--ui-scale))] tabular-nums text-white/60">
                             {index + 1} / {props.flat.length}
@@ -411,9 +413,10 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         type="button"
                         onClick={() => step(-1, props.flat.length)}
                         aria-label={t("lightbox.previous")}
-                        className="flex-shrink-0 cursor-pointer p-[calc(10px*var(--ui-scale))] text-[calc(26px*var(--ui-scale))] text-white opacity-70 hover:opacity-100"
+                        title={t("lightbox.previous")}
+                        className="flex flex-shrink-0 cursor-pointer rounded-full bg-white/[0.06] p-[calc(8px*var(--ui-scale))] text-white opacity-70 hover:bg-white/15 hover:opacity-100"
                     >
-                        ◀
+                        <Icon name="chevron_left" size={32} />
                     </button>
                 ) : null}
 
@@ -482,9 +485,10 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         type="button"
                         onClick={() => step(1, props.flat.length)}
                         aria-label={t("lightbox.next")}
-                        className="flex-shrink-0 cursor-pointer p-[calc(10px*var(--ui-scale))] text-[calc(26px*var(--ui-scale))] text-white opacity-70 hover:opacity-100"
+                        title={t("lightbox.next")}
+                        className="flex flex-shrink-0 cursor-pointer rounded-full bg-white/[0.06] p-[calc(8px*var(--ui-scale))] text-white opacity-70 hover:bg-white/15 hover:opacity-100"
                     >
-                        ▶
+                        <Icon name="chevron_right" size={32} />
                     </button>
                 ) : null}
             </div>
@@ -508,9 +512,11 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         <button
                             type="button"
                             onClick={toggleStrip}
-                            className="flex-shrink-0 cursor-pointer text-[calc(11px*var(--ui-scale))] text-white/50 hover:text-white/80"
+                            aria-label={t("lightbox.hide")}
+                            title={t("lightbox.hide")}
+                            className="flex flex-shrink-0 cursor-pointer rounded-full p-[calc(4px*var(--ui-scale))] text-white/50 hover:bg-white/10 hover:text-white/80"
                         >
-                            {t("lightbox.hide")} ▾
+                            <Icon name="keyboard_arrow_down" />
                         </button>
                     </div>
 
@@ -530,11 +536,14 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         <button
                             type="button"
                             onClick={() => void findSimilar(photo)}
-                            className="cursor-pointer rounded-lg border-none bg-accent px-4 py-[calc(9px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] font-semibold text-white hover:opacity-90"
+                            aria-label={t("lightbox.findSimilar")}
+                            title={t("lightbox.findSimilar")}
+                            className="flex cursor-pointer rounded-full border-none bg-accent p-[calc(10px*var(--ui-scale))] text-white hover:opacity-90"
                         >
-                            {t("lightbox.findSimilar")}
+                            <Icon name="image_search" />
                         </button>
                         <GhostAction
+                            icon="open_in_new"
                             label={t("lightbox.open")}
                             onClick={() => {
                                 api.openExternally(photo.id).then(
@@ -544,6 +553,7 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                             }}
                         />
                         <GhostAction
+                            icon="folder_open"
                             label={t("lightbox.reveal")}
                             onClick={() => {
                                 api.revealInFiles([photo.id]).then(
@@ -554,7 +564,8 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                         />
                         <div className="relative">
                             <GhostAction
-                                label={`${t("lightbox.addToCollection")} ${collectionsOpen ? "▾" : "▴"}`}
+                                icon="library_add"
+                                label={t("lightbox.addToCollection")}
                                 onClick={() => setCollectionsOpen((v) => !v)}
                             />
                             {collectionsOpen ? (
@@ -577,13 +588,11 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                                 </div>
                             ) : null}
                         </div>
-                        <button
-                            type="button"
+                        <GhostAction
+                            icon={isSelected ? "check_circle_fill" : "radio_button_unchecked"}
+                            label={t(isSelected ? "grid.deselect" : "grid.select")}
                             onClick={() => toggleSelect(photo.id)}
-                            className="cursor-pointer text-[calc(11.5px*var(--ui-scale))] text-white/40 hover:text-white/70"
-                        >
-                            {t(isSelected ? "grid.deselect" : "grid.select")}
-                        </button>
+                        />
                     </div>
                 </div>
             ) : null}
@@ -592,23 +601,28 @@ export const Lightbox = memo(function Lightbox(props: { flat: Photo[] }){
                 <button
                     type="button"
                     onClick={toggleStrip}
-                    className="absolute bottom-4 left-1/2 -translate-x-1/2 cursor-pointer rounded-md bg-white/10 px-3 py-[calc(6px*var(--ui-scale))] text-[calc(11px*var(--ui-scale))] text-white/50 hover:text-white/80"
+                    aria-label={t("lightbox.showInfo")}
+                    title={t("lightbox.showInfo")}
+                    className="absolute bottom-4 left-1/2 flex -translate-x-1/2 cursor-pointer rounded-full bg-white/10 p-[calc(8px*var(--ui-scale))] text-white/50 hover:text-white/80"
                 >
-                    {t("lightbox.showInfo")} ▴
+                    <Icon name="info" />
                 </button>
             ) : null}
         </div>
     );
 });
 
-function GhostAction(props: { label: string; onClick: () => void }){
+/** Icon only; the label is the tooltip and what a screen reader says. */
+function GhostAction(props: { icon: IconName; label: string; onClick: () => void }){
     return (
         <button
             type="button"
             onClick={props.onClick}
-            className="cursor-pointer rounded-lg border border-white/20 bg-white/[0.06] px-4 py-[calc(9px*var(--ui-scale))] text-[calc(12.5px*var(--ui-scale))] text-white hover:bg-white/10"
+            aria-label={props.label}
+            title={props.label}
+            className="flex cursor-pointer rounded-full border border-white/20 bg-white/[0.06] p-[calc(9px*var(--ui-scale))] text-white hover:bg-white/15"
         >
-            {props.label}
+            <Icon name={props.icon} />
         </button>
     );
 }

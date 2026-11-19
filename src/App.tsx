@@ -10,6 +10,7 @@ import { Lightbox } from "./components/Lightbox";
 import { TrashDialog } from "./components/TrashDialog";
 import { listenFileDrop } from "./lib/tauri";
 import { useT } from "./lib/i18n/useT";
+import { Icon } from "./components/Icon";
 
 export default function App(){
     const t = useT();
@@ -41,6 +42,7 @@ export default function App(){
     const loadSettings = useStore((s) => s.loadSettings);
     const loadCounts = useStore((s) => s.loadCounts);
     const loadStorage = useStore((s) => s.loadStorage);
+    const loadModels = useStore((s) => s.loadModels);
     const runSearch = useStore((s) => s.runSearch);
     const startEventStream = useStore((s) => s.startEventStream);
     const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -54,9 +56,11 @@ export default function App(){
         void loadSettings();
         void loadCounts();
         void loadStorage();
+        // A first run's model download starts before the event stream connects.
+        void loadModels();
         void runSearch();
     }, [loadFolders, loadCollections, loadSavedSearches, loadSettings, loadCounts,
-        loadStorage, runSearch]);
+        loadStorage, loadModels, runSearch]);
 
     useEffect(() => {
         document.documentElement.setAttribute("data-theme", resolvedTheme);
@@ -454,9 +458,10 @@ export default function App(){
                         type="button"
                         onClick={toggleSidebar}
                         aria-label={t("app.expandSidebar")}
-                        className="absolute top-2 left-1 z-[5] flex h-[calc(22px*var(--ui-scale))] w-[calc(22px*var(--ui-scale))] cursor-pointer items-center justify-center rounded-[calc(5px*var(--ui-scale))] border border-edge bg-raised text-[calc(10px*var(--ui-scale))] text-fg-faint hover:text-fg"
+                        title={t("app.expandSidebar")}
+                        className="absolute top-2 left-1 z-[5] flex cursor-pointer items-center justify-center rounded-full border border-edge bg-raised p-[calc(4px*var(--ui-scale))] text-fg-faint hover:text-fg"
                     >
-                        ▶
+                        <Icon name="left_panel_open" size={18} />
                     </button>
                 ) : null}
 
