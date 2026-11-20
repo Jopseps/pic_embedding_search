@@ -264,5 +264,5 @@ def test_engine_report_without_tesseract_gives_the_install_command(monkeypatch):
     monkeypatch.setattr(ocr_module.system, "find_tesseract", lambda binary="tesseract": None)
     report = ocr_module.engine_report(["en", "tr"])
     tess = next(e for e in report["engines"] if e["id"] == "tesseract")
-    assert tess["installed"] is False and "tesseract" in tess["command"]
+    assert tess["installed"] is False and "tesseract" in tess["command"].lower()
     assert report["missingLangs"] == {}

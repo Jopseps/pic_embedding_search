@@ -11,7 +11,7 @@ import os
 import shutil
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from fastapi.testclient import TestClient
@@ -445,7 +445,8 @@ def test_reveal_selects_every_file_over_dbus(monkeypatch):
 
     monkeypatch.setattr(system.subprocess, "run", run)
     monkeypatch.setattr(system, "_spawn", lambda argv: pytest.fail(f"fell back to {argv}"))
-    files = [Path("/p/a/it's, here.png"), Path("/p/a/b.png"), Path("/p/c/d.png")]
+    # PurePosixPath: this test plays Linux; a WindowsPath("/p/..") has no drive, as_uri() raises.
+    files = [PurePosixPath(p) for p in ("/p/a/it's, here.png", "/p/a/b.png", "/p/c/d.png")]
     assert system.reveal_files(files) == 2   # two folders, two windows
     uris = calls[0][-2]
     # Quote and comma are percent-encoded, so the GVariant literal stays intact.
