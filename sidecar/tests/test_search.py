@@ -940,32 +940,64 @@ def _hits(scores):
     return [(i, s) for i, s in enumerate(scores)]
 
 
-def test_cutoff_keeps_what_stands_clear_of_the_pack():
-    # 3 clear hits over 27 images that score like noise around 0.05.
-    ranked = _hits([0.30, 0.28, 0.27] + [0.06 - 0.001 * n for n in range(27)])
-    assert [i for i, _ in strong_matches(ranked, 50)] == [0, 1, 2]
+# Noise: 40 images wobbling around 0.05, the way unrelated photos score.
+_NOISE = [0.06 - 0.0005 * n for n in range(40)]
 
 
-def test_cutoff_zero_keeps_everything():
-    ranked = _hits([0.3 - 0.01 * n for n in range(25)])
-    assert strong_matches(ranked, 0) == ranked
+def test_smart_cuts_at_a_clear_gap():
+    # 3 clear hits over the noise: "cat" with three cats in the library.
+    ranked = _hits([0.30, 0.28, 0.27] + _NOISE)
+    assert [i for i, _ in strong_matches(ranked, "smart")] == [0, 1, 2]
 
 
-def test_cutoff_leaves_a_small_candidate_set_alone():
+def test_smart_keeps_a_broad_head():
+    # A vague query with 30 decent hits keeps all 30, not a fixed count.
+    ranked = _hits([0.25 - 0.001 * n for n in range(30)] + _NOISE)
+    assert len(strong_matches(ranked, "smart")) == 30
+
+
+def test_smart_flat_scores_fall_back_to_the_median_floor():
+    # Nothing stands out: the matches are the typical image ("code editor" over
+    # a screenshot folder). The outlier rule alone would keep nothing.
+    ranked = _hits([0.30 - 0.001 * n for n in range(60)])
+    kept = strong_matches(ranked, "smart")
+    median = ranked[30][1]
+    assert kept == [h for h in ranked if h[1] >= median + (ranked[0][1] - median) * 0.5]
+    assert 0 < len(kept) < len(ranked)
+
+
+def test_smart_never_keeps_fewer_than_three():
+    # One outlier, then noise: the next two stay so the grid is never blank.
+    ranked = _hits([0.30] + _NOISE)
+    assert [i for i, _ in strong_matches(ranked, "smart")] == [0, 1, 2]
+
+
+def test_cutoff_leaves_too_few_candidates_alone():
     ranked = _hits([0.9, 0.1, 0.05])
-    assert strong_matches(ranked, 100) == ranked
+    assert strong_matches(ranked, "smart") == ranked
+    assert strong_matches(ranked, "threshold", 100) == ranked
 
 
-def test_cutoff_is_monotonic_in_strictness():
-    ranked = _hits([0.3 - 0.01 * n for n in range(25)])
-    sizes = [len(strong_matches(ranked, s)) for s in (0, 25, 50, 75, 100)]
-    assert sizes == sorted(sizes, reverse=True) and sizes[-1] >= 1
+def test_cutoff_off_keeps_everything():
+    ranked = _hits([0.30, 0.28, 0.27] + _NOISE)
+    assert strong_matches(ranked, "off") == ranked
+
+
+def test_threshold_is_monotonic_in_strictness():
+    ranked = _hits([0.30, 0.25, 0.2, 0.15] + _NOISE)
+    sizes = [len(strong_matches(ranked, "threshold", s)) for s in (0, 25, 50, 75, 100)]
+    assert sizes == sorted(sizes, reverse=True)
+
+
+def test_threshold_can_honestly_return_nothing():
+    # Every hit is noise: a strict threshold keeps none, there is no minimum.
+    assert strong_matches(_hits(_NOISE), "threshold", 100) == []
 
 
 def test_cutoff_ignores_non_finite_scores():
     # A NaN top score used to make the floor NaN, and nothing compares >= NaN.
-    ranked = _hits([float("nan"), 0.30, 0.28, 0.27] + [0.06 - 0.001 * n for n in range(26)])
-    assert [i for i, _ in strong_matches(ranked, 50)] == [1, 2, 3]
+    ranked = _hits([float("nan"), 0.30, 0.28, 0.27] + _NOISE)
+    assert [i for i, _ in strong_matches(ranked, "smart")] == [1, 2, 3]
 
 
 # -- trash backend ---------------------------------------------------------

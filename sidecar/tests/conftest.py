@@ -41,6 +41,23 @@ def _no_real_trash(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_fonts(tmp_path, monkeypatch):
+    """No test may touch the user's font folder, the registry or the network.
+    A test of the install path replaces `fonts.fetch` itself."""
+    from picsearch import fonts, system
+
+    monkeypatch.setenv("PICSEARCH_FONTS_DIR", str(tmp_path / "user-fonts"))
+
+    def refuse(url):
+        raise AssertionError(f"a test tried to download {url} for real")
+
+    monkeypatch.setattr(fonts, "fetch", refuse)
+    monkeypatch.setattr(system, "register_fonts", lambda files: None)
+    monkeypatch.setattr(system, "unregister_fonts", lambda files: None)
+    monkeypatch.setattr(system, "fonts_removed", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _weights_are_present(monkeypatch):
     """Tests have no HuggingFace cache. Without this a model switch would start
     a real multi-gigabyte download. A test of the download path itself replaces
