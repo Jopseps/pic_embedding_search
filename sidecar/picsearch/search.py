@@ -230,10 +230,12 @@ class SearchParams:
     date_from: str | None = None
     date_to: str | None = None
     sorted_keep: int = DEFAULT_SORTED_KEEP
-    # How far above the pack a visual hit must score to count as a match, 0-100
-    # (`matchStrictness` in config.toml). 0 keeps every image, as before.
-    strictness: int = 0
-    # The "show less relevant" request: ignore `strictness` and rank everything.
+    # How the visual leg is cut, one of MATCH_MODES (`matchMode` in config.toml).
+    # Off here so a bare SearchParams ranks everything; the server sends the setting.
+    match_mode: str = "off"
+    # Threshold mode's floor, 0-100 (`matchStrictness`). See `strong_matches`.
+    strictness: int = 50
+    # The "show less relevant" request: ignore the cutoff and rank everything.
     weak: bool = False
 
     @property
@@ -427,29 +429,57 @@ def fts_search(
 
 # Below this many candidates the median is not a baseline, it is just another hit.
 CUTOFF_MIN_CANDIDATES = 20
+# `matchMode` in config.toml. Off ranks every image, as before the cutoff.
+MATCH_MODES = ("smart", "threshold", "off")
+# Smart keeps a hit this many noise widths above the query's typical score. Tuned
+# on a real 510-photo library: 3.5 keeps the 3 cats for "cat" and drops "bardak"
+# (no glass in it) to 2, where the old floor showed 46 photos of nothing.
+SMART_Z = 3.5
+# When even the best hit is under this, nothing stands out because the matches
+# *are* the typical image — "code editor" over a screenshot folder peaked at 1.6.
+# Smart then falls back to the old floor, halfway from the median to the top.
+SMART_FLAT_Z = 2.5
+# Smart never leaves the visual leg with fewer than this.
+SMART_MIN_KEEP = 3
+# Threshold mode's 100%: this many noise widths above the typical score.
+THRESHOLD_FULL_Z = 6.0
 
 
 def strong_matches(
-    ranked: list[tuple[int, float]], strictness: int
+    ranked: list[tuple[int, float]], mode: str, strictness: int = 50
 ) -> list[tuple[int, float]]:
     """The head of a best-first cosine list that stands clear of the pack.
 
-    The floor sits `strictness`% of the way from the median score up to the top
-    one. Not a fixed cosine: SigLIP's scores bunch near 0.1 and shift per model,
-    language and query, and a floor measured against the top alone cuts "flower"
-    to four photos while keeping a vague "build failed" at a hundred. The median
-    is what the query scores on an image that has nothing to do with it.
+    Never a fixed cosine: SigLIP's scores bunch near 0.1 and shift per model,
+    language and query. The yardstick is the query's own noise — the median is
+    what it scores on an image that has nothing to do with it, the MAD is how
+    much that wobbles — so a hit "z noise widths above typical" means the same
+    for "cat", "kedi" and a different model. SigLIP's own sigmoid probability
+    is no use here: real cats scored 0.2% on it.
+
+    Threshold maps `strictness` 0-100 onto 0-THRESHOLD_FULL_Z noise widths.
     """
-    if(strictness <= 0 or len(ranked) < CUTOFF_MIN_CANDIDATES):
+    if(mode not in ("smart", "threshold")):
         return ranked
     # A non-finite score would make the floor NaN, and every comparison against
     # NaN is false: the cutoff would return nothing at all.
     ranked = [hit for hit in ranked if math.isfinite(hit[1])]
-    if(not ranked):
+    if(len(ranked) < CUTOFF_MIN_CANDIDATES):
         return ranked
-    median = ranked[len(ranked) // 2][1]
-    floor = median + (ranked[0][1] - median) * min(100, strictness) / 100.0
-    return [hit for hit in ranked if hit[1] >= floor]
+    scores = np.array([s for _, s in ranked])
+    median = float(np.median(scores))
+    noise = float(np.median(np.abs(scores - median))) * 1.4826  # MAD -> std dev
+
+    if(mode == "threshold"):
+        z = THRESHOLD_FULL_Z * min(100, max(0, strictness)) / 100.0
+        return [hit for hit in ranked if hit[1] >= median + z * noise]
+
+    top_z = (ranked[0][1] - median) / noise if noise > 0 else 0.0
+    if(top_z < SMART_FLAT_Z):
+        floor = median + (ranked[0][1] - median) * 0.5
+        return [hit for hit in ranked if hit[1] >= floor]
+    kept = [hit for hit in ranked if hit[1] >= median + SMART_Z * noise]
+    return kept if len(kept) >= SMART_MIN_KEEP else ranked[:SMART_MIN_KEEP]
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +680,7 @@ class Searcher:
         # Two ranked lists, fused by rank. The text leg is usually short or
         # empty; when it fires, an OCR hit at rank 1 outranks a mediocre
         # visual match no matter what their raw scores look like.
-        cut = params.strictness > 0 and not params.weak
+        cut = params.match_mode in ("smart", "threshold") and not params.weak
         vector_ranked = self._vector_search(query, candidates, backend, full=cut)
         text_ranked, snippets = fts_search(self.store, query, candidates)
         weights = leg_weights(params.text_weight)
@@ -661,7 +691,7 @@ class Searcher:
         if(cut):
             # Only the visual leg is cut. A photo whose OCR text matches the
             # query is a match whatever its cosine says.
-            kept = strong_matches(vector_ranked, params.strictness)
+            kept = strong_matches(vector_ranked, params.match_mode, params.strictness)
             ranked = rrf_merge([[i for i, _ in kept], text_ranked], weights=weights)
         weak = len(everything) - len(ranked)
         if(params.order != RELEVANCE):

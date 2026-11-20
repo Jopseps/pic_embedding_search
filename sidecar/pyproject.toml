@@ -17,6 +17,9 @@ dependencies = [
     "protobuf>=5.28",
     "watchdog>=6.0",
     "send2trash>=1.8",
+    # The font Install button. Already pulled in by huggingface_hub; named here
+    # because fonts.py imports it directly.
+    "httpx>=0.27",
     # send2trash only uses the Recycle Bin API that refuses to delete for good
     # when this is importable; without it Windows falls back to a call that
     # deletes permanently if the bin cannot take the file.

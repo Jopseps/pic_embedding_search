@@ -1,7 +1,7 @@
 """Everything that differs between the operating systems the app ships on.
 
 Kept in one module so the rest of the sidecar never branches on
-`sys.platform` itself. Three things live here:
+`sys.platform` itself. Four things live here:
 
 * **Is a pid alive.** `os.kill(pid, 0)` is the POSIX idiom and it is *not* one
   on Windows: there signal 0 is `CTRL_C_EVENT`, so the probe either raises an
@@ -11,6 +11,8 @@ Kept in one module so the rest of the sidecar never branches on
   Windows uses, does not put itself on PATH.
 * **What to tell the user to run.** A `pacman` command is noise on Ubuntu and
   gibberish on Windows.
+* **Where user fonts go and how the OS learns about them.** fontconfig on
+  Linux, the HKCU registry and `AddFontResourceW` on Windows.
 """
 
 from __future__ import annotations
@@ -262,3 +264,84 @@ def tesseract_langs_hint(langs: list[str]) -> str:
     if(family == "fedora"):
         return "sudo dnf install " + " ".join("tesseract-langpack-" + c for c in langs)
     return "install the tesseract " + "+".join(langs) + " language data"
+
+
+# ---------------------------------------------------------------------------
+# User fonts
+# ---------------------------------------------------------------------------
+
+def user_fonts_dir() -> Path:
+    """Where the app puts fonts it installs. No admin rights on either OS.
+
+    Linux gets its own subfolder, so nothing outside it is ever ours. Windows
+    has one per-user Fonts folder shared with its own "Install for me"; there
+    `fonts.py` prefixes every file instead.
+    """
+    override = os.environ.get("PICSEARCH_FONTS_DIR")
+    if(override):
+        return Path(override)
+    if(WINDOWS):
+        return Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "Windows" / "Fonts"
+    data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(data) / "fonts" / "picsearch"
+
+
+# HKCU, not HKLM: a per-user install needs no admin and is what Windows itself
+# writes for "Install for me".
+_FONTS_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
+
+
+def register_fonts(files: list[Path]) -> None:
+    """Tell the OS about font files just written into `user_fonts_dir()`."""
+    if(WINDOWS):
+        _windows_fonts(files, add=True)
+        return
+    _fc_cache()
+
+
+def unregister_fonts(files: list[Path]) -> None:
+    """The reverse of `register_fonts`, called *before* the files are deleted:
+    Windows will not let go of a file that is still loaded."""
+    if(WINDOWS):
+        _windows_fonts(files, add=False)
+
+
+def fonts_removed() -> None:
+    if(not WINDOWS):
+        _fc_cache()
+
+
+def _fc_cache() -> None:
+    # Skipped where missing: fontconfig rescans on its own schedule anyway, this
+    # only makes the font visible to newly started apps right away.
+    binary = shutil.which("fc-cache")
+    if(binary is None):
+        return
+    try:
+        subprocess.run([binary, "-f", str(user_fonts_dir())], timeout=30, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("fc-cache failed: %s", exc)
+
+
+def _windows_fonts(files: list[Path], add: bool) -> None:
+    import ctypes
+    import winreg
+
+    gdi32 = ctypes.windll.gdi32
+    # Create, not open: a profile that never had a per-user font has no such key.
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _FONTS_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        for path in files:
+            # The value name is display only; the file stem keeps it unique.
+            name = f"{path.stem} (TrueType)"
+            if(add):
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, str(path))
+                gdi32.AddFontResourceW(str(path))
+            else:
+                gdi32.RemoveFontResourceW(str(path))
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+    # HWND_BROADCAST, WM_FONTCHANGE, SMTO_ABORTIFHUNG: running apps re-read fonts.
+    ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001D, 0, 0, 0x0002, 1000, None)

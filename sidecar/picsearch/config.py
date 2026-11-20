@@ -63,8 +63,12 @@ DEFAULTS: dict[str, Any] = {
     "pageSize": 200,
     "searchDebounceMs": 220,
     "textWeight": 50,
-    # How far above the pack a photo has to score to count as a match, 0-100.
-    # 0 returns every image, ranked. Read by `Searcher.search`.
+    # How the visual matches are cut: "smart" (per query), "threshold" (the
+    # percent below) or "off" (every image, ranked). A config.toml written before
+    # this key existed gets "smart" from here. Read by `Searcher.search`.
+    "matchMode": "smart",
+    # Threshold mode's floor, 0-100: 0 = a typical unrelated photo, 100 = six
+    # noise widths above it. See `search.strong_matches`.
     "matchStrictness": 50,
     # Order and grouping. `sort` is the browse order and is sent with every
     # request; a query starts at relevance regardless, and whatever it is
@@ -73,6 +77,12 @@ DEFAULTS: dict[str, Any] = {
     "sort": "date-desc",
     "groupBy": "month",
     "sortedSearchKeep": 100,
+    # What the search box's panel lists, newest first. The sidecar never reads it.
+    "recentSearches": [],
+    # Ask GitHub for a newer release once per launch. Off: the app makes no
+    # network call of its own until the user clicks "Check for updates".
+    # The sidecar never reads it; the frontend does.
+    "checkUpdatesOnStartup": False,
 }
 
 ALLOWED = set(DEFAULTS)

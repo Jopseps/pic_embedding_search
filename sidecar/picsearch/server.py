@@ -48,12 +48,13 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from . import config, imaging, models, ocr, paths, system
+from . import config, fonts, imaging, models, ocr, paths, system, updates
 from .embed import REGISTRY, Embedder, spec_for
 from .index import EMBED_MAX_EDGE, Indexer
 from .search import (
     DEFAULT_LIMIT,
     DEFAULT_SORTED_KEEP,
+    MATCH_MODES,
     NOW_LOCAL_SQL,
     Searcher,
     SearchParams,
@@ -243,6 +244,7 @@ class AppState:
         self.store.add_delete_listener(lambda ids: self.vectors.remove(ids))
         self.events = EventBus()
         self.downloads = models.Downloads(self.events.publish)
+        self.font_installs = fonts.Installs(self.events.publish)
         # resolve() never raises: an OCR engine that is not installed degrades
         # to no OCR with a warning, rather than a sidecar that will not boot.
         self.ocr = ocr.resolve(self.settings.get("ocrEngineId"), self.settings.get("ocrLangs"))
@@ -665,6 +667,10 @@ def create_app(state: AppState) -> FastAPI:
             # them live and the next query has to answer with them.
             text_weight=_int_setting("textWeight", 50),
             sorted_keep=max(1, _int_setting("sortedSearchKeep", DEFAULT_SORTED_KEEP)),
+            # A hand-edited unknown mode degrades to the default, like `_int_setting`.
+            match_mode=next(
+                (m for m in MATCH_MODES if m == state.settings.get("matchMode")), "smart"
+            ),
             strictness=_int_setting("matchStrictness", 50), weak=weak,
         )
 
@@ -1052,6 +1058,57 @@ def create_app(state: AppState) -> FastAPI:
             ) from exc
         state.events.publish("model-deleted", {"modelId": model_id})
         return {"freed": freed}
+
+    # -- fonts -------------------------------------------------------------
+
+    def _known_font(font_id: str) -> None:
+        if(font_id not in fonts.REGISTRY):
+            raise HTTPException(status_code=404, detail=f"unknown font {font_id!r}")
+
+    @app.get("/fonts", dependencies=[guard])
+    def list_fonts() -> dict:
+        """Which installable fonts the app has put on disk, and the install in
+        flight. A font installed some other way reads as not ours."""
+        return {"fonts": fonts.status(), "download": state.font_installs.current}
+
+    @app.post("/fonts/{font_id}/install", dependencies=[guard])
+    def install_font(font_id: str) -> dict:
+        _known_font(font_id)
+        if(fonts.installed(font_id)):
+            return {"started": False}
+        if(not state.font_installs.start(font_id)):
+            raise HTTPException(status_code=409, detail="another font is installing")
+        return {"started": True}
+
+    @app.delete("/fonts/{font_id}", dependencies=[guard])
+    def remove_font(font_id: str) -> dict:
+        _known_font(font_id)
+        if(state.font_installs.active(font_id)):
+            raise HTTPException(status_code=409, detail="this font is installing")
+        try:
+            fonts.remove(font_id)
+        except PermissionError as exc:
+            # Windows: a running app still has the file open.
+            raise HTTPException(
+                status_code=409, detail="the font is still in use; restart PicSearch and try again"
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"could not remove the font: {exc}"
+            ) from exc
+        return {"removed": True}
+
+    # -- updates -----------------------------------------------------------
+
+    @app.get("/updates/check", dependencies=[guard])
+    def check_updates() -> dict:
+        """`{current, latest, available, ok}`. A failed check is `ok: false`, not an error."""
+        return updates.check()
+
+    @app.post("/updates/open", dependencies=[guard])
+    def open_release_page() -> dict:
+        """Opens the fixed releases page in the browser. Takes no URL from the client."""
+        return {"opened": updates.open_release_page()}
 
     # -- storage -----------------------------------------------------------
 
