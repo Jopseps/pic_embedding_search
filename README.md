@@ -34,7 +34,7 @@ Grab the file for your system from the [latest release](https://github.com/Jopse
 - with an NVIDIA GPU (driver 580+): CUDA PyTorch, about 3 GB plus 1.5 GB of model weights
 - without one: CPU PyTorch, a few hundred MB plus the weights — indexing is roughly 20× slower
 
-After that it starts in a second and never touches the network again. If setup ever breaks, the error screen has a **Reinstall environment** button; the environment lives in `~/.local/share/pic-search/runtime` (Windows: `%LOCALAPPDATA%\pic-search\runtime`) and deleting it is always safe.
+After that it starts in a second and never touches the network on its own. The only exception is **Settings > About > Check for updates**, which asks GitHub for the latest version number when you click it, or at startup if you turn that on (off by default). It never downloads anything by itself. If setup ever breaks, the error screen has a **Reinstall environment** button; the environment lives in `~/.local/share/pic-search/runtime` (Windows: `%LOCALAPPDATA%\pic-search\runtime`) and deleting it is always safe.
 
 **Text inside screenshots needs Tesseract**, which is a system program. The Arch and Debian packages pull it in; elsewhere install it yourself — Settings → *Text in images* tells you the exact command when it is missing:
 

@@ -40,3 +40,6 @@ graphify-out/
 coverage/
 *.tsbuildinfo
 Thumbs.db
+
+.graphify
+graphify_out/
