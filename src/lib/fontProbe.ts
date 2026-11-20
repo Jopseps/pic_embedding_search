@@ -32,6 +32,12 @@ export function primaryFamily(stack: string): string{
     return first.trim().replace(/^["']|["']$/g, "");
 }
 
+/** Forget every answer: after an install or a remove the webview may see a
+ *  different set of fonts. */
+export function clearFontProbe(): void{
+    cache = null;
+}
+
 export function isFontAvailable(stack: string): boolean{
     const family = primaryFamily(stack);
     if(family === "" || GENERIC.has(family) || family.startsWith("-apple-system")

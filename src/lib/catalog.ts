@@ -2,6 +2,7 @@ import type {
     EditorFont,
     EmbeddingModel,
     GroupBy,
+    MatchMode,
     OcrEngine,
     OcrLanguage,
     SearchSort,
@@ -96,11 +97,12 @@ export const OCR_LANGUAGES: OcrLanguage[] = [
 export const DEFAULT_OCR_LANGS = ["en", "tr"];
 
 /**
- * UI fonts. Nothing is bundled and nothing is fetched — this app is offline by
- * design, and a webfont that silently fails to load is exactly the failure mode
- * the rest of the codebase goes out of its way to avoid. Each entry names a
- * family that has to be installed on the machine, with a fallback chain behind
- * it; `SettingsView` checks `document.fonts` and marks the missing ones.
+ * UI fonts. Nothing is bundled, and a webfont that silently fails to load is
+ * exactly the failure mode the rest of the codebase goes out of its way to
+ * avoid. Each entry names a family that has to be installed on the machine,
+ * with a fallback chain behind it; `SettingsView` probes and marks the missing
+ * ones. The four named families have an Install button: keep their ids in
+ * lockstep with `REGISTRY` in `sidecar/picsearch/fonts.py`.
  */
 export const MONO_FALLBACK = "ui-monospace, Menlo, Consolas, monospace";
 
@@ -250,12 +252,21 @@ export const SEARCH_DEBOUNCE_RANGE = { min: 0, max: 800 } as const;
  *  unweighted RRF. See `rrf_merge` in the sidecar. */
 export const DEFAULT_TEXT_WEIGHT = 50;
 
-/** 0 = no cutoff. See `strong_matches` in the sidecar. */
+/** See `strong_matches` in the sidecar. */
+export const DEFAULT_MATCH_MODE: MatchMode = "smart";
+export const MATCH_MODES: MatchMode[] = ["smart", "threshold", "off"];
+/** Threshold mode only: 50 = three noise widths above a typical photo. */
 export const DEFAULT_MATCH_STRICTNESS = 50;
 
 export const DEFAULT_SORT: SortKey = "date-desc";
 export const DEFAULT_GROUP_BY: GroupBy = "month";
 export const DEFAULT_SORTED_SEARCH_KEEP = 100;
+
+/** Off: the app makes no network call of its own until asked. */
+export const DEFAULT_CHECK_UPDATES_ON_STARTUP = false;
+
+/** How many recent searches the search box remembers. */
+export const MAX_RECENT_SEARCHES = 8;
 export const SORTED_SEARCH_KEEPS = [50, 100, 200, 500] as const;
 
 /** The sort menu, in the order it lists them. `relevance` shows only while a

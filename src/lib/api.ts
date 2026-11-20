@@ -6,6 +6,7 @@ import type {
     Photo,
     SavedSearch,
     ModelsResponse,
+    FontsResponse,
     SearchQuery,
     SearchResponse,
     SearchSort,
@@ -15,6 +16,7 @@ import type {
     OcrStatus,
     StorageUsage,
     Timeline,
+    UpdateCheck,
     WatchedFolder,
 } from "./types";
 import { buildMockLibrary, type MockPhoto } from "./mockData";
@@ -33,8 +35,10 @@ import {
     DEFAULT_GROUP_BY,
     DEFAULT_LANGUAGE,
     DEFAULT_SORT,
+    DEFAULT_MATCH_MODE,
     DEFAULT_MATCH_STRICTNESS,
     DEFAULT_SORTED_SEARCH_KEEP,
+    DEFAULT_CHECK_UPDATES_ON_STARTUP,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
     DEFAULT_TINT_STRENGTH,
@@ -79,6 +83,18 @@ export interface PhotoSearchApi{
     downloadModel(id: string): Promise<void>;
     /** Deletes the model's files. Its index data stays. Rejects for the active model. */
     deleteModel(id: string): Promise<void>;
+    /** Which UI fonts the app installed, and the install in flight. */
+    fonts(): Promise<FontsResponse>;
+    /** Starts an install; progress arrives as `font-download` events. False
+     *  when there was nothing to do (the files are already there). */
+    installFont(id: string): Promise<boolean>;
+    /** Removes only the files the app installed. */
+    removeFont(id: string): Promise<void>;
+    /** Asks the sidecar to look for a newer release. Never rejects on a network
+     *  failure: that is `ok: false`. */
+    checkForUpdates(): Promise<UpdateCheck>;
+    /** Opens the releases page in the system browser. The sidecar owns the URL. */
+    openReleasePage(): Promise<void>;
     listCollections(): Promise<Collection[]>;
     createCollection(name: string): Promise<Collection>;
     deleteCollection(id: string): Promise<void>;
@@ -255,10 +271,13 @@ export class MockApi implements PhotoSearchApi{
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        matchMode: DEFAULT_MATCH_MODE,
         matchStrictness: DEFAULT_MATCH_STRICTNESS,
         sort: DEFAULT_SORT,
         groupBy: DEFAULT_GROUP_BY,
         sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
+        recentSearches: [],
+        checkUpdatesOnStartup: DEFAULT_CHECK_UPDATES_ON_STARTUP,
     };
 
     /** The ordered result, before paging — `search` and `timeline` share it. */
@@ -292,7 +311,7 @@ export class MockApi implements PhotoSearchApi{
         // Stand-in for the sidecar's cutoff: the first MOCK_STRONG rows are the
         // matches, the rest wait behind "show less relevant".
         let weak = 0;
-        if(query.q.trim() !== "" && this.settings.matchStrictness > 0 && query.weak !== true){
+        if(query.q.trim() !== "" && this.settings.matchMode !== "off" && query.weak !== true){
             weak = Math.max(0, all.length - MOCK_STRONG);
             all = all.slice(0, MOCK_STRONG);
         }
@@ -464,6 +483,36 @@ export class MockApi implements PhotoSearchApi{
             throw new Error("sidecar 409: this model is in use; switch to another first");
         }
         this.modelFiles.delete(id);
+    }
+
+    /** Font ids the mock has "installed". */
+    private fontFiles = new Set<string>();
+
+    async fonts(): Promise<FontsResponse>{
+        return {
+            fonts: ["jetbrains-mono", "fira-code", "cascadia-code", "ibm-plex-mono"].map((id) => ({
+                id, installed: this.fontFiles.has(id), sizeBytes: 260 * 1024,
+            })),
+            download: null,
+        };
+    }
+
+    async installFont(id: string): Promise<boolean>{
+        this.fontFiles.add(id);
+        return true;
+    }
+
+    async removeFont(id: string): Promise<void>{
+        this.fontFiles.delete(id);
+    }
+
+    async checkForUpdates(): Promise<UpdateCheck>{
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return { current: __APP_VERSION__, latest: "1.0.7", available: true, ok: true };
+    }
+
+    async openReleasePage(): Promise<void>{
+        console.info("[mock] would open the releases page");
     }
 
     async listCollections(): Promise<Collection[]>{
@@ -752,6 +801,27 @@ export class HttpApi implements PhotoSearchApi{
 
     async deleteModel(id: string): Promise<void>{
         await this.req<unknown>(`/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+    }
+
+    fonts(): Promise<FontsResponse>{
+        return this.req<FontsResponse>("/fonts");
+    }
+
+    async installFont(id: string): Promise<boolean>{
+        const res = await this.req<{ started: boolean }>(`/fonts/${encodeURIComponent(id)}/install`, { method: "POST" });
+        return res.started;
+    }
+
+    async removeFont(id: string): Promise<void>{
+        await this.req<unknown>(`/fonts/${encodeURIComponent(id)}`, { method: "DELETE" });
+    }
+
+    checkForUpdates(): Promise<UpdateCheck>{
+        return this.req<UpdateCheck>("/updates/check");
+    }
+
+    async openReleasePage(): Promise<void>{
+        await this.req<unknown>("/updates/open", { method: "POST" });
     }
 
     listCollections(): Promise<Collection[]>{

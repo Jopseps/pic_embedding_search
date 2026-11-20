@@ -23,8 +23,11 @@ import {
     DEFAULT_SELECTION_BORDER,
     DEFAULT_GROUP_BY,
     DEFAULT_SORT,
+    DEFAULT_MATCH_MODE,
     DEFAULT_MATCH_STRICTNESS,
     DEFAULT_SORTED_SEARCH_KEEP,
+    DEFAULT_CHECK_UPDATES_ON_STARTUP,
+    MAX_RECENT_SEARCHES,
     DEFAULT_TEXT_WEIGHT,
     DEFAULT_TINT_HUE,
     DEFAULT_TINT_STRENGTH,
@@ -47,6 +50,8 @@ import type {
     PhotoKind,
     ModelDownload,
     ModelStatus,
+    FontDownload,
+    FontStatus,
     ReindexStatus,
     ResolvedTheme,
     SavedSearch,
@@ -59,6 +64,7 @@ import type {
     ThemePref,
     Timeline,
     UiScale,
+    UpdateState,
     WatchedFolder,
 } from "./types";
 
@@ -190,6 +196,15 @@ interface State{
     modelDownload: (ModelDownload & { transfer: Transfer | null }) | null;
     /** The model whose "delete its files?" card is open. */
     deletingModelId: string | null;
+    /** Installable UI fonts, by id. Empty until the Settings page asks. */
+    fonts: Record<string, FontStatus>;
+    /** The font install in flight, with its speed, like `modelDownload`. */
+    fontDownload: (FontDownload & { transfer: Transfer | null }) | null;
+    /** Where the update check stands. Only a click or the startup toggle moves it off `idle`. */
+    update: UpdateState;
+    /** A Settings section to open on, set by the TopBar's update pill and
+     *  cleared by `SettingsView` the moment it has switched to it. */
+    settingsSection: string | null;
     /** Library-wide counts for the sidebar. Never derived from the current
      *  search, which is what made "All" show the result count instead. */
     counts: LibraryCounts;
@@ -222,6 +237,10 @@ interface Actions{
     setView(v: MainView): void;
 
     setQuery(q: string): void;
+    /** Put a search at the top of the recent list (case-insensitive, no duplicates). */
+    rememberSearch(q: string): void;
+    forgetSearch(q: string): void;
+    clearRecentSearches(): void;
     clearQuery(): void;
     /** `keepLoaded` re-fetches as many rows as are loaded, for refreshes the
      *  user did not ask for — a rescan must not cut a deep scroll to page one. */
@@ -307,6 +326,13 @@ interface Actions{
     askDeleteModel(id: string): void;
     cancelDeleteModel(): void;
     confirmDeleteModel(): Promise<void>;
+    loadFonts(): Promise<void>;
+    installFont(id: string): Promise<void>;
+    removeFont(id: string): Promise<void>;
+    checkForUpdates(): Promise<void>;
+    openReleasePage(): Promise<void>;
+    openSettingsSection(id: string): void;
+    clearSettingsSection(): void;
     loadSettings(): Promise<void>;
     persistSettings(patch: Partial<Settings>): Promise<void>;
     loadCounts(): Promise<void>;
@@ -417,6 +443,32 @@ let mockReindexTimer: ReturnType<typeof setInterval> | undefined;
 const modelRate = new RateTracker();
 /** Mock mode only: stands in for the sidecar's `model-download` events. */
 let mockDownloadTimer: ReturnType<typeof setInterval> | undefined;
+/** Its own tracker, so a font install never resets the model download's speed. */
+const fontRate = new RateTracker();
+let mockFontTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Mock mode only: stands in for the sidecar's `font-download` events. */
+function simulateFontInstall(
+    set: (partial: Partial<State & Actions>) => void,
+    get: () => State & Actions,
+    fontId: string,
+){
+    clearInterval(mockFontTimer);
+    const total = 260 * 1024;
+    let done = 0;
+    fontRate.reset();
+    mockFontTimer = setInterval(() => {
+        done = Math.min(total, done + total / 12);
+        if(done >= total){
+            clearInterval(mockFontTimer);
+            fontRate.reset();
+            set({ fontDownload: null });
+            void get().loadFonts();
+            return;
+        }
+        set({ fontDownload: { fontId, done, total, state: "downloading", transfer: fontRate.push(done, total) } });
+    }, 150);
+}
 
 /**
  * Mock-mode stand-in for the sidecar's `reindex` / `model-changed` events.
@@ -552,6 +604,10 @@ export const useStore = create<State & Actions>((set, get) => ({
     models: {},
     modelDownload: null,
     deletingModelId: null,
+    fonts: {},
+    fontDownload: null,
+    update: { kind: "idle" },
+    settingsSection: null,
     counts: { library: 0, recent: 0, dupes: 0, collections: {} },
 
     settings: {
@@ -575,10 +631,13 @@ export const useStore = create<State & Actions>((set, get) => ({
         pageSize: DEFAULT_PAGE_SIZE,
         searchDebounceMs: DEFAULT_SEARCH_DEBOUNCE_MS,
         textWeight: DEFAULT_TEXT_WEIGHT,
+        matchMode: DEFAULT_MATCH_MODE,
         matchStrictness: DEFAULT_MATCH_STRICTNESS,
         sort: DEFAULT_SORT,
         groupBy: DEFAULT_GROUP_BY,
         sortedSearchKeep: DEFAULT_SORTED_SEARCH_KEEP,
+        recentSearches: [],
+        checkUpdatesOnStartup: DEFAULT_CHECK_UPDATES_ON_STARTUP,
     },
     resolvedTheme: "dark",
     lang: resolveLanguage("auto", systemLanguage()),
@@ -598,6 +657,23 @@ export const useStore = create<State & Actions>((set, get) => ({
 
     setView(v){
         set({ view: v });
+    },
+
+    rememberSearch(q){
+        const text = q.trim();
+        if(text.length < 2){
+            return;
+        }
+        const rest = get().settings.recentSearches.filter((r) => r.toLowerCase() !== text.toLowerCase());
+        get().setSetting("recentSearches", [text, ...rest].slice(0, MAX_RECENT_SEARCHES));
+    },
+
+    forgetSearch(q){
+        get().setSetting("recentSearches", get().settings.recentSearches.filter((r) => r !== q));
+    },
+
+    clearRecentSearches(){
+        get().setSetting("recentSearches", []);
     },
 
     setQuery(q){
@@ -1284,6 +1360,17 @@ export const useStore = create<State & Actions>((set, get) => ({
                         get().showToast(t("toast.downloadFailed", { message: event.message ?? t("toast.unknownError") }));
                     }
                 }
+            }else if(event.type === "font-download"){
+                if(event.state === "downloading"){
+                    set({ fontDownload: { ...event, transfer: fontRate.push(event.done, event.total) } });
+                }else{
+                    fontRate.reset();
+                    set({ fontDownload: null });
+                    void get().loadFonts();
+                    if(event.state === "error"){
+                        get().showToast(t("toast.fontInstallFailed", { message: event.message ?? t("toast.unknownError") }));
+                    }
+                }
             }else if(event.type === "model-deleted"){
                 void get().loadModels();
             }else if(event.type === "model-changed"){
@@ -1467,6 +1554,84 @@ export const useStore = create<State & Actions>((set, get) => ({
         await get().loadModels();
     },
 
+    async loadFonts(){
+        try{
+            const res = await api.fonts();
+            set({
+                fonts: Object.fromEntries(res.fonts.map((f) => [f.id, f])),
+                fontDownload: res.download !== null && res.download.state === "downloading"
+                    ? { ...res.download, transfer: get().fontDownload?.transfer ?? null }
+                    : null,
+            });
+        }catch(err){
+            set({ backendError: describeError(err) });
+        }
+    },
+
+    async installFont(id){
+        if(get().fontDownload !== null){
+            return;
+        }
+        try{
+            if(!(await api.installFont(id))){
+                await get().loadFonts();
+                return;
+            }
+        }catch(err){
+            get().showToast(describeDetail(err));
+            return;
+        }
+        if(isMockMode){
+            simulateFontInstall(set, get, id);
+            return;
+        }
+        set({ fontDownload: { fontId: id, done: 0, total: 0, state: "downloading", transfer: null } });
+    },
+
+    async removeFont(id){
+        try{
+            await api.removeFont(id);
+        }catch(err){
+            get().showToast(describeDetail(err));
+        }
+        await get().loadFonts();
+    },
+
+    async checkForUpdates(){
+        if(get().update.kind === "checking"){
+            return;
+        }
+        set({ update: { kind: "checking" } });
+        try{
+            const res = await api.checkForUpdates();
+            set({
+                update: !res.ok || res.latest === null
+                    ? { kind: "failed" }
+                    : res.available
+                        ? { kind: "available", latest: res.latest, current: res.current }
+                        : { kind: "upToDate" },
+            });
+        }catch{
+            set({ update: { kind: "failed" } });
+        }
+    },
+
+    async openReleasePage(){
+        try{
+            await api.openReleasePage();
+        }catch(err){
+            get().showToast(describeDetail(err));
+        }
+    },
+
+    openSettingsSection(id){
+        set({ view: "settings", settingsSection: id });
+    },
+
+    clearSettingsSection(){
+        set({ settingsSection: null });
+    },
+
     /**
      * Settings live in `~/.config/pic-search/config.toml`, not in this store.
      * `modelId` is the model **answering searches**, which during a swap is
@@ -1487,6 +1652,9 @@ export const useStore = create<State & Actions>((set, get) => ({
             }));
             get().resolveTheme();
             get().resolveLanguage();
+            if(get().settings.checkUpdatesOnStartup){
+                void get().checkForUpdates();
+            }
             // The boot search ran before this landed, with the default order.
             // A saved "Name A–Z" has to show as that, not as newest-first.
             if(before.query.trim() === "" && before.settings.sort !== get().settings.sort){
@@ -1606,7 +1774,7 @@ export const useStore = create<State & Actions>((set, get) => ({
             // returns, so the results on screen are stale the moment either
             // lands. Re-run once, at the end of the drag — a search per slider
             // step would embed the query on the GPU thirty times.
-            if("pageSize" in patch || "textWeight" in patch || "sortedSearchKeep" in patch || "matchStrictness" in patch){
+            if("pageSize" in patch || "textWeight" in patch || "sortedSearchKeep" in patch || "matchMode" in patch || "matchStrictness" in patch){
                 void get().runSearch();
             }
         }, SETTINGS_FLUSH_MS);

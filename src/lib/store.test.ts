@@ -713,3 +713,88 @@ describe("model files", () => {
         }
     });
 });
+
+describe("recent searches", () => {
+    const recents = () => useStore.getState().settings.recentSearches;
+
+    it("keeps the newest first, without case duplicates", () => {
+        const s = useStore.getState();
+        s.rememberSearch("table");
+        s.rememberSearch("masa");
+        s.rememberSearch("  TABLE ");
+        expect(recents()).toEqual(["TABLE", "masa"]);
+    });
+
+    it("ignores one-letter noise and caps the list", () => {
+        const s = useStore.getState();
+        s.rememberSearch("a");
+        s.rememberSearch("   ");
+        expect(recents()).toEqual([]);
+        for(let i = 0; i < 12; i++){
+            s.rememberSearch(`search ${i}`);
+        }
+        expect(recents()).toHaveLength(8);
+        expect(recents()[0]).toBe("search 11");
+    });
+
+    it("forgets one and clears all", () => {
+        const s = useStore.getState();
+        s.rememberSearch("table");
+        s.rememberSearch("masa");
+        s.forgetSearch("table");
+        expect(recents()).toEqual(["masa"]);
+        s.clearRecentSearches();
+        expect(recents()).toEqual([]);
+    });
+});
+
+describe("update check", () => {
+    const answer = (over: Partial<Awaited<ReturnType<typeof api.checkForUpdates>>>) => (
+        vi.spyOn(api, "checkForUpdates").mockResolvedValue({
+            current: "1.0.6", latest: "1.0.7", available: true, ok: true, ...over,
+        })
+    );
+
+    it("starts idle and settles on available, upToDate or failed", async () => {
+        expect(useStore.getState().update).toEqual({ kind: "idle" });
+        answer({});
+        await useStore.getState().checkForUpdates();
+        expect(useStore.getState().update).toEqual({ kind: "available", latest: "1.0.7", current: "1.0.6" });
+        answer({ latest: "1.0.6", available: false });
+        await useStore.getState().checkForUpdates();
+        expect(useStore.getState().update).toEqual({ kind: "upToDate" });
+        answer({ latest: null, available: false, ok: false });
+        await useStore.getState().checkForUpdates();
+        expect(useStore.getState().update).toEqual({ kind: "failed" });
+    });
+
+    it("reads a rejected request as failed", async () => {
+        vi.spyOn(api, "checkForUpdates").mockRejectedValue(new Error("down"));
+        await useStore.getState().checkForUpdates();
+        expect(useStore.getState().update).toEqual({ kind: "failed" });
+    });
+
+    it("runs once at startup only when the setting is on", async () => {
+        const check = answer({});
+        vi.spyOn(api, "getSettings").mockResolvedValue({
+            ...useStore.getState().settings, pendingModelId: null,
+            pendingCoverage: { done: 0, total: 0 }, checkUpdatesOnStartup: false,
+        } as Awaited<ReturnType<typeof api.getSettings>>);
+        await useStore.getState().loadSettings();
+        expect(check).not.toHaveBeenCalled();
+        vi.spyOn(api, "getSettings").mockResolvedValue({
+            ...useStore.getState().settings, pendingModelId: null,
+            pendingCoverage: { done: 0, total: 0 }, checkUpdatesOnStartup: true,
+        } as Awaited<ReturnType<typeof api.getSettings>>);
+        await useStore.getState().loadSettings();
+        expect(check).toHaveBeenCalledTimes(1);
+    });
+
+    it("opens Settings on the requested section", () => {
+        useStore.getState().openSettingsSection("about");
+        expect(useStore.getState().view).toBe("settings");
+        expect(useStore.getState().settingsSection).toBe("about");
+        useStore.getState().clearSettingsSection();
+        expect(useStore.getState().settingsSection).toBeNull();
+    });
+});

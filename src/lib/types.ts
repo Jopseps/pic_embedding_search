@@ -203,6 +203,7 @@ export type ThemePref = "dark" | "light" | "system";
 export type ResolvedTheme = "dark" | "light";
 /** Index into GRID_ROW_HEIGHTS. */
 export type Density = 0 | 1 | 2;
+export type MatchMode = "smart" | "threshold" | "off";
 /** Percent. One of `UI_SCALES` — presets, not a slider, so every layout the
  *  app can be in has been looked at. */
 export type UiScale = number;
@@ -279,9 +280,12 @@ export interface Settings{
      *  has always run; 100 is OCR text only, 0 is visual only. This weights
      *  *ranks*, never scores — cosine and BM25 still share no scale. */
     textWeight: number;
-    /** How far above the pack a photo must score to count as a match, 0–100.
-     *  The floor sits this far from the median score up to the best one. 0
-     *  returns every image, ranked, as the app did before the cutoff. */
+    /** How the visual matches are cut. "smart" picks the cutoff per query,
+     *  "threshold" uses `matchStrictness`, "off" ranks every image. Text (OCR)
+     *  matches are never cut. See `strong_matches` in the sidecar. */
+    matchMode: MatchMode;
+    /** Threshold mode's floor, 0–100: 0 = what an unrelated photo scores for
+     *  the query, 100 = six noise widths above it. */
     matchStrictness: number;
 
     // ---- order -----------------------------------------------------------
@@ -293,7 +297,30 @@ export interface Settings{
      *  date, name or size. Every image is ranked, so without a cut the
      *  "sorted results" would be the whole library. */
     sortedSearchKeep: number;
+
+    /** Newest first, for the search box's panel. Kept in config.toml, on this machine only. */
+    recentSearches: string[];
+
+    /** Ask GitHub for a newer release once per launch. Off: no network call
+     *  until the user clicks "Check for updates". */
+    checkUpdatesOnStartup: boolean;
 }
+
+/** Answer of the sidecar's update check. `ok: false` means it could not ask. */
+export interface UpdateCheck{
+    current: string;
+    latest: string | null;
+    available: boolean;
+    ok: boolean;
+}
+
+/** Where the update check stands. `checking` is only ever a user-visible state. */
+export type UpdateState =
+    | { kind: "idle" }
+    | { kind: "checking" }
+    | { kind: "upToDate" }
+    | { kind: "available"; latest: string; current: string }
+    | { kind: "failed" };
 
 /** The interface language. "auto" follows the system. */
 export type LanguagePref = "auto" | "en" | "tr";
@@ -317,6 +344,28 @@ export interface ModelDownload{
     total: number;
     state: "downloading" | "done" | "error";
     message?: string;
+}
+
+/** A UI font the sidecar can install. `installed` means installed *by the
+ *  app*; a font from the package manager reads false and is never removed. */
+export interface FontStatus{
+    id: string;
+    installed: boolean;
+    sizeBytes: number;
+}
+
+/** A font install in flight, shaped like `ModelDownload`. */
+export interface FontDownload{
+    fontId: string;
+    done: number;
+    total: number;
+    state: "downloading" | "done" | "error";
+    message?: string;
+}
+
+export interface FontsResponse{
+    fonts: FontStatus[];
+    download: FontDownload | null;
 }
 
 export interface ModelsResponse{
@@ -353,6 +402,7 @@ export type SidecarEvent =
     | { type: "model-changed"; modelId: string }
     | ({ type: "model-download" } & ModelDownload)
     | { type: "model-deleted"; modelId: string }
+    | ({ type: "font-download" } & FontDownload)
     /** Every row's date was re-derived under new rules; the order moved. */
     | { type: "dates-refreshed"; count: number }
     /** Raised by the client, not the sidecar: the stream dropped and came back. */
