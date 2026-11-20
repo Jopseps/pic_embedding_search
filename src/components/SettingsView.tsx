@@ -10,6 +10,7 @@ import {
     HOLD_TIMES,
     OCR_ENGINES,
     OCR_LANGUAGES,
+    MATCH_MODES,
     PAGE_SIZES,
     SEARCH_DEBOUNCE_RANGE,
     SELECTION_BORDERS,
@@ -22,9 +23,9 @@ import {
     tintPresetFor,
 } from "../lib/catalog";
 import { fmtCount, fmtDecimal, fmtEta, fmtGb } from "../lib/format";
-import { isFontAvailable } from "../lib/fontProbe";
+import { clearFontProbe, isFontAvailable } from "../lib/fontProbe";
 import { isMockMode } from "../lib/api";
-import { fmtBytes, fmtTransfer } from "../lib/transfer";
+import { fmtBytes, fmtTransfer, type Transfer } from "../lib/transfer";
 import { currentLocale, LANGUAGES, type MessageKey } from "../lib/i18n";
 import { useT } from "../lib/i18n/useT";
 import { Box, Button, Chip, Radio, Slider, Toggle } from "./ui";
@@ -43,7 +44,7 @@ const DENSITIES: { v: Density; label: MessageKey }[] = [
 
 type SectionId =
     | "folders" | "model" | "ocr" | "search" | "order" | "appearance" | "accessibility"
-    | "gestures" | "shortcuts" | "storage";
+    | "gestures" | "shortcuts" | "storage" | "about";
 
 /**
  * The nav rail, and the index the filter box searches. `keywords` exists
@@ -62,6 +63,7 @@ const SECTIONS: { id: SectionId; label: MessageKey; keywords: MessageKey }[] = [
     { id: "gestures", label: "settings.section.gestures", keywords: "settings.keywords.gestures" },
     { id: "shortcuts", label: "settings.section.shortcuts", keywords: "settings.keywords.shortcuts" },
     { id: "storage", label: "settings.section.storage", keywords: "settings.keywords.storage" },
+    { id: "about", label: "settings.section.about", keywords: "settings.keywords.about" },
 ];
 
 function matchesFilter(section: { label: string; keywords: string }, q: string): boolean{
@@ -80,12 +82,30 @@ export const SettingsView = memo(function SettingsView(){
     const t = useT();
     const setView = useStore((s) => s.setView);
     const loadStorage = useStore((s) => s.loadStorage);
-    const [active, setActive] = useState<SectionId>("folders");
+    const target = useStore((s) => s.settingsSection);
+    const clearTarget = useStore((s) => s.clearSettingsSection);
+    const [active, setActive] = useState<SectionId>(
+        SECTIONS.find((s) => s.id === target)?.id ?? "folders",
+    );
     const [filter, setFilter] = useState("");
 
     useEffect(() => {
         void loadStorage();
     }, [loadStorage]);
+
+    // The TopBar's update pill asks for a section; it may arrive while Settings
+    // is already open, so this is an effect and not only the initial state.
+    useEffect(() => {
+        if(target === null){
+            return;
+        }
+        const section = SECTIONS.find((s) => s.id === target);
+        if(section !== undefined){
+            setFilter("");
+            setActive(section.id);
+        }
+        clearTarget();
+    }, [target, clearTarget]);
 
     const hits = useMemo(
         () => SECTIONS.filter((s) => matchesFilter({ label: t(s.label), keywords: t(s.keywords) }, filter)),
@@ -167,6 +187,7 @@ export const SettingsView = memo(function SettingsView(){
                     {shown.includes("gestures") ? <GestureSection /> : null}
                     {shown.includes("shortcuts") ? <ShortcutsSection /> : null}
                     {shown.includes("storage") ? <StorageSection /> : null}
+                    {shown.includes("about") ? <AboutSection /> : null}
                 </div>
             </div>
         </div>
@@ -256,6 +277,44 @@ function FoldersSection(){
     );
 }
 
+/** The bar under a model card or a font row while its files download. */
+function DownloadBar(props: { done: number; total: number; transfer: Transfer | null }){
+    const t = useT();
+    const fraction = props.total > 0 ? Math.min(1, props.done / props.total) : null;
+    return (
+        <div className="mt-[calc(10px*var(--ui-scale))]">
+            <div className="mb-[calc(6px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
+                <span>
+                    {fraction !== null
+                        ? t("models.downloadingPercent", { percent: Math.round(fraction * 100) })
+                        : t("models.downloading")}
+                </span>
+                <span className="text-fg-faint">
+                    {props.total > 0 ? t("format.bytesOf", { done: fmtBytes(props.done), total: fmtBytes(props.total) }) : fmtBytes(props.done)}
+                </span>
+            </div>
+            <div className="relative h-[calc(6px*var(--ui-scale))] overflow-hidden rounded-full bg-hover">
+                {fraction !== null ? (
+                    <div
+                        className="h-full rounded-full bg-accent transition-[width] duration-300"
+                        style={{ width: `${fraction * 100}%` }}
+                    />
+                ) : (
+                    <div
+                        className="absolute inset-y-0 w-[15%] rounded-full bg-accent"
+                        style={{ animation: "shimmer 1.3s linear infinite" }}
+                    />
+                )}
+            </div>
+            {props.transfer !== null ? (
+                <div className="mt-[calc(6px*var(--ui-scale))] text-right text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-faint">
+                    {fmtTransfer(props.transfer)}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
 /** Outline trash can in the button's own colour, so it turns red with the text. */
 function TrashIcon(){
     return (
@@ -319,9 +378,6 @@ function ModelSection(){
                 const info = files[m.id];
                 const downloading = download !== null && download.modelId === m.id;
                 const inUse = selected || m.id === pendingId || info?.pending === true;
-                const fraction = downloading && download.total > 0
-                    ? Math.min(1, download.done / download.total)
-                    : null;
                 return (
                     <div
                         key={m.id}
@@ -387,36 +443,7 @@ function ModelSection(){
                             ) : null}
                         </div>
                         {downloading ? (
-                            <div className="mt-[calc(10px*var(--ui-scale))]">
-                                <div className="mb-[calc(6px*var(--ui-scale))] flex justify-between text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-dim">
-                                    <span>
-                                        {fraction !== null
-                                            ? t("models.downloadingPercent", { percent: Math.round(fraction * 100) })
-                                            : t("models.downloading")}
-                                    </span>
-                                    <span className="text-fg-faint">
-                                        {download.total > 0 ? t("format.bytesOf", { done: fmtBytes(download.done), total: fmtBytes(download.total) }) : fmtBytes(download.done)}
-                                    </span>
-                                </div>
-                                <div className="relative h-[calc(6px*var(--ui-scale))] overflow-hidden rounded-full bg-hover">
-                                    {fraction !== null ? (
-                                        <div
-                                            className="h-full rounded-full bg-accent transition-[width] duration-300"
-                                            style={{ width: `${fraction * 100}%` }}
-                                        />
-                                    ) : (
-                                        <div
-                                            className="absolute inset-y-0 w-[15%] rounded-full bg-accent"
-                                            style={{ animation: "shimmer 1.3s linear infinite" }}
-                                        />
-                                    )}
-                                </div>
-                                {download.transfer !== null ? (
-                                    <div className="mt-[calc(6px*var(--ui-scale))] text-right text-[calc(11.5px*var(--ui-scale))] tabular-nums text-fg-faint">
-                                        {fmtTransfer(download.transfer)}
-                                    </div>
-                                ) : null}
-                            </div>
+                            <DownloadBar done={download.done} total={download.total} transfer={download.transfer} />
                         ) : null}
                     </div>
                 );
@@ -847,6 +874,7 @@ function SearchSection(){
     const debounce = useStore((s) => s.settings.searchDebounceMs);
     const textWeight = useStore((s) => s.settings.textWeight);
     const strictness = useStore((s) => s.settings.matchStrictness);
+    const matchMode = useStore((s) => s.settings.matchMode);
     const set = useStore((s) => s.setSetting);
 
     return (
@@ -886,19 +914,31 @@ function SearchSection(){
             </div>
 
             <Label>{t("search.strictness")}</Label>
-            <div className="mb-[calc(6px*var(--ui-scale))]">
-                <Slider
-                    label={t("search.strictnessLabel")}
-                    value={strictness}
-                    min={0}
-                    max={100}
-                    step={5}
-                    readout={strictness === 0 ? t("search.strictnessOff") : strictness === 50 ? t("search.balanced") : t("unit.percent", { n: strictness })}
-                    onChange={(v) => set("matchStrictness", v)}
-                />
+            <div className="mb-[calc(6px*var(--ui-scale))] flex gap-[calc(6px*var(--ui-scale))]">
+                {MATCH_MODES.map((m) => (
+                    <Chip
+                        key={m}
+                        label={t(`search.matchMode.${m}`)}
+                        active={matchMode === m}
+                        onClick={() => set("matchMode", m)}
+                    />
+                ))}
             </div>
+            {matchMode === "threshold" ? (
+                <div className="mb-[calc(6px*var(--ui-scale))]">
+                    <Slider
+                        label={t("search.strictnessLabel")}
+                        value={strictness}
+                        min={5}
+                        max={100}
+                        step={5}
+                        readout={t("unit.percent", { n: strictness })}
+                        onChange={(v) => set("matchStrictness", v)}
+                    />
+                </div>
+            ) : null}
             <div className="mb-5 text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
-                {t("search.strictnessNote")}
+                {t(`search.matchNote.${matchMode}`)}
             </div>
 
             <Label>{t("search.textVsVisual")}</Label>
@@ -1046,13 +1086,23 @@ function AppearanceSection(){
     const setDensity = useStore((s) => s.setDensity);
     const fontId = useStore((s) => s.settings.fontId);
     const setFont = useStore((s) => s.setFont);
+    const fontFiles = useStore((s) => s.fonts);
+    const fontDownload = useStore((s) => s.fontDownload);
+    const loadFonts = useStore((s) => s.loadFonts);
+    const installFont = useStore((s) => s.installFont);
+    const removeFont = useStore((s) => s.removeFont);
 
-    // Probed once per mount: the answer cannot change while the window is open,
-    // and each probe is two canvas measurements.
-    const installed = useMemo(
-        () => new Map(FONTS.map((f) => [f.id, isFontAvailable(f.stack)])),
-        [],
-    );
+    useEffect(() => {
+        void loadFonts();
+    }, [loadFonts]);
+
+    // Each probe is two canvas measurements, so only when the files change: an
+    // install or a remove. The webview usually sees a new font only after a
+    // restart, which is what the "restart to use it" row is for.
+    const installed = useMemo(() => {
+        clearFontProbe();
+        return new Map(FONTS.map((f) => [f.id, isFontAvailable(f.stack)]));
+    }, [fontFiles]);
 
     return (
         <Group title={t("appearance.title")}>
@@ -1092,34 +1142,78 @@ function AppearanceSection(){
                 {FONTS.map((f) => {
                     const selected = f.id === fontId;
                     const here = installed.get(f.id) ?? true;
+                    // Ours = files the app installed; `here` = the webview can use it.
+                    const status = fontFiles[f.id];
+                    const ours = status?.installed === true;
+                    const downloading = fontDownload !== null && fontDownload.fontId === f.id;
                     return (
-                        <button
+                        <div
                             key={f.id}
-                            type="button"
-                            onClick={() => setFont(f.id)}
                             className={
-                                "mb-[calc(5px*var(--ui-scale))] flex w-full cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] rounded-lg px-3 py-[calc(9px*var(--ui-scale))] text-left transition-colors " +
+                                "mb-[calc(5px*var(--ui-scale))] rounded-lg px-3 py-[calc(9px*var(--ui-scale))] transition-colors " +
                                 (selected ? "bg-accent-muted" : "hover:bg-hover")
                             }
                         >
-                            <Radio selected={selected} />
-                            <div className="min-w-0">
-                                <div
-                                    className="flex items-center gap-2 text-[calc(12.5px*var(--ui-scale))]"
-                                    style={{ fontFamily: here ? f.stack : undefined }}
+                            <div className="flex items-center gap-[calc(10px*var(--ui-scale))]">
+                                <button
+                                    type="button"
+                                    onClick={() => setFont(f.id)}
+                                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-[calc(10px*var(--ui-scale))] border-none bg-transparent p-0 text-left text-fg"
                                 >
-                                    {f.labelKey === undefined ? f.label : t(f.labelKey)}
-                                    {!here ? (
-                                        <span className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px font-sans text-[calc(10px*var(--ui-scale))] text-fg-faint">
-                                            {t("appearance.notInstalled")}
-                                        </span>
-                                    ) : null}
-                                </div>
-                                <div className="mt-px font-mono text-[calc(11px*var(--ui-scale))] text-fg-faint">
-                                    {f.descKey !== undefined ? t(f.descKey) : here ? f.desc : t("appearance.installCommand", { command: f.desc })}
-                                </div>
+                                    <Radio selected={selected} />
+                                    <div className="min-w-0">
+                                        <div
+                                            className="flex items-center gap-2 text-[calc(12.5px*var(--ui-scale))]"
+                                            style={{ fontFamily: here ? f.stack : undefined }}
+                                        >
+                                            {f.labelKey === undefined ? f.label : t(f.labelKey)}
+                                            {!here && !ours ? (
+                                                <span className="rounded bg-hover px-[calc(5px*var(--ui-scale))] py-px font-sans text-[calc(10px*var(--ui-scale))] text-fg-faint">
+                                                    {t("appearance.notInstalled")}
+                                                </span>
+                                            ) : null}
+                                        </div>
+                                        <div className="mt-px font-mono text-[calc(11px*var(--ui-scale))] text-fg-faint">
+                                            {f.descKey !== undefined
+                                                ? t(f.descKey)
+                                                : ours
+                                                    ? (here ? t("appearance.fontInstalledByApp", { size: fmtBytes(status.sizeBytes) }) : t("appearance.fontRestart"))
+                                                    : here
+                                                        ? f.desc
+                                                        : status !== undefined
+                                                            ? fmtBytes(status.sizeBytes)
+                                                            : t("appearance.installCommand", { command: f.desc })}
+                                        </div>
+                                    </div>
+                                </button>
+                                {status !== undefined && !downloading ? (
+                                    ours ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => void removeFont(f.id)}
+                                            disabled={selected}
+                                            title={t(selected ? "appearance.removeFontInUse" : "appearance.removeFontTitle")}
+                                            className="flex flex-shrink-0 cursor-pointer items-center gap-[calc(6px*var(--ui-scale))] rounded-[calc(7px*var(--ui-scale))] border border-danger bg-danger-muted px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-danger hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:opacity-40"
+                                        >
+                                            <TrashIcon />
+                                            {t("appearance.removeFont")}
+                                        </button>
+                                    ) : !here ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => void installFont(f.id)}
+                                            disabled={fontDownload !== null}
+                                            className="flex-shrink-0 cursor-pointer rounded-[calc(7px*var(--ui-scale))] border border-edge bg-transparent px-[calc(12px*var(--ui-scale))] py-[calc(6px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                        >
+                                            {t("appearance.installFont")}
+                                        </button>
+                                    ) : null
+                                ) : null}
                             </div>
-                        </button>
+                            {downloading ? (
+                                <DownloadBar done={fontDownload.done} total={fontDownload.total} transfer={fontDownload.transfer} />
+                            ) : null}
+                        </div>
                     );
                 })}
             </div>
@@ -1329,6 +1423,55 @@ function StorageSection(){
             ) : (
                 <Button onClick={() => void clearCache()}>{t("storage.clear")}</Button>
             )}
+        </Group>
+    );
+}
+
+function AboutSection(){
+    const t = useT();
+    const update = useStore((s) => s.update);
+    const check = useStore((s) => s.checkForUpdates);
+    const openRelease = useStore((s) => s.openReleasePage);
+    const onStartup = useStore((s) => s.settings.checkUpdatesOnStartup);
+    const setSetting = useStore((s) => s.setSetting);
+
+    return (
+        <Group title={t("about.title")}>
+            <div className="mb-3 text-[calc(12.5px*var(--ui-scale))]">
+                {t("about.version", { version: __APP_VERSION__ })}
+            </div>
+
+            <div className="mb-3 flex flex-wrap items-center gap-[calc(10px*var(--ui-scale))]">
+                <Button onClick={() => void check()}>
+                    {update.kind === "checking" ? t("about.checking") : t("about.check")}
+                </Button>
+                {update.kind === "available" ? (
+                    <Button variant="primary" onClick={() => void openRelease()}>{t("about.openRelease")}</Button>
+                ) : null}
+            </div>
+
+            <div role="status" className="mb-5 min-h-[calc(18px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] text-fg-dim">
+                {update.kind === "upToDate" ? t("about.upToDate") : null}
+                {update.kind === "failed" ? t("about.failed") : null}
+                {update.kind === "available"
+                    ? t("about.available", { latest: update.latest, current: update.current })
+                    : null}
+            </div>
+
+            <div className="flex items-center justify-between border-b border-edge pb-[calc(10px*var(--ui-scale))]">
+                <div className="min-w-0 pr-4">
+                    <div className="text-[calc(12.5px*var(--ui-scale))]">{t("about.startup")}</div>
+                    <div className="mt-px text-[calc(11.5px*var(--ui-scale))] leading-[1.5] text-fg-faint">
+                        {t("about.startupNote")}
+                    </div>
+                </div>
+                <Toggle
+                    label=""
+                    ariaLabel={t("about.startup")}
+                    on={onStartup}
+                    onClick={() => setSetting("checkUpdatesOnStartup", !onStartup)}
+                />
+            </div>
         </Group>
     );
 }

@@ -39,6 +39,74 @@ function useDismiss(open: boolean, close: () => void, ref: React.RefObject<HTMLE
  *  position is state up there — and the top bar depends on none of it. */
 export const TopBar = memo(function TopBar(){
     const t = useT();
+    const setView = useStore((s) => s.setView);
+    const view = useStore((s) => s.view);
+
+    // Search in the middle, a wide pill like Google Photos; sort on its left and
+    // the progress pills on its right. The sides share what is left equally
+    // (and never squeeze below their content), so the pill stays centred.
+    return (
+        <div className="flex h-[calc(60px*var(--ui-scale))] flex-shrink-0 items-start gap-[calc(14px*var(--ui-scale))] border-b border-edge bg-panel px-4 pt-[calc(8px*var(--ui-scale))]">
+            <div className="flex h-[calc(44px*var(--ui-scale))] min-w-fit flex-[1_1_0%] items-center">
+                <SortMenu />
+            </div>
+
+            <SearchBox />
+
+            <div className="flex h-[calc(44px*var(--ui-scale))] min-w-fit flex-[1_1_0%] items-center justify-end gap-[calc(14px*var(--ui-scale))]">
+                <UpdatePill />
+
+                <ModelDownloadPill />
+
+                <IndexingIndicator />
+
+                <button
+                    type="button"
+                    onClick={() => setView(view === "settings" ? "library" : "settings")}
+                    aria-label={t("topbar.settings")}
+                    title={t("topbar.settings")}
+                    className={
+                        "flex h-[calc(36px*var(--ui-scale))] w-[calc(36px*var(--ui-scale))] flex-shrink-0 cursor-pointer items-center justify-center rounded-full hover:bg-hover " +
+                        (view === "settings" ? "bg-accent-muted text-accent-text" : "text-fg-dim")
+                    }
+                >
+                    <Icon name="settings" size={22} />
+                </button>
+            </div>
+        </div>
+    );
+});
+
+/** Only while a newer release is known. Opens Settings on About, where the
+ *  release page button is. Its own subscription, so the memo'd bar stays still. */
+function UpdatePill(){
+    const t = useT();
+    const latest = useStore((s) => (s.update.kind === "available" ? s.update.latest : null));
+    const open = useStore((s) => s.openSettingsSection);
+    if(latest === null){
+        return null;
+    }
+    return (
+        <button
+            type="button"
+            onClick={() => open("about")}
+            title={t("topbar.updateTitle", { version: latest })}
+            className="flex-shrink-0 cursor-pointer whitespace-nowrap rounded-full border-none bg-accent-muted px-[calc(12px*var(--ui-scale))] py-[calc(5px*var(--ui-scale))] text-[calc(12px*var(--ui-scale))] font-semibold text-accent-text hover:opacity-80"
+        >
+            {t("topbar.updatePill", { version: latest })}
+        </button>
+    );
+}
+
+/**
+ * The search pill. Clicking it drops a panel open under the text, on the same
+ * surface, listing the recent searches; typing narrows them to the ones that
+ * contain the text. A search is remembered when it is submitted (Enter, or a
+ * row picked) or when the panel is dismissed with something typed — the live
+ * results already run as you type, so "done" is the only moment worth keeping.
+ */
+function SearchBox(){
+    const t = useT();
     const query = useStore((s) => s.query);
     const searching = useStore((s) => s.searching);
     // A re-index no longer disables search: the outgoing model keeps answering
@@ -48,99 +116,208 @@ export const TopBar = memo(function TopBar(){
     // A first download that failed (offline): nothing to search with until
     // the Download button in Settings fetches it.
     const modelMissing = useStore((s) => s.models[s.settings.modelId]?.downloaded === false) && modelPct === null;
+    const recents = useStore((s) => s.settings.recentSearches);
     const setQuery = useStore((s) => s.setQuery);
     const clearQuery = useStore((s) => s.clearQuery);
     const saveSearch = useStore((s) => s.saveCurrentSearch);
-    const setView = useStore((s) => s.setView);
-    const view = useStore((s) => s.view);
+    const remember = useStore((s) => s.rememberSearch);
+    const forget = useStore((s) => s.forgetSearch);
+    const clearRecents = useStore((s) => s.clearRecentSearches);
     const inputRef = useRef<HTMLInputElement>(null);
+    const rootRef = useRef<HTMLDivElement>(null);
+    const [open, setOpen] = useState(false);
+    const [active, setActive] = useState(-1);
+    const disabled = modelPct !== null || modelMissing;
+
+    const typed = query.trim().toLowerCase();
+    const rows = typed === ""
+        ? recents
+        : recents.filter((r) => r.toLowerCase().includes(typed) && r.toLowerCase() !== typed);
+    const showPanel = open && !disabled && rows.length > 0;
+
+    const dismiss = useCallback(() => {
+        setOpen(false);
+        setActive(-1);
+        remember(useStore.getState().query);
+    }, [remember]);
+    useDismiss(open, dismiss, rootRef);
 
     // `/` focuses search from anywhere; App owns the key handler and pokes here.
+    // The first focus at start-up does not open the panel — only a click or `/` does.
     useEffect(() => {
-        const focus = () => inputRef.current?.focus();
+        const focus = () => {
+            inputRef.current?.focus();
+            setOpen(true);
+        };
         window.addEventListener("picsearch:focus-search", focus);
-        const timer = setTimeout(focus, 60);
+        const timer = setTimeout(() => inputRef.current?.focus(), 60);
         return () => {
             window.removeEventListener("picsearch:focus-search", focus);
             clearTimeout(timer);
         };
     }, []);
 
+    const pick = (text: string) => {
+        setQuery(text);
+        remember(text);
+        setOpen(false);
+        setActive(-1);
+    };
+
+    const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if(e.key === "ArrowDown" || e.key === "ArrowUp"){
+            e.preventDefault();
+            if(!open){
+                setOpen(true);
+                return;
+            }
+            if(rows.length > 0){
+                const step = e.key === "ArrowDown" ? 1 : -1;
+                // -1 is the input itself, so the arrows loop through it.
+                setActive((i) => {
+                    const next = i + step;
+                    return next >= rows.length ? -1 : next < -1 ? rows.length - 1 : next;
+                });
+            }
+        }else if(e.key === "Enter"){
+            const row = rows[active];
+            if(showPanel && row !== undefined){
+                pick(row);
+            }else{
+                remember(query);
+                setOpen(false);
+            }
+        }
+    };
+
     return (
-        <div className="flex h-[calc(56px*var(--ui-scale))] flex-shrink-0 items-center gap-[calc(14px*var(--ui-scale))] border-b border-edge bg-panel px-4">
-            <div className="flex h-[calc(34px*var(--ui-scale))] w-[calc(280px*var(--ui-scale))] max-w-[44vw] flex-shrink-0 items-center gap-2 rounded-lg border border-edge bg-raised px-[calc(10px*var(--ui-scale))]">
-                <Icon name="search" size={18} className="text-fg-faint" />
-                <input
-                    ref={inputRef}
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    // First run: the serving model is still downloading, and a query has nothing to embed with.
-                    disabled={modelPct !== null || modelMissing}
-                    placeholder={
-                        modelPct !== null
-                            ? t("topbar.searchPlaceholderModel", { percent: modelPct })
-                            : modelMissing
-                            ? t("topbar.searchPlaceholderNoModel")
-                            : t(reindexActive ? "topbar.searchPlaceholderReindex" : "topbar.searchPlaceholder")
-                    }
-                    className="min-w-0 flex-1 border-none bg-transparent text-[calc(13px*var(--ui-scale))] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
-                />
-                {searching ? (
-                    <span
-                        className="h-[calc(9px*var(--ui-scale))] w-[calc(9px*var(--ui-scale))] flex-shrink-0 rounded-full border-[calc(1.5px*var(--ui-scale))] border-edge border-t-accent"
-                        style={{ animation: "spin 0.7s linear infinite" }}
-                    />
-                ) : null}
-                {query !== "" ? (
-                    <button
-                        type="button"
-                        onClick={clearQuery}
-                        className="flex cursor-pointer rounded-full p-[calc(2px*var(--ui-scale))] text-fg-faint hover:bg-hover hover:text-fg"
-                        aria-label={t("topbar.clearSearch")}
-                        title={t("topbar.clearSearch")}
-                    >
-                        <Icon name="close" size={16} />
-                    </button>
-                ) : null}
-            </div>
-
-            {/* Saving stores the filters too, so it only appears once there is
-                a query to attach them to. */}
-            {query.trim() !== "" ? (
-                <button
-                    type="button"
-                    onClick={() => void saveSearch()}
-                    title={t("topbar.saveTitle")}
-                    aria-label={t("topbar.saveAria")}
-                    className="flex h-[calc(32px*var(--ui-scale))] w-[calc(32px*var(--ui-scale))] flex-shrink-0 cursor-pointer items-center justify-center rounded-full text-fg-dim hover:bg-hover hover:text-fg"
-                >
-                    <Icon name="bookmark_add" />
-                </button>
-            ) : null}
-
-            <SortMenu />
-
-            <div className="flex-1" />
-
-            <ModelDownloadPill />
-
-            <IndexingIndicator />
-
-            <button
-                type="button"
-                onClick={() => setView(view === "settings" ? "library" : "settings")}
-                aria-label={t("topbar.settings")}
-                title={t("topbar.settings")}
+        <div
+            ref={rootRef}
+            className="relative h-[calc(44px*var(--ui-scale))] min-w-0 flex-[0_1_calc(640px*var(--ui-scale))]"
+        >
+            <div
                 className={
-                    "flex h-[calc(36px*var(--ui-scale))] w-[calc(36px*var(--ui-scale))] flex-shrink-0 cursor-pointer items-center justify-center rounded-full hover:bg-hover " +
-                    (view === "settings" ? "bg-accent-muted text-accent-text" : "text-fg-dim")
+                    "absolute inset-x-0 top-0 z-40 overflow-hidden rounded-[calc(22px*var(--ui-scale))] transition-[background-color,box-shadow] " +
+                    // A trace of the text colour mixed in: lighter on dark themes, darker on light ones.
+                    (open
+                        ? "bg-[color-mix(in_oklab,var(--surface-raised),var(--color-fg)_9%)] shadow-[var(--shadow-pop)]"
+                        : "bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--color-fg)_4%)] focus-within:bg-[color-mix(in_oklab,var(--surface-raised),var(--color-fg)_9%)] focus-within:shadow-[var(--shadow-pop)]")
                 }
             >
-                <Icon name="settings" size={22} />
-            </button>
+                <div className="flex h-[calc(44px*var(--ui-scale))] items-center gap-[calc(12px*var(--ui-scale))] pr-[calc(10px*var(--ui-scale))] pl-[calc(16px*var(--ui-scale))]">
+                    <Icon name="search" size={22} className="text-fg-dim" />
+                    <input
+                        ref={inputRef}
+                        value={query}
+                        onChange={(e) => {
+                            setQuery(e.target.value);
+                            setOpen(true);
+                            setActive(-1);
+                        }}
+                        onClick={() => setOpen(true)}
+                        onKeyDown={onKeyDown}
+                        role="combobox"
+                        aria-expanded={showPanel}
+                        aria-controls="search-recents"
+                        // First run: the serving model is still downloading, and a query has nothing to embed with.
+                        disabled={disabled}
+                        placeholder={
+                            modelPct !== null
+                                ? t("topbar.searchPlaceholderModel", { percent: modelPct })
+                                : modelMissing
+                                ? t("topbar.searchPlaceholderNoModel")
+                                : t(reindexActive ? "topbar.searchPlaceholderReindex" : "topbar.searchPlaceholder")
+                        }
+                        className="search-input min-w-0 flex-1 border-none bg-transparent text-[calc(14.5px*var(--ui-scale))] text-fg outline-none placeholder:text-fg-faint disabled:cursor-not-allowed"
+                    />
+                    {searching ? (
+                        <span
+                            className="h-[calc(11px*var(--ui-scale))] w-[calc(11px*var(--ui-scale))] flex-shrink-0 rounded-full border-[calc(1.5px*var(--ui-scale))] border-edge border-t-accent"
+                            style={{ animation: "spin 0.7s linear infinite" }}
+                        />
+                    ) : null}
+                    {/* Saving stores the filters too, so it only appears once there is
+                        a query to attach them to. */}
+                    {query.trim() !== "" ? (
+                        <button
+                            type="button"
+                            onClick={() => void saveSearch()}
+                            title={t("topbar.saveTitle")}
+                            aria-label={t("topbar.saveAria")}
+                            className="flex cursor-pointer rounded-full p-[calc(6px*var(--ui-scale))] text-fg-dim hover:bg-fg/[0.1] hover:text-fg"
+                        >
+                            <Icon name="bookmark_add" />
+                        </button>
+                    ) : null}
+                    {query !== "" ? (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                clearQuery();
+                                inputRef.current?.focus();
+                            }}
+                            className="flex cursor-pointer rounded-full p-[calc(6px*var(--ui-scale))] text-fg-dim hover:bg-fg/[0.1] hover:text-fg"
+                            aria-label={t("topbar.clearSearch")}
+                            title={t("topbar.clearSearch")}
+                        >
+                            <Icon name="close" />
+                        </button>
+                    ) : null}
+                </div>
+
+                {showPanel ? (
+                    <div
+                        id="search-recents"
+                        role="listbox"
+                        className="border-t border-edge pb-[calc(8px*var(--ui-scale))]"
+                        style={{ animation: "drop-in 140ms ease-out" }}
+                    >
+                        {typed === "" ? (
+                            <div className="flex items-center justify-between px-[calc(18px*var(--ui-scale))] pt-[calc(10px*var(--ui-scale))] pb-[calc(4px*var(--ui-scale))] text-[calc(11.5px*var(--ui-scale))] text-fg-faint">
+                                <span>{t("topbar.recent")}</span>
+                                <button
+                                    type="button"
+                                    onClick={clearRecents}
+                                    className="cursor-pointer rounded px-1 text-fg-faint hover:text-fg"
+                                >
+                                    {t("topbar.recentClear")}
+                                </button>
+                            </div>
+                        ) : null}
+                        {rows.map((r, i) => (
+                            <div
+                                key={r}
+                                role="option"
+                                aria-selected={i === active}
+                                onMouseEnter={() => setActive(i)}
+                                className={
+                                    "group flex cursor-pointer items-center gap-[calc(14px*var(--ui-scale))] px-[calc(16px*var(--ui-scale))] py-[calc(9px*var(--ui-scale))] " +
+                                    (i === active ? "bg-fg/[0.08]" : "")
+                                }
+                                onClick={() => pick(r)}
+                            >
+                                <Icon name="history" size={20} className="text-fg-faint" />
+                                <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[calc(13.5px*var(--ui-scale))] text-fg">{r}</span>
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        forget(r);
+                                    }}
+                                    aria-label={t("topbar.recentRemove", { text: r })}
+                                    title={t("topbar.recentRemove", { text: r })}
+                                    className="flex cursor-pointer rounded-full p-[calc(4px*var(--ui-scale))] text-fg-faint opacity-0 hover:bg-fg/[0.1] hover:text-fg group-hover:opacity-100 focus:opacity-100"
+                                >
+                                    <Icon name="close" size={16} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                ) : null}
+            </div>
         </div>
     );
-});
+}
 
 /**
  * The order of the grid. Browsing writes the choice to config.toml; with a
