@@ -17,9 +17,11 @@
 //! finds the `picsearch` package on `sys.path` without an install. An editable
 //! install would record this launch's mount path and break on the next one.
 //!
-//! The venv is keyed on a hash of `pyproject.toml` + `uv.lock`. A release that
-//! changes neither starts straight away; one that changes either re-syncs, and
-//! uv only touches the packages that moved.
+//! The venv is keyed on a hash of `pyproject.toml` + `uv.lock`, minus the app's
+//! own `version` line in each (the project is never installed, so a version
+//! bump alone changes nothing in the venv). A release that changes no
+//! dependency starts straight away; one that does re-syncs, and uv only
+//! touches the packages that moved.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -162,15 +164,32 @@ impl Runtime{
     }
 
     /// FNV-1a over the two files that decide what the venv contains. Stable
-    /// across Rust versions, unlike `DefaultHasher`.
+    /// across Rust versions, unlike `DefaultHasher`. The app's own `version`
+    /// line is left out (`[project]` in pyproject, the `picsearch` package in
+    /// uv.lock): the venv is synced with `--no-install-project`, so a release
+    /// that only bumps it changes nothing in the venv and must not re-run setup.
+    /// Every other package's version stays in, or a torch upgrade would hide.
     fn fingerprint(&self) -> Result<String, String>{
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for name in ["pyproject.toml", "uv.lock"]{
-            let bytes = std::fs::read(self.source.join(name))
+            let text = std::fs::read_to_string(self.source.join(name))
                 .map_err(|e| format!("could not read {name}: {e}"))?;
-            for b in bytes{
-                hash ^= u64::from(b);
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            // shortcut: line-based, not a toml parser; fine while both files keep their uv-written shape.
+            let (mut table, mut prev) = ("", "");
+            for line in text.split_inclusive('\n'){
+                let t = line.trim();
+                if t.starts_with('['){
+                    table = t;
+                }
+                let own = if name == "uv.lock"{ prev == "name = \"picsearch\"" }else{ table == "[project]" };
+                prev = t;
+                if own && t.starts_with("version ="){
+                    continue;
+                }
+                for b in line.bytes(){
+                    hash ^= u64::from(b);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
             }
         }
         Ok(format!("{hash:016x}"))
@@ -557,6 +576,36 @@ mod tests{
         assert_eq!(rt.fingerprint().unwrap(), "fbb3823fd29ec6fe");
         std::fs::write(s.0.join("source").join("uv.lock"), "xyZ").unwrap();
         assert_ne!(rt.fingerprint().unwrap(), "fbb3823fd29ec6fe");
+    }
+
+    #[test]
+    fn only_the_apps_own_version_is_ignored_by_the_fingerprint(){
+        let pyproject = "[project]\nname = \"picsearch\"\nversion = \"1.0.6\"\ndependencies = [\n    \"torch>=2.9\",\n]\n\n[tool.uv]\nfoo = 1\n";
+        let lock = "version = 1\n\n[[package]]\nname = \"picsearch\"\nversion = \"1.0.6\"\nsource = { editable = \".\" }\n\n[[package]]\nname = \"torch\"\nversion = \"2.9.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n";
+        let s = Scratch::new("own-version");
+        let rt = s.runtime();
+        let write = |p: &str, l: &str|{
+            std::fs::write(s.0.join("source").join("pyproject.toml"), p).unwrap();
+            std::fs::write(s.0.join("source").join("uv.lock"), l).unwrap();
+        };
+        write(pyproject, lock);
+        let marker = serde_json::to_string(&State{ fingerprint: rt.fingerprint().unwrap(), torch: "cpu".into() }).unwrap();
+        std::fs::write(s.0.join("root").join(STATE_FILE), marker).unwrap();
+        std::fs::create_dir_all(rt.python().parent().unwrap()).unwrap();
+        std::fs::write(rt.python(), "").unwrap();
+        assert!(rt.is_current().unwrap());
+
+        write(&pyproject.replace("1.0.6", "1.0.7"), &lock.replace("picsearch\"\nversion = \"1.0.6", "picsearch\"\nversion = \"1.0.7"));
+        assert!(rt.is_current().unwrap(), "own version bumped in both files");
+
+        write(&pyproject.replace("torch>=2.9", "torch>=2.10"), lock);
+        assert!(!rt.is_current().unwrap(), "a dependency changed");
+
+        write(pyproject, &lock.replace("2.9.0", "2.9.1"));
+        assert!(!rt.is_current().unwrap(), "torch's locked version changed");
+
+        write(&pyproject.replace("foo = 1", "version = \"9\""), lock);
+        assert!(!rt.is_current().unwrap(), "a version line outside [project] still counts");
     }
 
     #[test]
