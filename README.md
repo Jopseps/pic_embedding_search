@@ -4,9 +4,9 @@ Local semantic search over your own photos and screenshots. Point it at folders,
 
 Runs entirely on your machine. No cloud, no account, no telemetry. Images never leave the computer they are on.
 
-![PicSearch showing a photo library](docs/screenshot.png)
+![PicSearch showing a photo library](docs/screenshot.webp)
 
-![Searching for "flower" returns only the flowers](docs/screenshot-search.png)
+![Searching for "flower" returns only the flowers](docs/screenshot-search.webp)
 
 - **Semantic image search** — SigLIP 2 embeddings computed on your GPU
 - **Text inside screenshots** — an OCR pass makes printed words searchable, fused with visual similarity
